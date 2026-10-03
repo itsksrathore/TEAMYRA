@@ -39,7 +39,8 @@ This checklist is updated as implementation lands.
 - [x] Persistent dependency task graph with cycle validation and MCP create/start/status/cancel tools.
 - [x] Parent/child worker lineage for graph nodes and failover chains.
 - [x] Bounded retry/failover loop for eligible provider/worker failures.
-- [ ] Automated reviewer/tester loops.
+- [x] Bounded automated reviewer/fixer loop with explicit PASS/CHANGES marker.
+- [ ] Dedicated tester loop / test-policy stage.
 - [x] Approval gates for sensitive/destructive graph nodes via MCP approve/deny.
 - [ ] Parallel graph execution after Phase 4 worktree merge/rebase semantics are implemented.
 
