@@ -17,7 +17,7 @@ This checklist is updated as implementation lands.
 - [x] Existing local login detection.
 - [x] Agent/account cards.
 - [x] Codex Add Account flow (isolated CODEX_HOME profile + provider login launch).
-- [ ] Claude Add Account flow after profile-isolation verification.
+- [x] Claude Add Account flow using documented CLAUDE_CONFIG_DIR isolation.
 - [ ] Antigravity Add Account flow after profile-isolation verification.
 - [x] Live jobs list/status.
 - [x] Live job transcript streaming.
@@ -27,7 +27,7 @@ This checklist is updated as implementation lands.
 ## Phase 2 — Multi-account Engine
 - [ ] Dynamic provider profiles.
 - [ ] N Codex profiles.
-- [ ] Verified Claude profile isolation.
+- [x] Verified Claude profile isolation (official CLAUDE_CONFIG_DIR support).
 - [ ] Verified Antigravity profile isolation.
 - [ ] Account-aware router.
 - [ ] Per-account model/effort.
