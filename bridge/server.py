@@ -1145,13 +1145,8 @@ def tool_call(name, a):
             a.get("project_path"),
         )
     if name == "workspace_tool":
-        service = workspace_tools.WorkspaceToolService(ROOT)
-        service.configure(
+        return workspace_tools.WorkspaceToolService(ROOT).execute_in_workspace(
             a["project_path"],
-            trusted=True,
-            actor="teamyra-mcp",
-        )
-        return service.execute(
             a["tool"],
             a.get("args"),
             trusted=True,
