@@ -6,6 +6,7 @@ let terminal = null;
 let fitAddon = null;
 let terminalSessionId = null;
 let terminalResizeObserver = null;
+let terminalContextKey = '';
 
 let selectedJob = null;
 let transcriptOffset = 0;
@@ -233,9 +234,18 @@ async function openTerminal(options = {}) {
   panel.hidden = false;
   ensureTerminalView();
 
-  if (terminalSessionId) {
+  const requestedKey = options.providerId
+    ? options.providerId + ':' + (options.profileId || 'native')
+    : 'shell';
+
+  if (terminalSessionId && terminalContextKey === requestedKey) {
     terminal.focus();
     return;
+  }
+  if (terminalSessionId && terminalContextKey !== requestedKey) {
+    try { await window.teamyra.closeTerminal(terminalSessionId); } catch {}
+    terminalSessionId = null;
+    terminal.clear();
   }
 
   const job = selectedJobData();
@@ -252,6 +262,7 @@ async function openTerminal(options = {}) {
   }
 
   terminalSessionId = result.id;
+  terminalContextKey = requestedKey;
   document.querySelector('#terminalLabel').textContent =
     (options.label || ('Terminal · ' + (job?.label || 'TEAMYRA'))) + ' · ' + result.cwd;
   try {
@@ -266,6 +277,7 @@ async function closeTerminal() {
     try { await window.teamyra.closeTerminal(terminalSessionId); } catch {}
   }
   terminalSessionId = null;
+  terminalContextKey = '';
   if (terminal) terminal.clear();
   document.querySelector('#terminalPanel').hidden = true;
 }
@@ -278,6 +290,7 @@ window.teamyra.onTerminalExit(({ id, exitCode }) => {
   if (!terminal || id !== terminalSessionId) return;
   terminal.write('\r\n\x1b[90m[process exited ' + exitCode + ']\x1b[0m\r\n');
   terminalSessionId = null;
+  terminalContextKey = '';
 });
 
 document.querySelector('#openTerminal').addEventListener('click', () => {
