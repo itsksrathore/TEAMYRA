@@ -42,10 +42,10 @@ function readTranscript(jobId, offset = 0) {
   if (!/^[A-Za-z0-9._-]+$/.test(jobId || '')) throw new Error('Invalid job id');
   const file = path.join(JOBS, jobId, 'transcript.md');
   if (!fs.existsSync(file)) return { text: '', next: 0 };
-  const data = fs.readFileSync(file);
+  const data = fs.readFileSync(file, 'utf8');
   const start = Math.max(0, Math.min(Number(offset) || 0, data.length));
-  const end = Math.min(data.length, start + 400000);
-  return { text: data.subarray(start, end).toString('utf8'), next: end };
+  const end = Math.min(data.length, start + 200000);
+  return { text: data.slice(start, end), next: end };
 }
 
 function createWindow() {
