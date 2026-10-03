@@ -6,7 +6,14 @@ on:
 
 jobs:
   foundation:
-    runs-on: ubuntu-latest
+    name: Foundation (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
