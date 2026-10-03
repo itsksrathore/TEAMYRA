@@ -623,14 +623,21 @@ def start_conductor(graph_id):
     return task_graph.graph_summary(task_graph.load_graph(ROOT, graph_id))
 
 
-def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2):
+def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allow_self_review=False):
     if not chain_is_complete(source_job_id):
         raise ValueError("source job is still running")
     source = job_result(source_job_id)
     if source.get("state") != "done":
         raise ValueError(f"source job is not reviewable from state {source.get('state')}")
 
-    state = review_cycle.create(ROOT, source_job_id, reviewer_worker, max_rounds)
+    terminal_id = failover_terminal_job_id(source_job_id)
+    implementation_worker = read_meta(terminal_id).get("worker")
+    if (reviewer_worker != "auto" and reviewer_worker == implementation_worker and not allow_self_review):
+        raise ValueError("reviewer_worker must differ from the implementation worker unless allow_self_review=true")
+
+    state = review_cycle.create(
+        ROOT, source_job_id, reviewer_worker, max_rounds, allow_self_review
+    )
     log_path = ROOT / "tasks" / "reviews" / f"{state['id']}.monitor.log"
     log = open(log_path, "a", encoding="utf-8")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -693,6 +700,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
          "reviewer_worker": W_ENUM,
+         "allow_self_review": {"type": "boolean", "default": False,
+                               "description": "Allow the implementation worker/account to review its own work. Defaults false."},
          "max_rounds": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5}},
          "required": ["job_id"], "additionalProperties": False}},
     {"name": "review_status", "description": "Read reviewer/fixer loop state, active job, decision and round history.",
@@ -799,6 +808,7 @@ def tool_call(name, a):
             a["job_id"],
             a.get("reviewer_worker", "auto"),
             a.get("max_rounds", 2),
+            a.get("allow_self_review", False),
         )
     if name == "review_status":
         return review_cycle.summary(review_cycle.load(ROOT, a["review_id"]))
