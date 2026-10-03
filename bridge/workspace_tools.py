@@ -132,7 +132,9 @@ class WorkspaceToolService:
             if path == blocked or _is_relative_to(path, blocked):
                 raise PermissionError("system or credential directories cannot be selected as workspaces")
         current = self._load()
-        merged = dict(current["permissions"])
+        current_workspace = Path(current["workspace"]).resolve() if current["workspace"] else None
+        same_workspace = bool(current_workspace and os.path.normcase(str(current_workspace)) == os.path.normcase(str(path)))
+        merged = dict(current["permissions"] if same_workspace else _safe_permissions())
         if isinstance(permissions, dict):
             for key in DEFAULT_PERMISSIONS:
                 if key in permissions:
