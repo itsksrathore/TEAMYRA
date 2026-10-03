@@ -29,6 +29,7 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Partition: `persist:teamyra-chatgpt-profile`.
 - Cookies/session storage are owned by Chromium. TEAMYRA does not store ChatGPT usernames or passwords.
 - `nodeIntegration=false`, `contextIsolation=true`, and `sandbox=true`.
+- Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled.
 - New-window requests are denied; approved HTTPS authentication/navigation destinations remain in the embedded view.
 - No Chrome/Edge process is launched as a user-visible external browser.
 - If login expires, the normal ChatGPT login experience is shown in the embedded panel.
@@ -61,7 +62,7 @@ Supported tools:
 
 - `filesystem.list`
 - `filesystem.stat`
-- `filesystem.read`
+- `filesystem.read` (paged with `offset` / `max_bytes` for bounded prompts)
 - `filesystem.search`
 - `filesystem.create`
 - `filesystem.write`
@@ -114,6 +115,8 @@ Terminal access is also off by default. Enabling destructive-without-confirmatio
 ## Recoverability and audit
 
 Existing files up to 50 MiB receive a recovery copy before TEAMYRA write/patch operations; larger overwrite targets are refused instead of being modified without recovery. Delete operations and confirmed destination overwrites are moved into a runtime recovery/trash area rather than being permanently removed. Recovery state lives under ignored TEAMYRA runtime `backups/` paths and is itself inaccessible through ChatGPT workspace tools.
+
+Tool results injected back into ChatGPT are also hard-capped; large results instruct the agent to request a narrower path/query/range instead of flooding the embedded prompt.
 
 Audit records are JSONL under `logs/workspace-tools.jsonl` and include:
 - timestamp;
