@@ -21,7 +21,7 @@ This checklist is updated as implementation lands.
 - [ ] Antigravity Add Account flow after profile-isolation verification.
 - [x] Live jobs list/status.
 - [x] Live job transcript streaming.
-- [ ] Embedded terminals.
+- [ ] Embedded terminals — PTY/xterm implementation committed; Windows runtime verification pending.
 - [x] Desktop JavaScript syntax CI workflow.
 
 ## Phase 2 — Multi-account Engine
