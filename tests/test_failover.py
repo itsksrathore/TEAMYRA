@@ -103,5 +103,56 @@ class FailoverTests(unittest.TestCase):
                 self.assertEqual(updated["failover_worker"], "codex2")
 
 
+    def test_chain_result_uses_terminal_child_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td)
+            self.make_job(jobs, "root", failover_job_id="child", failover_complete=True)
+            self.make_job(
+                jobs, "child", state="done", reason=None, worker="claude1",
+                failover_root="root", auto_failover_enabled=False, failover_complete=True,
+            )
+            (jobs / "child" / "final.txt").write_text("terminal result", encoding="utf-8")
+            with patch.object(server, "JOBS", jobs):
+                result = server.job_result("root")
+                self.assertEqual(result["requested_job_id"], "root")
+                self.assertEqual(result["terminal_job_id"], "child")
+                self.assertEqual(result["final_message"], "terminal result")
+                self.assertEqual(len(result["failover_chain"]), 2)
+
+    def test_chain_not_complete_until_monitor_marks_root_complete(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td)
+            self.make_job(jobs, "root", failover_job_id="child", failover_complete=False)
+            self.make_job(
+                jobs, "child", state="done", reason=None, worker="codex2",
+                failover_root="root", auto_failover_enabled=False, failover_complete=True,
+            )
+            with patch.object(server, "JOBS", jobs):
+                self.assertFalse(server.chain_is_complete("root"))
+                root_meta = json.loads((jobs / "root" / "meta.json").read_text(encoding="utf-8"))
+                root_meta["failover_complete"] = True
+                (jobs / "root" / "meta.json").write_text(json.dumps(root_meta), encoding="utf-8")
+                self.assertTrue(server.chain_is_complete("root"))
+
+    def test_start_task_auto_worker_defaults_to_failover(self):
+        with patch.object(server, "start_job", return_value=("job-1", "codex1")) as start,              patch.object(server, "follow_info", return_value={}):
+            result = server.tool_call("start_task", {
+                "project_path": ".",
+                "task": "test",
+            })
+            self.assertTrue(result["auto_failover"])
+            self.assertTrue(start.call_args.kwargs["auto_failover"])
+
+    def test_start_task_explicit_worker_defaults_to_no_failover(self):
+        with patch.object(server, "start_job", return_value=("job-1", "codex1")) as start,              patch.object(server, "follow_info", return_value={}):
+            result = server.tool_call("start_task", {
+                "worker": "codex1",
+                "project_path": ".",
+                "task": "test",
+            })
+            self.assertFalse(result["auto_failover"])
+            self.assertFalse(start.call_args.kwargs["auto_failover"])
+
+
 if __name__ == "__main__":
     unittest.main()
