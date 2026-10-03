@@ -112,6 +112,19 @@ def _changes(path):
     return [line for line in porcelain.splitlines() if line.strip()]
 
 
+def _rebase_in_progress(path):
+    path = Path(path)
+    for name in ("rebase-merge", "rebase-apply"):
+        rc, raw, _ = _git(path, "rev-parse", "--git-path", name, check=False)
+        if rc == 0 and raw:
+            marker = Path(raw)
+            if not marker.is_absolute():
+                marker = (path / marker).resolve()
+            if marker.exists():
+                return True
+    return False
+
+
 def status(storage_root, worktree_id):
     meta = load(storage_root, worktree_id)
     path = Path(meta["path"])
@@ -136,6 +149,7 @@ def status(storage_root, worktree_id):
         "commits": commits[:100],
         "diffstat": diffstat,
         "conflicts": conflicts,
+        "rebase_in_progress": _rebase_in_progress(path),
     })
     return out
 
@@ -296,6 +310,150 @@ def rebase(storage_root, worktree_id):
         "head": head,
         "changed": head != current_head,
     }
+
+
+def begin_rebase_resolution(storage_root, worktree_id):
+    meta = load(storage_root, worktree_id)
+    root = Path(meta["repo_root"])
+    path = Path(meta["path"])
+    if not root.exists() or not path.exists():
+        raise ValueError("repository or worktree path no longer exists")
+    if _rebase_in_progress(path):
+        return {"ok": True, "paused": True, **status(storage_root, worktree_id)}
+    if _changes(path):
+        raise ValueError("worktree has uncommitted changes; commit or discard them before interactive rebase")
+
+    target_branch = meta["target_branch"]
+    _, target_head, _ = _git(root, "rev-parse", target_branch)
+    current_head = _git(path, "rev-parse", "HEAD")[1]
+    if current_head == target_head:
+        meta["base_commit"] = target_head
+        meta["rebased_at"] = time.time()
+        _write_meta(storage_root, meta)
+        return {"ok": True, "paused": False, "changed": False, **status(storage_root, worktree_id)}
+
+    rc, out, err = _git(path, "rebase", target_head, check=False)
+    if rc == 0:
+        meta["base_commit"] = target_head
+        meta["rebased_at"] = time.time()
+        _write_meta(storage_root, meta)
+        return {"ok": True, "paused": False, "changed": True, **status(storage_root, worktree_id)}
+
+    current = status(storage_root, worktree_id)
+    if current.get("rebase_in_progress") and current.get("conflicts"):
+        return {
+            "ok": True,
+            "paused": True,
+            "message": (err or out or "rebase paused for conflict resolution").strip(),
+            **current,
+        }
+    _git(path, "rebase", "--abort", check=False)
+    raise RuntimeError((err or out or "interactive rebase failed").strip())
+
+
+def _conflict_file(storage_root, worktree_id, relative_path):
+    meta = load(storage_root, worktree_id)
+    path = Path(meta["path"])
+    if not path.exists():
+        raise ValueError("worktree path no longer exists")
+    if not _rebase_in_progress(path):
+        raise ValueError("no interactive rebase is in progress")
+    relative_path = str(relative_path or "").replace("\\", "/")
+    conflicts = set(_git(path, "diff", "--name-only", "--diff-filter=U")[1].splitlines())
+    if relative_path not in conflicts:
+        raise ValueError("file is not an unresolved conflict")
+    candidate = (path / relative_path).resolve()
+    try:
+        candidate.relative_to(path.resolve())
+    except ValueError as exc:
+        raise ValueError("conflict path escapes worktree") from exc
+    return meta, path, relative_path, candidate
+
+
+def conflict_detail(storage_root, worktree_id, relative_path, max_chars=300000):
+    _, path, relative_path, candidate = _conflict_file(storage_root, worktree_id, relative_path)
+    max_chars = max(1000, min(int(max_chars), 500000))
+    content = ""
+    binary = False
+    clipped = False
+    if candidate.exists() and candidate.is_file():
+        data = candidate.read_bytes()
+        binary = b"\x00" in data
+        if not binary:
+            text = data.decode("utf-8", errors="replace")
+            clipped = len(text) > max_chars
+            content = text[:max_chars]
+
+    stages = {}
+    for key, stage in (("base", 1), ("target", 2), ("worktree", 3)):
+        rc, text, _ = _git(path, "show", f":{stage}:{relative_path}", check=False)
+        stages[key] = text if rc == 0 else None
+    return {
+        "worktree_id": worktree_id,
+        "path": relative_path,
+        "content": content,
+        "binary": binary,
+        "clipped": clipped,
+        "stages": stages,
+    }
+
+
+def resolve_conflict(storage_root, worktree_id, relative_path, strategy="manual", content=None):
+    _, path, relative_path, candidate = _conflict_file(storage_root, worktree_id, relative_path)
+    strategy = str(strategy or "manual").lower()
+    if strategy not in {"manual", "target", "worktree"}:
+        raise ValueError("strategy must be manual, target, or worktree")
+    if strategy == "manual":
+        if content is None:
+            raise ValueError("manual resolution requires content")
+        encoded = str(content).encode("utf-8")
+        if len(encoded) > 1024 * 1024:
+            raise ValueError("resolved conflict content exceeds 1 MiB")
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text(str(content), encoding="utf-8")
+    else:
+        flag = "--ours" if strategy == "target" else "--theirs"
+        rc, out, err = _git(path, "checkout", flag, "--", relative_path, check=False)
+        if rc != 0:
+            raise RuntimeError((err or out or f"could not use {strategy} version").strip())
+    _git(path, "add", "--", relative_path)
+    return status(storage_root, worktree_id)
+
+
+def continue_rebase_resolution(storage_root, worktree_id):
+    meta = load(storage_root, worktree_id)
+    root = Path(meta["repo_root"])
+    path = Path(meta["path"])
+    if not _rebase_in_progress(path):
+        raise ValueError("no interactive rebase is in progress")
+    conflicts = _git(path, "diff", "--name-only", "--diff-filter=U")[1].splitlines()
+    if conflicts:
+        raise ValueError("resolve all conflict files before continuing rebase")
+
+    rc, out, err = _git(path, "-c", "core.editor=true", "rebase", "--continue", check=False)
+    current = status(storage_root, worktree_id)
+    if rc != 0:
+        if current.get("rebase_in_progress") and current.get("conflicts"):
+            return {"ok": True, "paused": True, "message": (err or out).strip(), **current}
+        raise RuntimeError((err or out or "rebase continue failed").strip())
+
+    _, target_head, _ = _git(root, "rev-parse", meta["target_branch"])
+    meta["base_commit"] = target_head
+    meta["rebased_at"] = time.time()
+    _write_meta(storage_root, meta)
+    return {"ok": True, "paused": False, "changed": True, **status(storage_root, worktree_id)}
+
+
+def abort_rebase_resolution(storage_root, worktree_id):
+    meta = load(storage_root, worktree_id)
+    path = Path(meta["path"])
+    if not path.exists():
+        raise ValueError("worktree path no longer exists")
+    if _rebase_in_progress(path):
+        rc, out, err = _git(path, "rebase", "--abort", check=False)
+        if rc != 0:
+            raise RuntimeError((err or out or "rebase abort failed").strip())
+    return {"ok": True, **status(storage_root, worktree_id)}
 
 
 def merge(storage_root, worktree_id):

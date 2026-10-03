@@ -20,7 +20,9 @@ class DesktopContractTests(unittest.TestCase):
             "worktreeList", "wtTitle", "wtState", "wtMeta", "wtSummary",
             "wtDiff", "wtRebase", "wtMerge", "wtDiscard", "wtForceDiscard",
             "wtOpenTerminal", "createWorktree", "refreshWorktrees",
-            "wtManaged", "wtDirty", "wtConflicts",
+            "wtManaged", "wtDirty", "wtConflicts", "wtConflictPanel",
+            "wtConflictFiles", "wtConflictCount", "wtConflictPath", "wtConflictEditor",
+            "wtUseTarget", "wtUseWorktree", "wtSaveConflict", "wtContinueConflict", "wtAbortConflict",
         ]
         for element_id in ids:
             self.assertIn(f'id="{element_id}"', self.html, element_id)
@@ -152,6 +154,11 @@ class DesktopContractTests(unittest.TestCase):
             "worktreeDiff": "teamyra:worktree-diff",
             "createWorktree": "teamyra:worktree-create",
             "rebaseWorktree": "teamyra:worktree-rebase",
+            "beginConflictResolution": "teamyra:conflict-begin",
+            "conflictDetail": "teamyra:conflict-detail",
+            "resolveConflict": "teamyra:conflict-resolve",
+            "continueConflictResolution": "teamyra:conflict-continue",
+            "abortConflictResolution": "teamyra:conflict-abort",
             "mergeWorktree": "teamyra:worktree-merge",
             "discardWorktree": "teamyra:worktree-discard",
         }

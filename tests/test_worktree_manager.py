@@ -258,6 +258,71 @@ class WorktreeManagerTests(unittest.TestCase):
 
             worktree_manager.discard(storage, created["id"], force=True)
 
+    def test_interactive_rebase_conflict_can_be_resolved_and_continued(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "interactive-conflict")
+            wt = Path(created["path"])
+
+            (wt / "app.txt").write_text("worktree\n", encoding="utf-8")
+            git(wt, "add", "app.txt")
+            git(wt, "commit", "-m", "worktree change")
+
+            (repo / "app.txt").write_text("target\n", encoding="utf-8")
+            git(repo, "add", "app.txt")
+            git(repo, "commit", "-m", "target change")
+
+            paused = worktree_manager.begin_rebase_resolution(storage, created["id"])
+            self.assertTrue(paused["paused"])
+            self.assertTrue(paused["rebase_in_progress"])
+            self.assertEqual(paused["conflicts"], ["app.txt"])
+
+            detail = worktree_manager.conflict_detail(storage, created["id"], "app.txt")
+            self.assertIn("<<<<<<<", detail["content"])
+            self.assertEqual(detail["stages"]["target"], "target")
+            self.assertEqual(detail["stages"]["worktree"], "worktree")
+
+            staged = worktree_manager.resolve_conflict(
+                storage, created["id"], "app.txt", strategy="worktree"
+            )
+            self.assertEqual(staged["conflicts"], [])
+            self.assertTrue(staged["rebase_in_progress"])
+
+            done = worktree_manager.continue_rebase_resolution(storage, created["id"])
+            self.assertFalse(done["paused"])
+            self.assertFalse(done["rebase_in_progress"])
+            self.assertEqual((wt / "app.txt").read_text(encoding="utf-8"), "worktree\n")
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+    def test_interactive_rebase_abort_restores_branch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "interactive-abort")
+            wt = Path(created["path"])
+
+            (wt / "app.txt").write_text("worktree\n", encoding="utf-8")
+            git(wt, "add", "app.txt")
+            git(wt, "commit", "-m", "worktree change")
+            feature_head = git(wt, "rev-parse", "HEAD")
+
+            (repo / "app.txt").write_text("target\n", encoding="utf-8")
+            git(repo, "add", "app.txt")
+            git(repo, "commit", "-m", "target change")
+
+            paused = worktree_manager.begin_rebase_resolution(storage, created["id"])
+            self.assertTrue(paused["paused"])
+            restored = worktree_manager.abort_rebase_resolution(storage, created["id"])
+            self.assertFalse(restored["rebase_in_progress"])
+            self.assertEqual(git(wt, "rev-parse", "HEAD"), feature_head)
+            self.assertEqual(git(wt, "status", "--porcelain"), "")
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
     def test_rebase_conflict_aborts_and_restores_clean_worktree(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

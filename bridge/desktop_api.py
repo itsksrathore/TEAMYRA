@@ -123,6 +123,29 @@ def handle(action, payload):
         if payload.get("confirm") is not True:
             raise ValueError("worktree.rebase requires confirm=true")
         return worktree_manager.rebase(WORKTREES, payload["worktree_id"])
+    if action == "worktree.conflict.begin":
+        if payload.get("confirm") is not True:
+            raise ValueError("worktree.conflict.begin requires confirm=true")
+        return worktree_manager.begin_rebase_resolution(WORKTREES, payload["worktree_id"])
+    if action == "worktree.conflict.detail":
+        return worktree_manager.conflict_detail(
+            WORKTREES, payload["worktree_id"], payload["path"], payload.get("max_chars", 300000),
+        )
+    if action == "worktree.conflict.resolve":
+        if payload.get("confirm") is not True:
+            raise ValueError("worktree.conflict.resolve requires confirm=true")
+        return worktree_manager.resolve_conflict(
+            WORKTREES, payload["worktree_id"], payload["path"],
+            payload.get("strategy", "manual"), payload.get("content"),
+        )
+    if action == "worktree.conflict.continue":
+        if payload.get("confirm") is not True:
+            raise ValueError("worktree.conflict.continue requires confirm=true")
+        return worktree_manager.continue_rebase_resolution(WORKTREES, payload["worktree_id"])
+    if action == "worktree.conflict.abort":
+        if payload.get("confirm") is not True:
+            raise ValueError("worktree.conflict.abort requires confirm=true")
+        return worktree_manager.abort_rebase_resolution(WORKTREES, payload["worktree_id"])
     if action == "worktree.merge":
         if payload.get("confirm") is not True:
             raise ValueError("worktree.merge requires confirm=true")

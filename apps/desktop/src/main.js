@@ -364,6 +364,35 @@ ipcMain.handle('teamyra:worktree-rebase', (_event, worktreeId, confirm = false) 
   if (confirm !== true) throw new Error('Rebase requires explicit confirmation');
   return callCore('worktree.rebase', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
 });
+ipcMain.handle('teamyra:conflict-begin', (_event, worktreeId, confirm = false) => {
+  if (confirm !== true) throw new Error('Interactive rebase requires explicit confirmation');
+  return callCore('worktree.conflict.begin', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
+});
+ipcMain.handle('teamyra:conflict-detail', (_event, worktreeId, conflictPath) =>
+  callCore('worktree.conflict.detail', {
+    worktree_id: worktreeId,
+    path: String(conflictPath || ''),
+    max_chars: 300000
+  }, { maxBuffer: 4 * 1024 * 1024 })
+);
+ipcMain.handle('teamyra:conflict-resolve', (_event, worktreeId, conflictPath, options = {}) => {
+  if (options.confirm !== true) throw new Error('Conflict resolution requires explicit confirmation');
+  return callCore('worktree.conflict.resolve', {
+    worktree_id: worktreeId,
+    path: String(conflictPath || ''),
+    strategy: String(options.strategy || 'manual'),
+    content: options.content,
+    confirm: true
+  }, { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+});
+ipcMain.handle('teamyra:conflict-continue', (_event, worktreeId, confirm = false) => {
+  if (confirm !== true) throw new Error('Continue rebase requires explicit confirmation');
+  return callCore('worktree.conflict.continue', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
+});
+ipcMain.handle('teamyra:conflict-abort', (_event, worktreeId, confirm = false) => {
+  if (confirm !== true) throw new Error('Abort rebase requires explicit confirmation');
+  return callCore('worktree.conflict.abort', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
+});
 ipcMain.handle('teamyra:worktree-merge', (_event, worktreeId, confirm = false) => {
   if (confirm !== true) throw new Error('Merge requires explicit confirmation');
   return callCore('worktree.merge', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
