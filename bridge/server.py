@@ -567,16 +567,12 @@ def worker_status():
 
 
 def create_worktree(project_path, worker, idx):
-    root = git(project_path, "rev-parse", "--show-toplevel")
-    if not root:
-        raise ValueError("run_ai_parallel needs a git repository")
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    branch = f"ai/{worker}/{stamp}-{idx}-{uuid.uuid4().hex[:4]}"
-    path = WORKTREES / f"{Path(root).name}-{stamp}-{idx}-{worker}"
-    rc, _, err = run(["git", "-C", root, "worktree", "add", "-b", branch, str(path), "HEAD"])
-    if rc != 0:
-        raise ValueError(f"git worktree add failed: {clip(err, 400)}")
-    return str(path), branch
+    return worktree_manager.create(
+        project_path,
+        WORKTREES,
+        label=f"{worker}-{idx}",
+        base_ref="HEAD",
+    )
 
 
 def start_conductor(graph_id):
@@ -976,12 +972,15 @@ def tool_call(name, a):
         started = []
         for i, t in enumerate(a["tasks"], 1):
             worker = pick_worker(t.get("worker", "auto"))
-            path, branch = create_worktree(a["project_path"], worker, i)
+            wt = create_worktree(a["project_path"], worker, i)
+            path, branch = wt["path"], wt["branch"]
             job_id, worker = start_job(
                 worker, t["task"], path, t.get("label"), a.get("timeout_minutes", 90), a.get("write", True),
                 auto_failover=a.get("auto_failover", True), max_failovers=a.get("max_failovers"),
             )
-            started.append({"job_id": job_id, "worker": worker, "worktree": path, "branch": branch,
+            patch_job_meta(job_id, worktree_id=wt["id"], worktree_branch=branch)
+            started.append({"job_id": job_id, "worker": worker, "worktree_id": wt["id"],
+                            "worktree": path, "branch": branch,
                             "auto_failover": a.get("auto_failover", True), **follow_info(job_id)})
         return started
     raise ValueError("Unknown tool: " + name)
