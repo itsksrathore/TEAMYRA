@@ -143,13 +143,19 @@ def status(storage_root, worktree_id):
 
 def _untracked_preview(path, remaining):
     _, raw, _ = _git(path, "ls-files", "--others", "--exclude-standard", "-z")
-    if not raw or remaining <= 0:
-        return ""
+    items = [item for item in raw.split("\0") if item]
+    if not items:
+        return "", False
+    if remaining <= 0:
+        return "", True
+
     root = Path(path).resolve()
     parts = []
     used = 0
-    for rel in [item for item in raw.split("\0") if item]:
+    truncated = False
+    for index, rel in enumerate(items):
         if used >= remaining:
+            truncated = True
             break
         candidate = (root / rel).resolve()
         try:
@@ -174,11 +180,14 @@ def _untracked_preview(path, remaining):
                 if text.endswith("\n"):
                     body += "\n"
         chunk = header + body
-        take = min(len(chunk), remaining - used)
+        available = remaining - used
+        take = min(len(chunk), available)
         parts.append(chunk[:take])
         used += take
-    return "".join(parts)
-
+        if take < len(chunk) or index < len(items) - 1 and used >= remaining:
+            truncated = True
+            break
+    return "".join(parts), truncated
 
 def diff(storage_root, worktree_id, max_chars=50000):
     meta = load(storage_root, worktree_id)
@@ -189,10 +198,11 @@ def diff(storage_root, worktree_id, max_chars=50000):
     _, tracked, _ = _git(
         path, "diff", "--no-ext-diff", "--unified=3", "--no-color", meta["base_commit"]
     )
-    untracked = _untracked_preview(path, max(0, max_chars - min(len(tracked), max_chars)))
+    remaining = max(0, max_chars - min(len(tracked), max_chars))
+    untracked, untracked_clipped = _untracked_preview(path, remaining)
     text = tracked + untracked
     total_chars = len(text)
-    clipped = total_chars > max_chars
+    clipped = len(tracked) > max_chars or untracked_clipped or total_chars > max_chars
     return {
         "id": worktree_id,
         "branch": meta["branch"],
