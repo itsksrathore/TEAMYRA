@@ -87,7 +87,8 @@ class WorkspaceToolService:
         self.root = Path(root).resolve()
         self.state_root = self.root / "chatgpt"
         self.settings_file = self.state_root / "workspace.json"
-        self.token_file = self.state_root / "local-agent.token"
+        token_file = os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN_FILE")
+        self.token_file = Path(token_file).resolve() if token_file else self.state_root / "local-agent.token"
         self.audit_file = self.root / "logs" / "workspace-tools.jsonl"
 
     def _verify_token(self, supplied, trusted=False):
@@ -170,6 +171,9 @@ class WorkspaceToolService:
                 Path(local) / "Google" / "Chrome" / "User Data",
                 Path(local) / "Microsoft" / "Edge" / "User Data",
             ])
+        token_file = os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN_FILE")
+        if token_file:
+            roots.append(Path(token_file).expanduser().resolve().parent)
         return [p.resolve() for p in roots]
 
     def _path(self, raw, workspace, permissions, *, must_exist=False):
@@ -459,9 +463,15 @@ class WorkspaceToolService:
                 if maybe.is_absolute():
                     self._path(str(maybe), workspace, permissions, must_exist=False)
             timeout = max(1, min(int(args.get("timeout_seconds", 60)), 120))
+            terminal_env = {
+                key: value for key, value in os.environ.items()
+                if key != "TEAMYRA_LOCAL_AGENT_TOKEN_FILE"
+                and not any(marker in key.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
+            }
             cp = subprocess.run(
                 argv,
                 cwd=str(cwd),
+                env=terminal_env,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
