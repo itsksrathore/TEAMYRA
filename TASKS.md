@@ -43,7 +43,7 @@ This checklist is updated as implementation lands.
 - [x] Structured cross-agent job handoff for review/continuation/testing.
 - [ ] Dedicated deterministic tester loop / test-policy stage.
 - [x] Approval gates for sensitive/destructive graph nodes via MCP approve/deny.
-- [ ] Parallel graph execution after Phase 4 worktree merge/rebase semantics are implemented.
+- [x] Safe parallel graph execution with max_parallel, managed worktrees, snapshot commits, rebase and deterministic merge.
 
 ## Phase 4 — Git Workspace
 - [x] First-class managed worktree lifecycle backend.
