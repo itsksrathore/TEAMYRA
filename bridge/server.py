@@ -390,6 +390,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     (jdir / "task.txt").write_text(task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
                                                  "timeout": timeout, "final_path": str(final_path),
+                                                 "session_id": session_id,
                                                  "resume_cmd": resume_cmd,
                                                  "auto_resume": int(config().get("auto_resume", 2))},
                                                 ensure_ascii=False, indent=1), encoding="utf-8")
