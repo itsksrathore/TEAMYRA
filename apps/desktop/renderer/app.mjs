@@ -611,13 +611,16 @@ async function loadConflictFile(item, conflictPath) {
   selectedConflictPath = conflictPath;
   wtConflictPath.textContent = conflictPath;
   wtConflictEditor.value = detail.content || '';
-  wtConflictEditor.disabled = detail.binary === true;
-  wtSaveConflictButton.disabled = detail.binary === true;
+  const manualBlocked = detail.binary === true || detail.clipped === true;
+  wtConflictEditor.disabled = manualBlocked;
+  wtSaveConflictButton.disabled = manualBlocked;
   wtUseTargetButton.disabled = false;
   wtUseWorktreeButton.disabled = false;
   wtConflictHint.textContent = detail.binary
     ? 'Binary conflict: choose the target or worktree version.'
-    : 'Edit the conflict markers manually, or choose one complete side. “Target” is the branch being updated onto; “worktree” is this agent branch.';
+    : detail.clipped
+      ? 'Conflict content is too large for safe manual editing here. Choose the complete target or worktree version.'
+      : 'Edit the conflict markers manually, or choose one complete side. “Target” is the branch being updated onto; “worktree” is this agent branch.';
   for (const button of wtConflictFiles.querySelectorAll('.conflict-file')) {
     button.classList.toggle('active', button.dataset.path === conflictPath);
   }

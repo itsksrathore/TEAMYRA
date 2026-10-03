@@ -410,13 +410,21 @@ def resolve_conflict(storage_root, worktree_id, relative_path, strategy="manual"
         if len(encoded) > 1024 * 1024:
             raise ValueError("resolved conflict content exceeds 1 MiB")
         candidate.parent.mkdir(parents=True, exist_ok=True)
-        candidate.write_text(str(content), encoding="utf-8")
+        candidate.write_bytes(encoded)
+        _git(path, "add", "--", relative_path)
     else:
-        flag = "--ours" if strategy == "target" else "--theirs"
-        rc, out, err = _git(path, "checkout", flag, "--", relative_path, check=False)
+        stage = 2 if strategy == "target" else 3
+        rc, _, _ = _git(path, "cat-file", "-e", f":{stage}:{relative_path}", check=False)
         if rc != 0:
-            raise RuntimeError((err or out or f"could not use {strategy} version").strip())
-    _git(path, "add", "--", relative_path)
+            rm_rc, rm_out, rm_err = _git(path, "rm", "--", relative_path, check=False)
+            if rm_rc != 0:
+                raise RuntimeError((rm_err or rm_out or f"could not use deleted {strategy} version").strip())
+        else:
+            flag = "--ours" if strategy == "target" else "--theirs"
+            checkout_rc, out, err = _git(path, "checkout", flag, "--", relative_path, check=False)
+            if checkout_rc != 0:
+                raise RuntimeError((err or out or f"could not use {strategy} version").strip())
+            _git(path, "add", "--", relative_path)
     return status(storage_root, worktree_id)
 
 
@@ -430,7 +438,9 @@ def continue_rebase_resolution(storage_root, worktree_id):
     if conflicts:
         raise ValueError("resolve all conflict files before continuing rebase")
 
-    rc, out, err = _git(path, "-c", "core.editor=true", "rebase", "--continue", check=False)
+    staged_rc, _, _ = _git(path, "diff", "--cached", "--quiet", check=False)
+    command = ("rebase", "--skip") if staged_rc == 0 else ("-c", "core.editor=true", "rebase", "--continue")
+    rc, out, err = _git(path, *command, check=False)
     current = status(storage_root, worktree_id)
     if rc != 0:
         if current.get("rebase_in_progress") and current.get("conflicts"):
