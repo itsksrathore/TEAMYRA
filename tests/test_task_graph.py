@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "bridge"))
 
 import server
 import task_graph
+import conductor_monitor
 
 
 class TaskGraphTests(unittest.TestCase):
@@ -231,6 +232,71 @@ class TaskGraphTests(unittest.TestCase):
                 self.assertEqual(node["approval_note"], "Approved in test")
                 self.assertEqual(node["timeout_minutes"], 30)
                 self.assertEqual(approved["objective"], "Safe change")
+
+
+    def test_conductor_waits_at_approval_gate_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(root, "Gate", project, [{
+                "id": "deploy",
+                "task": "Deploy safely",
+                "requires_approval": True,
+            }])
+            with patch.object(server, "ROOT", root), patch.object(conductor_monitor.server, "ROOT", root):
+                updated = conductor_monitor.tick(graph["id"])
+                self.assertEqual(updated["state"], "awaiting_approval")
+                self.assertEqual(updated["approval_pending_node_id"], "deploy")
+                self.assertEqual(updated["nodes"][0]["status"], "pending")
+
+    def test_graph_approve_tool_is_registered_once(self):
+        names = [tool["name"] for tool in server.TOOLS]
+        self.assertEqual(names.count("graph_approve"), 1)
+
+    def test_graph_approve_and_deny_use_canonical_decision_helper(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            with patch.object(server, "ROOT", root):
+                approved_graph = task_graph.create_graph(root, "Approve", project, [{
+                    "id": "write",
+                    "task": "Write",
+                    "requires_approval": True,
+                }])
+                approved = server.tool_call("graph_approve", {
+                    "graph_id": approved_graph["id"],
+                    "node_id": "write",
+                    "decision": "approve",
+                    "note": "reviewed",
+                })
+                node = approved["nodes"][0]
+                self.assertEqual(node["approval_status"], "approved")
+                self.assertIsNotNone(node["approved_at"])
+
+                denied_graph = task_graph.create_graph(root, "Deny", project, [
+                    {
+                        "id": "danger",
+                        "task": "Dangerous change",
+                        "requires_approval": True,
+                    },
+                    {
+                        "id": "after",
+                        "task": "Should not run",
+                        "depends_on": ["danger"],
+                    },
+                ])
+                denied = server.tool_call("graph_approve", {
+                    "graph_id": denied_graph["id"],
+                    "node_id": "danger",
+                    "decision": "deny",
+                    "note": "not approved",
+                })
+                by_id = {node["id"]: node for node in denied["nodes"]}
+                self.assertEqual(by_id["danger"]["approval_status"], "denied")
+                self.assertEqual(by_id["danger"]["status"], "cancelled")
+                self.assertEqual(by_id["after"]["status"], "blocked")
 
 
 if __name__ == "__main__":
