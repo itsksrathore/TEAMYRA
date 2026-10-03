@@ -22,6 +22,8 @@ class RoutingTests(unittest.TestCase):
             (status_dir / "status.json").write_text(json.dumps({
                 "heartbeat_at": time.time(),
                 "automation_ready": True,
+                "worker_ready": True,
+                "workspace": str(root / "project"),
                 "detail": "embedded ChatGPT session is active",
             }), encoding="utf-8")
             info = {"id": "chatgpt-normal", "provider": "chatgpt-web"}
