@@ -14,6 +14,7 @@ import task_graph
 import test_policy
 import review_cycle
 import worktree_manager
+import workspace_tools
 import observability
 import project_memory
 import handoff_store
@@ -131,6 +132,17 @@ def worker_auth_status(info, use_cache=True):
             rc, out, err = run([*launch, "models"], timeout=8)
             detail = (out + err).strip()
             ready = rc == 0 and bool(out.strip())
+        elif provider == "chatgpt-web":
+            status_file = ROOT / "chatgpt" / "status.json"
+            try:
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+            except Exception:
+                status = {}
+            age = now - float(status.get("heartbeat_at") or 0)
+            ready = age <= 20 and status.get("automation_ready") is True
+            detail = str(status.get("detail") or (
+                "embedded ChatGPT session ready" if ready else "open ChatGPT in TEAMYRA and sign in"
+            ))
         else:
             ready, detail = False, "unsupported provider"
     except Exception as exc:
@@ -358,6 +370,8 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     elif provider == "antigravity":
         cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
         resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
+    elif provider == "chatgpt-web":
+        cmd, env, resume_cmd = [], {}, []
     else:
         raise ValueError(f"unsupported worker provider: {provider}")
     head = git(cwd, "rev-parse", "HEAD")
@@ -381,6 +395,15 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
                                                 ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "transcript.md").write_text(f"# {meta['label']}\n{worker} | {cwd} | {meta['branch']} @ {head}\n\n",
                                         encoding="utf-8")
+    if provider == "chatgpt-web":
+        patch_job_meta(
+            job_id,
+            state="waiting_for_desktop",
+            last_event="queued for embedded ChatGPT",
+            runner_pid=None,
+        )
+        return job_id, worker
+
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     log = open(jdir / "runner.log", "w", encoding="utf-8")
     try:  # break away from the MCP server's job object so a bridge restart does not kill the job
@@ -806,7 +829,7 @@ def prepare_handoff_record(source_job_id, target_worker, payload):
 
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
-          "description": "Use auto or any worker id returned by worker_status. Dynamic Codex profiles are discovered at runtime."}
+          "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
 TOOLS = [
     {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
      "inputSchema": {"type": "object", "properties": {
@@ -843,6 +866,18 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"}},
          "additionalProperties": False}},
+    {"name": "workspace_tool", "description": "Run one normalized workspace-scoped TEAMYRA local tool. Uses the same sandbox/permission implementation as the ChatGPT web worker.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"},
+         "tool": {"type": "string", "enum": [
+             "filesystem.list", "filesystem.read", "filesystem.search", "filesystem.create",
+             "filesystem.write", "filesystem.patch", "filesystem.move", "filesystem.rename",
+             "filesystem.delete", "terminal.run", "git.status", "git.diff", "git.log",
+             "git.add", "git.commit"
+         ]},
+         "args": {"type": "object"},
+         "confirm": {"type": "boolean", "default": False}},
+         "required": ["project_path", "tool"], "additionalProperties": False}},
     {"name": "memory_add", "description": "Add a structured local project memory entry. Runtime memory is stored under TEAMYRA memory/ and excluded from source control.",
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"},
@@ -1108,6 +1143,20 @@ def tool_call(name, a):
             ROOT,
             worker_status(),
             a.get("project_path"),
+        )
+    if name == "workspace_tool":
+        service = workspace_tools.WorkspaceToolService(ROOT)
+        service.configure(
+            a["project_path"],
+            trusted=True,
+            actor="teamyra-mcp",
+        )
+        return service.execute(
+            a["tool"],
+            a.get("args"),
+            trusted=True,
+            actor="teamyra-mcp",
+            confirm=a.get("confirm") is True,
         )
     if name == "memory_add":
         return project_memory.add(
