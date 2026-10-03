@@ -240,13 +240,34 @@ function killTerminalsFor(owner) {
   }
 }
 
+function windowChrome() {
+  if (process.platform === 'win32') {
+    return {
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#00000000',
+        symbolColor: '#2f2b26',
+        height: 28
+      }
+    };
+  }
+  if (process.platform === 'darwin') {
+    return {
+      titleBarStyle: 'hiddenInset',
+      trafficLightPosition: { x: 16, y: 11 }
+    };
+  }
+  return {};
+}
+
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1480,
-    height: 920,
-    minWidth: 1060,
-    minHeight: 680,
-    backgroundColor: '#080a0f',
+    width: 1360,
+    height: 900,
+    minWidth: 560,
+    minHeight: 480,
+    ...windowChrome(),
+    backgroundColor: '#e9e9ef',
     title: 'TEAMYRA',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -286,6 +307,27 @@ ipcMain.handle('teamyra:update-install', () => {
 ipcMain.handle('teamyra:providers', () => providersCached(true));
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
+ipcMain.handle('teamyra:task-start', (_event, options = {}) =>
+  callCore('task.start', {
+    task: String(options.task || ''),
+    project_path: String(options.projectPath || ''),
+    worker: String(options.worker || 'auto'),
+    write: options.write !== false,
+    timeout_minutes: Number(options.timeoutMinutes) || 180,
+    auto_failover: options.autoFailover !== false
+  }, { timeout: 30000 })
+);
+ipcMain.handle('teamyra:task-cancel', (_event, jobId) =>
+  callCore('task.cancel', { job_id: String(jobId || '') })
+);
+ipcMain.handle('teamyra:pick-project', async () => {
+  const focused = BrowserWindow.getFocusedWindow();
+  const options = { title: 'Choose a Teamyra workspace', properties: ['openDirectory', 'createDirectory'] };
+  const result = focused ? await dialog.showOpenDialog(focused, options) : await dialog.showOpenDialog(options);
+  return result.canceled || !result.filePaths[0]
+    ? { cancelled: true, path: '' }
+    : { cancelled: false, path: result.filePaths[0] };
+});
 
 ipcMain.handle('teamyra:timeline', (_event, options = {}) =>
   callCore('observability.timeline', {

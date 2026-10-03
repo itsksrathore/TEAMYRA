@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('teamyra', {
+  platform: process.platform,
   updateStatus: () => ipcRenderer.invoke('teamyra:update-status'),
   checkUpdates: () => ipcRenderer.invoke('teamyra:update-check'),
   installUpdate: () => ipcRenderer.invoke('teamyra:update-install'),
@@ -8,6 +9,9 @@ contextBridge.exposeInMainWorld('teamyra', {
   providers: () => ipcRenderer.invoke('teamyra:providers'),
   jobs: () => ipcRenderer.invoke('teamyra:jobs'),
   transcript: (jobId, offset = 0) => ipcRenderer.invoke('teamyra:transcript', jobId, offset),
+  startTask: (options) => ipcRenderer.invoke('teamyra:task-start', options || {}),
+  cancelTask: (jobId) => ipcRenderer.invoke('teamyra:task-cancel', jobId),
+  pickProject: () => ipcRenderer.invoke('teamyra:pick-project'),
   timeline: (options) => ipcRenderer.invoke('teamyra:timeline', options || {}),
   searchLogs: (options) => ipcRenderer.invoke('teamyra:logs-search', options || {}),
   usage: (options) => ipcRenderer.invoke('teamyra:usage', options || {}),

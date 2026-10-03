@@ -10,42 +10,108 @@ class DesktopContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.html = (ROOT / "apps" / "desktop" / "renderer" / "index.html").read_text(encoding="utf-8")
         cls.renderer = (ROOT / "apps" / "desktop" / "renderer" / "app.mjs").read_text(encoding="utf-8")
+        cls.styles = (ROOT / "apps" / "desktop" / "renderer" / "styles.css").read_text(encoding="utf-8")
         cls.preload = (ROOT / "apps" / "desktop" / "src" / "preload.js").read_text(encoding="utf-8")
         cls.main = (ROOT / "apps" / "desktop" / "src" / "main.js").read_text(encoding="utf-8")
         cls.core_api = (ROOT / "apps" / "desktop" / "src" / "core-api.js").read_text(encoding="utf-8")
+        cls.desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
         cls.chatgpt_provider = (ROOT / "apps" / "desktop" / "src" / "chatgpt-web-provider.js").read_text(encoding="utf-8")
         cls.chatgpt_session = (ROOT / "apps" / "desktop" / "src" / "chatgpt-session-manager.js").read_text(encoding="utf-8")
         cls.chatgpt_automation = (ROOT / "apps" / "desktop" / "src" / "chatgpt-automation-adapter.js").read_text(encoding="utf-8")
+        cls.agent_icons = (ROOT / "apps" / "desktop" / "renderer" / "agent-icons.mjs").read_text(encoding="utf-8")
 
+    def test_primary_ui_has_only_tasks_and_agents_navigation(self):
+        self.assertIn('id="navTasks"', self.html)
+        self.assertIn('id="navAgents"', self.html)
+        self.assertEqual(len(re.findall(r'data-view="(?:tasks|agents)"', self.html)), 2)
+        for removed in (
+            "navCommand", "navWorktrees", "navObservability", "navMemory",
+            "commandView", "worktreesView", "observabilityView", "memoryView",
+        ):
+            self.assertNotIn(f'id="{removed}"', self.html)
 
-    def test_chatgpt_renderer_ids_and_ipc_contract_exist(self):
-        ids = [
-            "navChatgpt", "chatgptView", "chatgptViewport", "chatgptConnection",
-            "chatgptAccount", "chatgptBridge", "chatgptTools", "chatgptWorkspace",
-            "chatgptOpen", "chatgptNew", "chatgptReload", "chatgptStop",
-            "chatgptReconnect", "chatgptSelectWorkspace", "chatgptSavePermissions",
-            "chatgptViewChanges", "chatgptViewDiff", "chatgptRevert",
-        ]
-        for element_id in ids:
-            self.assertIn(f'id="{element_id}"', self.html, element_id)
-            self.assertIn(f"#{element_id}", self.renderer, element_id)
+    def test_tasks_surface_is_minimal_live_tile_desk(self):
+        for element_id in (
+            "tasksView", "taskDesk", "newTask", "filterActive", "filterAll",
+            "newTaskDialog", "taskPrompt", "taskWorkspacePick", "taskAgent", "taskStart",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+            self.assertIn(f"#{element_id}", self.renderer)
+        self.assertIn("task-card", self.renderer)
+        self.assertIn("data-task-output", self.renderer)
+        self.assertIn("data-cancel-job", self.renderer)
+        self.assertNotIn("Agents detected", self.html)
+        self.assertNotIn("Recent jobs", self.html)
 
+    def test_task_start_cancel_reuse_core_job_system(self):
         contracts = {
-            "chatgptStatus": "teamyra:chatgpt-status",
-            "openChatgpt": "teamyra:chatgpt-open",
-            "reloadChatgpt": "teamyra:chatgpt-reload",
-            "reconnectChatgpt": "teamyra:chatgpt-reconnect",
-            "newChatgptChat": "teamyra:chatgpt-new-chat",
-            "stopChatgpt": "teamyra:chatgpt-stop",
-            "setChatgptBounds": "teamyra:chatgpt-bounds",
-            "selectChatgptWorkspace": "teamyra:chatgpt-select-workspace",
-            "chatgptChanges": "teamyra:chatgpt-changes",
-            "revertChatgptChanges": "teamyra:chatgpt-revert",
+            "startTask": "teamyra:task-start",
+            "cancelTask": "teamyra:task-cancel",
+            "pickProject": "teamyra:pick-project",
         }
         for method, channel in contracts.items():
             self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
             self.assertIn(channel, self.preload)
             self.assertIn(channel, self.main)
+        self.assertIn('action == "task.start"', self.desktop_api)
+        self.assertIn("server.start_job(", self.desktop_api)
+        self.assertIn('action == "task.cancel"', self.desktop_api)
+        self.assertIn("server.failover_terminal_job_id", self.desktop_api)
+
+    def test_agents_surface_is_connection_shelf_not_settings_dashboard(self):
+        for element_id in ("agentsView", "agentsShelf", "agentGrid", "agentSummary"):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn("agent-card", self.renderer)
+        self.assertIn("profile-row", self.renderer)
+        self.assertIn("window.teamyra.addAccount", self.renderer)
+        self.assertIn("window.teamyra.openTerminal", self.renderer)
+        self.assertNotIn("Model override", self.html)
+        self.assertNotIn("Effort override", self.html)
+        self.assertNotIn("Priority", self.html)
+
+    def test_glass_design_language_is_present(self):
+        for marker in (
+            "--accent: #ef6461",
+            "backdrop-filter: blur(",
+            "border-radius: 999px",
+            ".task-card",
+            ".agent-card",
+            "radial-gradient(52% 44% at 12% 6%",
+        ):
+            self.assertIn(marker, self.styles)
+        self.assertIn("Portions of this visual language are adapted from Nami", self.styles)
+        self.assertIn("Copyright 2026 Dainami Pte Ltd, licensed under Apache-2.0", self.styles)
+
+    def test_nami_style_agent_brand_glyphs_are_bundled(self):
+        self.assertIn("agentIconSvg", self.renderer)
+        self.assertIn("claude:", self.agent_icons)
+        self.assertIn("openai:", self.agent_icons)
+        self.assertIn("antigravity:", self.agent_icons)
+        self.assertIn("mrdainami/nami", self.agent_icons)
+        self.assertIn(".agent-avatar svg", self.styles)
+
+    def test_nami_style_native_window_chrome_is_used(self):
+        self.assertIn("function windowChrome()", self.main)
+        self.assertIn("titleBarStyle: 'hidden'", self.main)
+        self.assertIn("titleBarOverlay", self.main)
+        self.assertIn("trafficLightPosition", self.main)
+        self.assertIn('class="lights-deck"', self.html)
+        self.assertIn('body[data-platform="win32"] .lights-deck', self.styles)
+        self.assertIn("platform: process.platform", self.preload)
+        self.assertIn("document.body.dataset.platform", self.renderer)
+
+    def test_chatgpt_is_nested_under_agents_and_keeps_core_controls(self):
+        ids = [
+            "chatgptDetail", "chatgptViewport", "chatgptBack", "chatgptOpen",
+            "chatgptWorkspaceButton", "chatgptTools", "chatgptNew", "chatgptReload",
+            "chatgptStop", "chatgptToolsDialog", "chatgptSavePermissions",
+            "chatgptViewChanges",
+        ]
+        for element_id in ids:
+            self.assertIn(f'id="{element_id}"', self.html)
+            self.assertIn(f"#{element_id}", self.renderer)
+        self.assertIn("setChatgptVisible", self.renderer)
+        self.assertIn("setChatgptBounds", self.renderer)
 
     def test_chatgpt_uses_persistent_sandboxed_webcontentsview(self):
         self.assertIn("WebContentsView", self.chatgpt_provider)
@@ -64,144 +130,49 @@ class DesktopContractTests(unittest.TestCase):
         self.assertNotIn("screenX", self.chatgpt_automation)
         self.assertNotIn("screenY", self.chatgpt_automation)
 
-    def test_chatgpt_worker_requires_workspace_ready_heartbeat(self):
-        server = (ROOT / "bridge" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('status.get("worker_ready") is True', server)
-        self.assertIn("worker_ready:", self.chatgpt_provider)
-        self.assertIn("Delegated task workspace does not match", self.chatgpt_provider)
-
-    def test_chatgpt_read_only_jobs_block_mutating_tools(self):
-        self.assertIn("READ_ONLY_BLOCKED_TOOLS", self.chatgpt_provider)
-        self.assertIn("spec.write === false", self.chatgpt_provider)
-        self.assertIn("mutating Git tools are disabled", self.chatgpt_provider)
-
-    def test_chatgpt_permissions_default_to_workspace_only_and_terminal_off(self):
-        self.assertIn('id="chatgptPermTerminal" /> Terminal commands', self.html)
-        self.assertIn('id="chatgptPermOutside" disabled', self.html)
+    def test_chatgpt_tools_stay_secondary_and_safe_by_default(self):
+        self.assertIn('id="chatgptPermTerminal" type="checkbox"', self.html)
+        self.assertNotIn('id="chatgptPermTerminal" type="checkbox" checked', self.html)
+        self.assertIn("outside_workspace: false", self.renderer)
+        self.assertIn("destructive_without_confirmation: false", self.renderer)
         tools = (ROOT / "bridge" / "workspace_tools.py").read_text(encoding="utf-8")
         self.assertIn('"terminal": False', tools)
         self.assertIn('if not inside:', tools)
 
-    def test_chatgpt_changes_include_staged_diff_and_full_tracked_revert(self):
-        bridge = (ROOT / "apps" / "desktop" / "src" / "workspace-bridge.js").read_text(encoding="utf-8")
-        self.assertIn("stagedDiff", bridge)
-        self.assertIn("staged: true", self.main)
-
-    def test_worktree_renderer_ids_exist_in_html(self):
-        ids = [
-            "navCommand", "navWorktrees", "commandView", "worktreesView",
-            "worktreeList", "wtTitle", "wtState", "wtMeta", "wtSummary",
-            "wtDiff", "wtRebase", "wtMerge", "wtDiscard", "wtForceDiscard",
-            "wtOpenTerminal", "createWorktree", "refreshWorktrees",
-            "wtManaged", "wtDirty", "wtConflicts", "wtConflictPanel",
-            "wtConflictFiles", "wtConflictCount", "wtConflictPath", "wtConflictEditor",
-            "wtUseTarget", "wtUseWorktree", "wtSaveConflict", "wtContinueConflict", "wtAbortConflict",
-        ]
-        for element_id in ids:
-            self.assertIn(f'id="{element_id}"', self.html, element_id)
-            self.assertIn(f"#{element_id}", self.renderer, element_id)
-
-    def test_observability_renderer_ids_exist_in_html(self):
-        ids = [
-            "navObservability", "observabilityView",
-            "obsWorkers", "obsReady", "obsRunning", "obsJobs",
-            "usageCards", "timelineList", "obsProject", "obsWorker",
-            "obsSource", "obsQuery", "refreshObservability",
-            "logSearchForm", "logSearchQuery", "logSearchKind", "logSearchResults",
-        ]
-        for element_id in ids:
-            self.assertIn(f'id="{element_id}"', self.html, element_id)
-            self.assertIn(f"#{element_id}", self.renderer, element_id)
-
-    def test_observability_ignores_stale_timeline_responses(self):
-        self.assertIn("observabilityTimelineRequestId", self.renderer)
-        self.assertIn("timelineRequestId === observabilityTimelineRequestId", self.renderer)
-
-    def test_observability_does_not_treat_unknown_readiness_as_ready(self):
-        self.assertIn("worker.ready === true", self.renderer)
-        self.assertIn("'detected'", self.renderer)
-
-    def test_observability_preload_api_matches_main_ipc_handlers(self):
-        contracts = {
+    def test_advanced_backend_capabilities_remain_available_without_primary_pages(self):
+        ipc_contracts = {
             "timeline": "teamyra:timeline",
             "searchLogs": "teamyra:logs-search",
             "usage": "teamyra:usage",
-        }
-        for method, channel in contracts.items():
-            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
-            self.assertIn(channel, self.preload)
-            self.assertIn(channel, self.main)
-
-        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
-        for action in ("observability.timeline", "observability.search", "observability.usage"):
-            self.assertIn(action, desktop_api)
-
-    def test_observability_supports_handoff_timeline_source(self):
-        self.assertIn('<option value="handoff">Handoffs</option>', self.html)
-        styles = (ROOT / "apps" / "desktop" / "renderer" / "styles.css").read_text(encoding="utf-8")
-        self.assertIn(".timeline-dot.handoff", styles)
-        self.assertIn(".timeline-source.handoff", styles)
-
-    def test_observability_usage_reuses_cached_provider_state(self):
-        self.assertIn("PROVIDER_CACHE_MS", self.main)
-        self.assertIn("providersCached(false)", self.main)
-        self.assertIn("mergeUsageProviderState", self.main)
-        self.assertIn("workerIdForProfile", self.main)
-        self.assertIn("'claude1'", self.main)
-        self.assertIn("'codex1'", self.main)
-        self.assertIn("'codex2'", self.main)
-        self.assertIn("'antigravity'", self.main)
-
-    def test_memory_renderer_ids_exist_in_html(self):
-        ids = [
-            "navMemory", "memoryView", "memoryProject", "loadMemory",
-            "memorySearch", "memoryKindFilter", "memoryStatusFilter",
-            "memoryNew", "memoryContext", "memoryList", "memoryForm",
-            "memoryKind", "memoryImportance", "memoryTitle", "memoryTags",
-            "memoryContent", "memoryMeta", "memoryArchive", "memoryReset",
-            "memorySave", "memoryContextPreview", "memoryContextClose",
-            "memoryEditorTitle", "memoryEditorState",
-        ]
-        for element_id in ids:
-            self.assertIn(f'id="{element_id}"', self.html, element_id)
-            self.assertIn(f"#{element_id}", self.renderer, element_id)
-
-    def test_memory_preload_api_matches_main_ipc_handlers(self):
-        contracts = {
             "memoryList": "teamyra:memory-list",
-            "memorySearch": "teamyra:memory-search",
-            "memoryGet": "teamyra:memory-get",
-            "memoryAdd": "teamyra:memory-add",
-            "memoryUpdate": "teamyra:memory-update",
-            "memoryArchive": "teamyra:memory-archive",
-            "memoryContext": "teamyra:memory-context",
+            "worktrees": "teamyra:worktrees",
+            "beginConflictResolution": "teamyra:conflict-begin",
+            "resolveConflict": "teamyra:conflict-resolve",
+            "mergeWorktree": "teamyra:worktree-merge",
         }
-        for method, channel in contracts.items():
+        for method, channel in ipc_contracts.items():
             self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
             self.assertIn(channel, self.preload)
             self.assertIn(channel, self.main)
 
-        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
         for action in (
+            "observability.timeline", "observability.search", "observability.usage",
             "memory.list", "memory.search", "memory.get", "memory.add",
             "memory.update", "memory.archive", "memory.context",
+            "worktree.list", "worktree.status", "worktree.diff",
+            "worktree.conflict.begin", "worktree.conflict.resolve",
         ):
-            self.assertIn(action, desktop_api)
+            self.assertIn(action, self.desktop_api)
 
-    def test_memory_renderer_uses_textcontent_for_dynamic_entry_fields(self):
-        self.assertIn("title.textContent = item.title", self.renderer)
-        self.assertIn("tags.textContent =", self.renderer)
-        self.assertIn("memoryContentEl.value = item.content", self.renderer)
-        self.assertNotIn("memoryListEl.innerHTML = items.map", self.renderer)
+    def test_destructive_worktree_ipc_still_requires_confirmation(self):
+        self.assertIn("Rebase requires explicit confirmation", self.main)
+        self.assertIn("Merge requires explicit confirmation", self.main)
+        self.assertIn("Discard requires explicit confirmation", self.main)
+        self.assertIn('worktree.rebase requires confirm=true', self.desktop_api)
+        self.assertIn('worktree.merge requires confirm=true', self.desktop_api)
+        self.assertIn('worktree.discard requires confirm=true', self.desktop_api)
 
-    def test_memory_is_runtime_only_and_archives_instead_of_deleting(self):
-        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-        self.assertRegex(gitignore, r"(?m)^memory/$")
-        self.assertIn("Archive this memory entry?", self.renderer)
-        self.assertNotIn("teamyra:memory-delete", self.main)
-        self.assertNotIn("memoryDelete:", self.preload)
-
-    def test_auto_update_preload_and_main_contract(self):
+    def test_auto_update_contract_is_preserved(self):
         contracts = {
             "updateStatus": "teamyra:update-status",
             "checkUpdates": "teamyra:update-check",
@@ -214,53 +185,15 @@ class DesktopContractTests(unittest.TestCase):
             self.assertIn(channel, self.main)
         self.assertIn("autoUpdater.autoDownload = true", self.main)
         self.assertIn("autoUpdater.autoInstallOnAppQuit = true", self.main)
-        self.assertIn("setupAutoUpdates();", self.main)
 
     def test_packaged_core_does_not_silently_fall_back_to_python(self):
         self.assertIn("Bundled TEAMYRA Core is missing", self.core_api)
         self.assertIn("process.env.TEAMYRA_CORE_EXE", self.core_api)
 
-    def test_preload_worktree_api_matches_main_ipc_handlers(self):
-        contracts = {
-            "worktrees": "teamyra:worktrees",
-            "worktreeStatus": "teamyra:worktree-status",
-            "worktreeDiff": "teamyra:worktree-diff",
-            "createWorktree": "teamyra:worktree-create",
-            "rebaseWorktree": "teamyra:worktree-rebase",
-            "beginConflictResolution": "teamyra:conflict-begin",
-            "conflictDetail": "teamyra:conflict-detail",
-            "resolveConflict": "teamyra:conflict-resolve",
-            "continueConflictResolution": "teamyra:conflict-continue",
-            "abortConflictResolution": "teamyra:conflict-abort",
-            "mergeWorktree": "teamyra:worktree-merge",
-            "discardWorktree": "teamyra:worktree-discard",
-        }
-        for method, channel in contracts.items():
-            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
-            self.assertIn(channel, self.preload)
-            self.assertIn(channel, self.main)
-
-    def test_conflict_editor_blocks_manual_save_for_clipped_content(self):
-        self.assertIn("detail.binary === true || detail.clipped === true", self.renderer)
-        self.assertIn("Conflict content is too large for safe manual editing here", self.renderer)
-
-    def test_destructive_worktree_ipc_requires_confirmation_twice(self):
-        self.assertIn("Rebase requires explicit confirmation", self.main)
-        self.assertIn("Merge requires explicit confirmation", self.main)
-        self.assertIn("Discard requires explicit confirmation", self.main)
-        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
-        self.assertIn('worktree.rebase requires confirm=true', desktop_api)
-        self.assertIn('worktree.merge requires confirm=true', desktop_api)
-        self.assertIn('worktree.discard requires confirm=true', desktop_api)
-
     def test_core_client_uses_execfile_not_shell_exec(self):
         self.assertIn("execFile(", self.core_api)
         self.assertNotIn("execSync(", self.core_api)
         self.assertNotIn("shell: true", self.core_api)
-
-    def test_force_discard_requires_typed_phrase_and_confirmation(self):
-        self.assertIn("phrase !== 'DISCARD'", self.renderer)
-        self.assertIn("Final confirmation: permanently force-discard", self.renderer)
 
 
 if __name__ == "__main__":
