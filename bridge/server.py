@@ -8,6 +8,7 @@ reads compact results, sends follow-up messages and cancels them.
 import json, os, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from worker_registry import build_worker_registry
+from runtime_paths import codex_launch, agy_launch
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -20,9 +21,6 @@ LOGS = ROOT / "logs"
 WORKTREES = ROOT / "worktrees"
 CONFIG = BRIDGE / "config.json"
 COOLDOWN_FILE = JOBS / "_cooldown_cleared.json"
-CODEX_JS = Path(r"C:\Users\kiran\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js")
-AGY = Path(r"C:\Users\kiran\AppData\Local\agy\bin\agy.exe")
-NODE = Path(r"C:\Program Files\nodejs\node.exe")
 PYTHON = Path(sys.executable)
 COOLDOWN_SECONDS = 1800
 # Sent when runner.py auto-resumes a worker session that died mid-run.
@@ -135,7 +133,10 @@ def codex_cmd(task, cwd, write, final_path, session_id=None):
 
 def agy_cmd(task, cwd, write, timeout, session_id=None):
     a = config().get("antigravity", {})
-    cmd = [str(AGY)]
+    launch = agy_launch()
+    if not launch:
+        raise RuntimeError("Antigravity CLI not found. Install agy or set TEAMYRA_AGY.")
+    cmd = list(launch)
     if session_id:
         cmd += ["--conversation", session_id]
     cmd += ["-p", task, "--output-format", "stream-json",
@@ -293,12 +294,18 @@ def worker_status():
         provider = info["provider"]
         try:
             if provider == "codex":
-                rc, o, e = run([str(NODE), str(CODEX_JS), "login", "status"],
+                launch = codex_launch()
+                if not launch:
+                    raise RuntimeError("Codex CLI not found")
+                rc, o, e = run([*launch, "login", "status"],
                                env={"CODEX_HOME": str(info["home"])}, timeout=20)
                 text = (o + e).strip()
                 ready = rc == 0 and "not logged in" not in text.lower()
             elif provider == "antigravity":
-                rc, o, e = run([str(AGY), "models"], timeout=30)
+                launch = agy_launch()
+                if not launch:
+                    raise RuntimeError("Antigravity CLI not found")
+                rc, o, e = run([*launch, "models"], timeout=30)
                 text = (o + e).strip()
                 ready = rc == 0 and bool(o.strip())
             else:
