@@ -163,6 +163,7 @@ class ChatGPTWebProvider {
       visible: this.visible,
       loaded: this.loaded,
       automationReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged),
+      workerReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged && workspace?.available),
       loginVisible: Boolean(this.lastProbe?.loginVisible),
       challenged: Boolean(this.lastProbe?.challenged),
       url: this.view && !this.view.webContents.isDestroyed() ? this.view.webContents.getURL() : '',
@@ -183,7 +184,7 @@ class ChatGPTWebProvider {
     const status = await this.getStatus();
     this.writeStatus({
       automation_ready: status.automationReady,
-      worker_ready: Boolean(status.automationReady && status.workspace?.available),
+      worker_ready: status.workerReady,
       workspace: status.workspace?.workspace || '',
       connected: status.connected,
       login_visible: status.loginVisible,
@@ -282,7 +283,10 @@ class ChatGPTWebProvider {
     const status = await this.workspaceBridge.status();
     if (!status?.available) throw new Error('Select a workspace first');
     const verified = await this.workspaceBridge.execute('filesystem.stat', { path: filePath });
-    if (verified.type !== 'file') throw new Error('Only files can be attached');
+    if (verified?.type !== 'file' || !verified?.path) throw new Error('Only workspace files can be attached');
+    const approvedPath = fs.realpathSync.native
+      ? fs.realpathSync.native(verified.path)
+      : fs.realpathSync(verified.path);
     const view = this.ensureView();
     await view.webContents.executeJavaScript(`(() => {
       const button = document.querySelector('button[aria-label*="Attach"], button[aria-label*="attach"], button[data-testid*="attach"]');
@@ -300,8 +304,8 @@ class ChatGPTWebProvider {
       const { root } = await debuggerApi.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
       const { nodeId } = await debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="file"]' });
       if (!nodeId) throw new Error('ChatGPT file input was not found');
-      await debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [verified.path] });
-      return { ok: true, path: verified.path };
+      await debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [approvedPath] });
+      return { ok: true, path: approvedPath };
     } finally {
       if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach();
     }
@@ -325,7 +329,7 @@ class ChatGPTWebProvider {
     candidates.sort((a, b) => (a.meta.created || 0) - (b.meta.created || 0));
     if (!candidates.length) return;
     const status = await this.refreshStatus();
-    if (!status.automationReady) return;
+    if (!status.workerReady) return;
     await this.runDelegatedJob(candidates[0].dir);
   }
 
