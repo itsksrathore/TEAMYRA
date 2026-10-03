@@ -176,6 +176,7 @@ def graph_summary(graph):
         "project_path": graph.get("project_path"),
         "state": graph.get("state"),
         "active_node_id": graph.get("active_node_id"),
+        "approval_pending_node_id": graph.get("approval_pending_node_id"),
         "counts": counts,
         "nodes": [
             {
