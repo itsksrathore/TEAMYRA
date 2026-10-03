@@ -201,6 +201,9 @@ class WorkspaceToolService:
         token_file = os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN_FILE")
         if token_file:
             roots.append(Path(token_file).expanduser().resolve().parent)
+        desktop_user_data = os.environ.get("TEAMYRA_DESKTOP_USER_DATA")
+        if desktop_user_data:
+            roots.append(Path(desktop_user_data).expanduser().resolve())
         return [p.resolve() for p in roots]
 
     def _sensitive_name(self, path: Path):
