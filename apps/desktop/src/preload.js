@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('teamyra', {
   configureChatgptWorkspace: (workspace, permissions) => ipcRenderer.invoke('teamyra:chatgpt-workspace-configure', workspace, permissions || {}),
   selectChatgptWorkspace: () => ipcRenderer.invoke('teamyra:chatgpt-select-workspace'),
   chatgptChanges: () => ipcRenderer.invoke('teamyra:chatgpt-changes'),
+  revertChatgptChanges: (paths, confirm = false) => ipcRenderer.invoke('teamyra:chatgpt-revert', paths || ['.'], confirm === true),
   attachChatgptFile: (filePath) => ipcRenderer.invoke('teamyra:chatgpt-attach-file', filePath),
   addAccount: (providerId, name) => ipcRenderer.invoke('teamyra:add-account', providerId, name),
   updateAccount: (providerId, profileId, patch) => ipcRenderer.invoke('teamyra:update-account', providerId, profileId, patch || {}),
