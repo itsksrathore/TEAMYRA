@@ -750,6 +750,10 @@ TOOLS = [
          "worktree_id": {"type": "string"},
          "max_chars": {"type": "integer", "default": 50000, "minimum": 1000, "maximum": 200000}},
          "required": ["worktree_id"], "additionalProperties": False}},
+    {"name": "worktree_rebase", "description": "Rebase a clean TEAMYRA worktree branch onto the latest captured target branch. Requires confirm=true and aborts automatically on conflict.",
+     "inputSchema": {"type": "object", "properties": {
+         "worktree_id": {"type": "string"}, "confirm": {"type": "boolean", "default": False}},
+         "required": ["worktree_id", "confirm"], "additionalProperties": False}},
     {"name": "worktree_merge", "description": "Merge a clean TEAMYRA worktree branch into its original target branch. Requires confirm=true and refuses dirty targets/worktrees.",
      "inputSchema": {"type": "object", "properties": {
          "worktree_id": {"type": "string"}, "confirm": {"type": "boolean", "default": False}},
@@ -874,6 +878,10 @@ def tool_call(name, a):
         return worktree_manager.status(WORKTREES, a["worktree_id"])
     if name == "worktree_diff":
         return worktree_manager.diff(WORKTREES, a["worktree_id"], a.get("max_chars", 50000))
+    if name == "worktree_rebase":
+        if a.get("confirm") is not True:
+            raise ValueError("worktree_rebase requires confirm=true")
+        return worktree_manager.rebase(WORKTREES, a["worktree_id"])
     if name == "worktree_merge":
         if a.get("confirm") is not True:
             raise ValueError("worktree_merge requires confirm=true")
