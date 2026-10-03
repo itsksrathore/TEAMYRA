@@ -46,11 +46,12 @@ class WorkspaceBridge {
   }
 
   async changes() {
-    const [status, diff] = await Promise.all([
+    const [status, diff, stagedDiff] = await Promise.all([
       this.execute('git.status', {}),
-      this.execute('git.diff', {})
+      this.execute('git.diff', {}),
+      this.execute('git.diff', { staged: true })
     ]);
-    return { status, diff };
+    return { status, diff, stagedDiff };
   }
 }
 
