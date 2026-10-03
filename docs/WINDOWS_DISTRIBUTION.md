@@ -1,4 +1,4 @@
-﻿# Windows Distribution
+# Windows Distribution
 
 TEAMYRA Phase 7 packages the local-first control plane as a Windows desktop application without requiring end users to install Python.
 
