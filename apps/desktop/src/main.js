@@ -124,6 +124,10 @@ ipcMain.handle('teamyra:worktree-create', (_event, options = {}) =>
     base_ref: String(options.baseRef || 'HEAD')
   })
 );
+ipcMain.handle('teamyra:worktree-rebase', (_event, worktreeId, confirm = false) => {
+  if (confirm !== true) throw new Error('Rebase requires explicit confirmation');
+  return callCore('worktree.rebase', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
+});
 ipcMain.handle('teamyra:worktree-merge', (_event, worktreeId, confirm = false) => {
   if (confirm !== true) throw new Error('Merge requires explicit confirmation');
   return callCore('worktree.merge', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
