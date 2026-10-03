@@ -93,7 +93,7 @@ By default:
 - TEAMYRA runtime/profile stores and common credential/provider/browser stores remain blocked even when they are physically nested under the selected workspace;
 - credential-like files such as `.env`, provider auth JSON, private key/certificate files, and SSH private-key names are blocked (example/sample env templates remain usable).
 
-Blocked sensitive locations include SSH/GPG, AWS/Azure/GCloud/Kubernetes/Docker credentials, Claude/Codex/Antigravity provider homes, Windows credential/protect stores, Chrome/Edge profiles, Firefox profiles, Windows system directories, and the TEAMYRA local-agent token directory.
+Blocked sensitive locations include SSH/GPG, AWS/Azure/GCloud/Kubernetes/Docker credentials, Claude/Codex/Antigravity provider homes, Windows credential/protect stores, Chrome/Edge profiles, Firefox profiles, TEAMYRA's own Electron userData/browser partition (including the persistent ChatGPT cookies/session), Windows system directories, and the TEAMYRA local-agent token directory.
 
 ## Permissions
 
