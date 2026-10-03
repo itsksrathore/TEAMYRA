@@ -696,10 +696,6 @@ TOOLS = [
     {"name": "graph_cancel", "description": "Request cancellation of a graph and its active child job.",
      "inputSchema": {"type": "object", "properties": {"graph_id": {"type": "string"}},
                      "required": ["graph_id"], "additionalProperties": False}},
-    {"name": "graph_approve", "description": "Approve one dependency-ready graph node that was created with requires_approval=true.",
-     "inputSchema": {"type": "object", "properties": {
-         "graph_id": {"type": "string"}, "node_id": {"type": "string"}, "note": {"type": "string"}},
-         "required": ["graph_id", "node_id"], "additionalProperties": False}},
     {"name": "graph_approve", "description": "Approve or deny the currently gated graph node before the Conductor starts it.",
      "inputSchema": {"type": "object", "properties": {
          "graph_id": {"type": "string"}, "node_id": {"type": "string"},
