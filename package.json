@@ -1,0 +1,13 @@
+{
+  "name": "teamyra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Provider-agnostic multi-agent engineering control plane",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "desktop": "npm --workspace @teamyra/desktop start",
+    "desktop:check": "npm --workspace @teamyra/desktop run check"
+  }
+}
