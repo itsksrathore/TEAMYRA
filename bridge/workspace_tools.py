@@ -54,6 +54,7 @@ HARD_BLOCKED_EXECUTABLES = {
     "sudo", "runas", "dd", "mount", "umount",
 }
 SHELL_EXECUTABLES = {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe", "bash", "sh", "zsh"}
+DESTRUCTIVE_EXECUTABLES = {"rm", "rmdir", "unlink", "del", "erase"}
 INLINE_EVAL_FLAGS = {"-e", "--eval", "-c", "-command", "--command"}
 
 
@@ -410,14 +411,27 @@ class WorkspaceToolService:
             exe = Path(argv[0]).name.lower()
             if exe in HARD_BLOCKED_EXECUTABLES or exe.startswith("mkfs"):
                 raise PermissionError("command is blocked by TEAMYRA safety policy")
-            sensitive_command = exe in SHELL_EXECUTABLES or (
-                exe in {"node", "node.exe", "python", "python.exe", "python3", "ruby", "perl"}
-                and any(arg.lower() in INLINE_EVAL_FLAGS for arg in argv[1:3])
+            git_args = [value.lower() for value in argv[1:]]
+            destructive_git = exe in {"git", "git.exe"} and (
+                ("reset" in git_args and "--hard" in git_args)
+                or ("clean" in git_args and any(flag in git_args for flag in ("-f", "-fd", "-df", "-fx", "-xfd")))
+                or ("checkout" in git_args and "--force" in git_args)
+                or ("branch" in git_args and "-d" in git_args)
+                or ("branch" in git_args and "-D" in argv[1:])
+            )
+            sensitive_command = (
+                exe in SHELL_EXECUTABLES
+                or exe in DESTRUCTIVE_EXECUTABLES
+                or destructive_git
+                or (
+                    exe in {"node", "node.exe", "python", "python.exe", "python3", "ruby", "perl"}
+                    and any(arg.lower() in INLINE_EVAL_FLAGS for arg in argv[1:3])
+                )
             )
             if sensitive_command and not (
                 permissions.get("destructive_without_confirmation") or confirm
             ):
-                raise PermissionError("shell/eval command requires explicit confirmation")
+                raise PermissionError("destructive/shell/eval command requires explicit confirmation")
             cwd = self._path(args.get("cwd", "."), workspace, permissions, must_exist=True)
             if not cwd.is_dir():
                 raise WorkspaceToolError("cwd is not a directory")
