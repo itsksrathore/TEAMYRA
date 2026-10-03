@@ -1,59 +1,43 @@
-# AI Orchestrator
+# TEAMYRA
 
-Location: D:\AI-Orchestrator
+TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plane.
 
-## Architecture
-Claude Code is the master planner/orchestrator.
-The user-scope MCP server `ai-workers` exposes:
-- worker_status
-- run_ai_worker
-- run_ai_parallel
-- resume_ai_worker
-- clear_worker_cooldown
+It is evolving from the existing AI worker bridge into a full desktop system that can coordinate Claude Code, Codex, Antigravity, and future agents from one control desk.
 
-Workers:
-- codex1 -> existing authenticated Codex CLI profile at C:\Users\kiran\.codex
-- codex2 -> isolated profile at D:\AI-Orchestrator\profiles\codex2
-- antigravity -> C:\Users\kiran\AppData\Local\agy\bin\agy.exe
+## Current capabilities
+- Claude Code as supervisor/orchestrator.
+- Codex account 1 and isolated Codex account 2.
+- Antigravity worker.
+- automatic rate/quota cooldown and fallback.
+- detached and resumable worker jobs.
+- compact final results with full local logs.
+- isolated Git worktrees for parallel tasks.
+- live local job dashboard.
+- MCP worker bridge.
 
-## Routing
-Auto order: Antigravity -> Codex 1 -> Codex 2.
-Claude can explicitly choose a worker.
-Rate/quota errors place a worker in temporary cooldown and auto routing continues.
+## Target capabilities
+- Nami-style desktop UI.
+- automatic detection of installed agents and existing local logins.
+- multiple managed accounts per provider where isolation is supported.
+- account-aware routing and failover.
+- Conductor/supervisor workflows.
+- task graph, review loops, approvals, and worker messaging.
+- visual Git worktree/diff/merge controls.
+- TEAMYRA MCP, CLI, plugins, and skills.
+- usage/quota/context observability.
+- project memory and shared handoffs.
+- Windows installer and update pipeline.
 
-## Token/context behavior
-Worker raw logs stay under D:\AI-Orchestrator\logs.
-Compact final results are returned to Claude.
-Worker session IDs are returned so Claude can resume a worker without resending full prior context.
+## Project plan
+See [ROADMAP.md](ROADMAP.md). Completed work is checked off there phase by phase.
 
-## Parallel safety
-run_ai_parallel creates isolated Git worktrees under:
-D:\AI-Orchestrator\worktrees
+## Existing bridge layout
+- `bridge/server.py` — MCP bridge and worker orchestration.
+- `bridge/runner.py` — detached worker job execution.
+- `bridge/dashboard.py` — current local dashboard.
+- `bridge/config.json` — current worker configuration.
 
-Each parallel task gets a separate branch/worktree.
-Claude should review diffs and merge deliberately.
-
-## Authentication helpers
-Login-Codex2.cmd
-- authenticates the isolated second ChatGPT/Codex account.
-
-Login-Claude-Code.cmd
-- starts Claude Code so /login can be completed if the standalone CLI is not authenticated.
-
-Start-Claude-Code.cmd
-- starts Claude Code with CLI paths prepared.
-- default project is D:\Ai-editing.
-- pass another project path as the first argument to start elsewhere.
-
-## Important files
-bridge\server.py                 MCP bridge
-profiles\codex2\config.toml     isolated Codex 2 credential store
-logs\                            full worker logs
-results\                         compact/final Codex messages
-worktrees\                       isolated parallel task worktrees
+Runtime data such as profiles, logs, jobs, results, and worktrees is intentionally not committed.
 
 ## Security
-Do not commit auth.json files.
-The bridge does not use dangerous bypass flags.
-Codex write tasks use --approve-for-me.
-Antigravity uses sandbox mode.
+TEAMYRA should reuse provider-native authentication and isolated profile homes instead of copying account secrets into application state.
