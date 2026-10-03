@@ -686,6 +686,7 @@ $('#chatgptStop').addEventListener('click', () => window.teamyra.stopChatgpt().c
 window.teamyra.onUpdateState(updateUpdateNote);
 
 async function boot() {
+  document.body.dataset.platform = window.teamyra.platform || '';
   const chatgptAvatar = $('.chatgpt-avatar');
   if (chatgptAvatar) chatgptAvatar.innerHTML = agentIconSvg('openai') || 'GPT';
   window.teamyra.updateStatus().then(updateUpdateNote).catch(() => {});
