@@ -29,6 +29,9 @@ class WorkspaceToolTests(unittest.TestCase):
             token = "x" * 64
 
             service.execute("filesystem.create", {"path": "a.txt", "content": "hello\n"}, token=token, actor="chatgpt-normal")
+            stat = service.execute("filesystem.stat", {"path": "a.txt"}, token=token)
+            self.assertEqual(stat["type"], "file")
+            self.assertEqual(stat["size"], len("hello\n"))
             read = service.execute("filesystem.read", {"path": "a.txt"}, token=token)
             self.assertEqual(read["content"], "hello\n")
 
@@ -98,6 +101,11 @@ class WorkspaceToolTests(unittest.TestCase):
             diff = service.execute("git.diff", {}, token=token)
             self.assertIn("-one", diff["stdout"])
             self.assertIn("+two", diff["stdout"])
+            with self.assertRaises(PermissionError):
+                service.execute("git.restore", {"paths": ["tracked.txt"]}, token=token)
+            service.execute("git.restore", {"paths": ["tracked.txt"]}, token=token, confirm=True)
+            self.assertEqual((workspace / "tracked.txt").read_text(encoding="utf-8"), "one\n")
+            (workspace / "tracked.txt").write_text("two\n", encoding="utf-8")
             service.execute("git.add", {"paths": ["tracked.txt"]}, token=token)
             commit = service.execute("git.commit", {"message": "update"}, token=token)
             self.assertEqual(commit["exit_code"], 0)
@@ -114,6 +122,37 @@ class WorkspaceToolTests(unittest.TestCase):
             argv = [shell, "/c", "echo ok"] if os.name == "nt" else [shell, "-c", "echo ok"]
             with self.assertRaises(PermissionError):
                 service.execute("terminal.run", {"argv": argv}, token="x" * 64)
+
+
+    def test_explicit_workspace_execution_does_not_replace_chatgpt_selection(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "runtime"
+            selected = base / "selected"
+            other = base / "other"
+            selected.mkdir()
+            other.mkdir()
+            (other / "item.txt").write_text("shared", encoding="utf-8")
+            service = self.make_service(root, selected)
+            result = service.execute_in_workspace(
+                other,
+                "filesystem.read",
+                {"path": "item.txt"},
+                trusted=True,
+                actor="teamyra-mcp",
+            )
+            self.assertEqual(result["content"], "shared")
+            self.assertEqual(service.status(token="x" * 64)["workspace"], str(selected.resolve()))
+
+    def test_destructive_terminal_commands_require_confirmation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            command = ["git", "reset", "--hard", "HEAD"]
+            with self.assertRaises(PermissionError):
+                service.execute("terminal.run", {"argv": command}, token="x" * 64)
 
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:
