@@ -8,8 +8,17 @@
     "mode": "accept-edits",
     "sandbox": false
   },
-  "auto_order": ["antigravity", "codex1", "codex2"],
+  "auto_order": [
+    "antigravity",
+    "codex1",
+    "codex2"
+  ],
   "auto_resume": 2,
   "job_timeout_minutes": 180,
-  "dashboard_port": 8765
+  "dashboard_port": 8765,
+  "claude": {
+    "model": "opus",
+    "effort": "high",
+    "permission_mode": "auto"
+  }
 }
