@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('teamyra', {
   worktreeStatus: (worktreeId) => ipcRenderer.invoke('teamyra:worktree-status', worktreeId),
   worktreeDiff: (worktreeId, maxChars = 80000) => ipcRenderer.invoke('teamyra:worktree-diff', worktreeId, maxChars),
   createWorktree: (options) => ipcRenderer.invoke('teamyra:worktree-create', options || {}),
+  rebaseWorktree: (worktreeId, confirm = false) => ipcRenderer.invoke('teamyra:worktree-rebase', worktreeId, confirm),
   mergeWorktree: (worktreeId, confirm = false) => ipcRenderer.invoke('teamyra:worktree-merge', worktreeId, confirm),
   discardWorktree: (worktreeId, options) => ipcRenderer.invoke('teamyra:worktree-discard', worktreeId, options || {}),
   openTerminal: (options) => ipcRenderer.invoke('teamyra:terminal-open', options || {}),
