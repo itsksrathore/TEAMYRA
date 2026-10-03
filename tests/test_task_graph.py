@@ -300,5 +300,203 @@ class TaskGraphTests(unittest.TestCase):
                 self.assertEqual(by_id["after"]["status"], "blocked")
 
 
+    def test_parallel_graph_metadata_and_schema(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(
+                root,
+                "Parallel",
+                project,
+                [
+                    {"id": "a", "task": "A"},
+                    {"id": "b", "task": "B"},
+                ],
+                max_parallel=3,
+            )
+            summary = task_graph.graph_summary(graph)
+            self.assertEqual(summary["max_parallel"], 3)
+            self.assertEqual(summary["active_node_ids"], [])
+            self.assertEqual(summary["nodes"][0]["merge_state"], "not_required")
+
+        tool = next(tool for tool in server.TOOLS if tool["name"] == "graph_create")
+        self.assertIn("max_parallel", tool["inputSchema"]["properties"])
+        self.assertEqual(tool["inputSchema"]["properties"]["max_parallel"]["maximum"], 4)
+
+    def test_parallel_conductor_launches_independent_nodes_in_managed_worktrees(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(
+                root,
+                "Parallel launch",
+                project,
+                [
+                    {"id": "a", "task": "Build A"},
+                    {"id": "b", "task": "Build B"},
+                ],
+                max_parallel=2,
+            )
+            worktrees = [
+                {"id": "wt-a", "path": str(root / "wt-a"), "branch": "teamyra/a"},
+                {"id": "wt-b", "path": str(root / "wt-b"), "branch": "teamyra/b"},
+            ]
+            with patch.object(server, "ROOT", root), \
+                 patch.object(conductor_monitor.server, "ROOT", root), \
+                 patch.object(server, "WORKTREES", root / "worktrees"), \
+                 patch.object(server, "pick_worker", side_effect=["codex1", "codex2"]), \
+                 patch.object(server.worktree_manager, "create", side_effect=worktrees), \
+                 patch.object(server, "start_job", side_effect=[("job-a", "codex1"), ("job-b", "codex2")]) as start, \
+                 patch.object(server, "patch_job_meta"), \
+                 patch.object(server, "config", return_value={"max_failovers": 2}):
+                updated = conductor_monitor.tick(graph["id"])
+
+            self.assertEqual(updated["state"], "running")
+            self.assertEqual(updated["active_node_ids"], ["a", "b"])
+            by_id = {node["id"]: node for node in updated["nodes"]}
+            self.assertEqual(by_id["a"]["selected_worker"], "codex1")
+            self.assertEqual(by_id["b"]["selected_worker"], "codex2")
+            self.assertEqual(by_id["a"]["worktree_id"], "wt-a")
+            self.assertEqual(by_id["b"]["worktree_id"], "wt-b")
+            self.assertEqual(start.call_count, 2)
+            self.assertEqual(start.call_args_list[0].args[2], str(root / "wt-a"))
+            self.assertEqual(start.call_args_list[1].args[2], str(root / "wt-b"))
+
+    def test_parallel_success_integrates_worktree_before_marking_done(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(
+                root, "Integrate", project, [{"id": "a", "task": "A"}], max_parallel=2
+            )
+            node = graph["nodes"][0]
+            node.update({
+                "status": "running",
+                "job_id": "job-a",
+                "selected_worker": "codex1",
+                "worktree_id": "wt-a",
+                "worktree_path": str(root / "wt-a"),
+                "worktree_branch": "teamyra/a",
+                "merge_state": "pending",
+            })
+            graph["active_node_ids"] = ["a"]
+            graph["active_node_id"] = "a"
+            graph["state"] = "running"
+            task_graph.save_graph(root, graph)
+
+            with patch.object(server, "ROOT", root), \
+                 patch.object(conductor_monitor.server, "ROOT", root), \
+                 patch.object(server, "WORKTREES", root / "worktrees"), \
+                 patch.object(server, "chain_is_complete", return_value=True), \
+                 patch.object(server, "job_result", return_value={
+                     "state": "done", "terminal_job_id": "job-a", "worker": "codex1"
+                 }), \
+                 patch.object(server.worktree_manager, "snapshot", return_value={
+                     "ok": True, "committed": True, "head": "snapshot-head"
+                 }) as snapshot, \
+                 patch.object(server.worktree_manager, "rebase", return_value={
+                     "ok": True, "head": "rebased-head"
+                 }) as rebase, \
+                 patch.object(server.worktree_manager, "merge", return_value={
+                     "ok": True, "merged_commit": "merged-head"
+                 }) as merge, \
+                 patch.object(server.worktree_manager, "discard", return_value={"ok": True}) as discard:
+                updated = conductor_monitor.tick(graph["id"])
+
+            node = updated["nodes"][0]
+            self.assertEqual(updated["state"], "done")
+            self.assertEqual(node["status"], "done")
+            self.assertEqual(node["snapshot_commit"], "snapshot-head")
+            self.assertEqual(node["merged_commit"], "merged-head")
+            self.assertEqual(node["merge_state"], "merged")
+            self.assertTrue(node["worktree_removed"])
+            snapshot.assert_called_once()
+            rebase.assert_called_once()
+            merge.assert_called_once()
+            discard.assert_called_once()
+
+    def test_parallel_integration_failure_blocks_downstream_and_keeps_worktree(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(
+                root,
+                "Conflict",
+                project,
+                [
+                    {"id": "a", "task": "A"},
+                    {"id": "b", "task": "B", "depends_on": ["a"]},
+                ],
+                max_parallel=2,
+            )
+            node = graph["nodes"][0]
+            node.update({
+                "status": "running",
+                "job_id": "job-a",
+                "selected_worker": "codex1",
+                "worktree_id": "wt-a",
+                "worktree_path": str(root / "wt-a"),
+                "worktree_branch": "teamyra/a",
+                "merge_state": "pending",
+            })
+            graph["active_node_ids"] = ["a"]
+            graph["active_node_id"] = "a"
+            graph["state"] = "running"
+            task_graph.save_graph(root, graph)
+
+            with patch.object(server, "ROOT", root), \
+                 patch.object(conductor_monitor.server, "ROOT", root), \
+                 patch.object(server, "WORKTREES", root / "worktrees"), \
+                 patch.object(server, "chain_is_complete", return_value=True), \
+                 patch.object(server, "job_result", return_value={
+                     "state": "done", "terminal_job_id": "job-a", "worker": "codex1"
+                 }), \
+                 patch.object(server.worktree_manager, "snapshot", side_effect=RuntimeError("hook rejected")), \
+                 patch.object(server.worktree_manager, "discard") as discard:
+                updated = conductor_monitor.tick(graph["id"])
+
+            by_id = {node["id"]: node for node in updated["nodes"]}
+            self.assertEqual(updated["state"], "failed")
+            self.assertEqual(by_id["a"]["status"], "failed")
+            self.assertEqual(by_id["a"]["merge_state"], "failed")
+            self.assertIn("worktree integration failed", by_id["a"]["error"])
+            self.assertEqual(by_id["b"]["status"], "blocked")
+            self.assertEqual(by_id["a"]["worktree_id"], "wt-a")
+            discard.assert_not_called()
+
+    def test_approval_gate_does_not_block_other_parallel_ready_node(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(
+                root,
+                "Approval plus work",
+                project,
+                [
+                    {"id": "gated", "task": "Deploy", "requires_approval": True, "write": False},
+                    {"id": "read", "task": "Inspect", "write": False},
+                ],
+                max_parallel=2,
+            )
+            with patch.object(server, "ROOT", root), \
+                 patch.object(conductor_monitor.server, "ROOT", root), \
+                 patch.object(server, "pick_worker", return_value="codex1"), \
+                 patch.object(server, "start_job", return_value=("job-read", "codex1")), \
+                 patch.object(server, "patch_job_meta"), \
+                 patch.object(server, "config", return_value={"max_failovers": 2}):
+                updated = conductor_monitor.tick(graph["id"])
+
+            by_id = {node["id"]: node for node in updated["nodes"]}
+            self.assertEqual(updated["state"], "running")
+            self.assertEqual(updated["approval_pending_node_ids"], ["gated"])
+            self.assertEqual(by_id["gated"]["status"], "pending")
+            self.assertEqual(by_id["read"]["status"], "running")
+
+
 if __name__ == "__main__":
     unittest.main()
