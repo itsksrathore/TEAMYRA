@@ -237,7 +237,12 @@ class Job:
                                 text=True, encoding="utf-8", errors="replace", creationflags=flags)
         self.save_meta(state="running", worker_pid=proc.pid)
         stderr_lines = []
-        threading.Thread(target=lambda: stderr_lines.extend(proc.stderr), daemon=True).start()
+        stderr_thread = threading.Thread(
+            target=lambda: stderr_lines.extend(proc.stderr),
+            daemon=True,
+            name=f"teamyra-stderr-{proc.pid}",
+        )
+        stderr_thread.start()
         timed_out, cancelled = threading.Event(), threading.Event()
 
         def watchdog():
@@ -275,6 +280,11 @@ class Job:
                 last_save = time.time()
                 self.save_meta()
         rc = proc.wait()
+        stderr_thread.join(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
         return rc, "".join(stderr_lines), timed_out.is_set(), cancelled.is_set()
 
     def run(self):

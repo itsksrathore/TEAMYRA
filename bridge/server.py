@@ -361,25 +361,31 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     log = open(jdir / "runner.log", "w", encoding="utf-8")
     try:  # break away from the MCP server's job object so a bridge restart does not kill the job
-        subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                         creationflags=flags | 0x01000000)
-    except OSError:
-        subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                         creationflags=flags)
+        try:
+            subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                             creationflags=flags | 0x01000000)
+        except OSError:
+            subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                             creationflags=flags)
+    finally:
+        log.close()
 
     if auto_failover and start_monitor and max_failovers > 0:
         monitor_log = open(jdir / "failover-monitor.log", "a", encoding="utf-8")
         monitor_cmd = [str(PYTHON), str(BRIDGE / "failover_monitor.py"), job_id, str(max_failovers)]
         try:
-            subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                             stdout=monitor_log, stderr=monitor_log, close_fds=True,
-                             creationflags=flags | 0x01000000)
-        except OSError:
-            subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                             stdout=monitor_log, stderr=monitor_log, close_fds=True,
-                             creationflags=flags)
+            try:
+                subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                 stdout=monitor_log, stderr=monitor_log, close_fds=True,
+                                 creationflags=flags | 0x01000000)
+            except OSError:
+                subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                 stdout=monitor_log, stderr=monitor_log, close_fds=True,
+                                 creationflags=flags)
+        finally:
+            monitor_log.close()
     return job_id, worker
 
 
@@ -592,25 +598,28 @@ def start_conductor(graph_id):
     cmd = [str(PYTHON), str(BRIDGE / "conductor_monitor.py"), graph_id]
     try:
         try:
-            subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                close_fds=True,
-                creationflags=flags | 0x01000000,
-            )
-        except OSError:
-            subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                close_fds=True,
-                creationflags=flags,
-            )
+            try:
+                subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    close_fds=True,
+                    creationflags=flags | 0x01000000,
+                )
+            except OSError:
+                subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    close_fds=True,
+                    creationflags=flags,
+                )
+        finally:
+            log.close()
     except Exception as exc:
         graph = task_graph.load_graph(ROOT, graph_id)
         graph["state"] = "draft"
@@ -640,25 +649,28 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allo
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     cmd = [str(PYTHON), str(BRIDGE / "review_monitor.py"), state["id"]]
     try:
-        subprocess.Popen(
-            cmd,
-            cwd=str(ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            close_fds=True,
-            creationflags=flags | 0x01000000,
-        )
-    except OSError:
-        subprocess.Popen(
-            cmd,
-            cwd=str(ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            close_fds=True,
-            creationflags=flags,
-        )
+        try:
+            subprocess.Popen(
+                cmd,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                close_fds=True,
+                creationflags=flags | 0x01000000,
+            )
+        except OSError:
+            subprocess.Popen(
+                cmd,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                close_fds=True,
+                creationflags=flags,
+            )
+    finally:
+        log.close()
     return review_cycle.summary(state)
 
 
