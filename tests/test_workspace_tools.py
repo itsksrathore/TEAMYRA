@@ -461,6 +461,20 @@ class WorkspaceToolTests(unittest.TestCase):
             added = service.execute("git.add", {"paths": ["safe.txt"]}, token=token)
             self.assertEqual(added["exit_code"], 0)
 
+    def test_git_add_blocks_repository_clean_filters(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            (workspace / ".gitattributes").write_text("filtered.txt filter=unsafe\n", encoding="utf-8")
+            (workspace / "filtered.txt").write_text("payload\n", encoding="utf-8")
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+
+            with self.assertRaisesRegex(PermissionError, "clean filters"):
+                service.execute("git.add", {"paths": ["filtered.txt"]}, token=token)
+
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
