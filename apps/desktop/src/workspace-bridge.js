@@ -1,12 +1,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { ROOT, callCore } = require('./core-api');
+const { app } = require('electron');
+const { callCore } = require('./core-api');
 
 class WorkspaceBridge {
   constructor() {
-    this.root = path.join(ROOT, 'chatgpt');
+    this.root = path.join(app.getPath('userData'), 'security');
     this.tokenFile = path.join(this.root, 'local-agent.token');
+    process.env.TEAMYRA_LOCAL_AGENT_TOKEN_FILE = this.tokenFile;
     this.token = this.ensureToken();
   }
 
