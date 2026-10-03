@@ -158,7 +158,9 @@ function renderProviders(providers) {
     }
 
     const foot = fragment.querySelector('.provider-foot');
-    if (provider.managedProfilesVerified) {
+    if (provider.id === 'antigravity' && provider.installed) {
+      foot.textContent = 'Native session detected via Antigravity secure keyring. Multi-account stays disabled until the CLI exposes a verified account/profile selector.';
+    } else if (provider.managedProfilesVerified) {
       foot.textContent = 'Managed profile isolation verified. Use + to start a separate provider login.';
     } else if (provider.installed) {
       foot.textContent = 'Native session detection is active. Managed multi-account isolation is not enabled until verified.';
@@ -260,7 +262,10 @@ async function refresh() {
   }
 
   document.querySelector('#mAgents').textContent = providers.filter(x => x.installed).length;
-  document.querySelector('#mAccounts').textContent = providers.reduce((n, x) => n + x.profiles.filter(p => p.signedIn).length, 0);
+  document.querySelector('#mAccounts').textContent = providers.reduce(
+    (n, x) => n + x.profiles.filter(p => p.signedIn && p.enabled !== false).length,
+    0
+  );
 }
 
 document.querySelector('#refresh').addEventListener('click', () => {
