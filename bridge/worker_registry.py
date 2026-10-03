@@ -14,15 +14,33 @@ def safe_worker_part(value):
     return (value or "account")[:48]
 
 
-def profile_label(path):
+def profile_metadata(path):
+    data = {}
     try:
-        data = json.loads((path / "teamyra-profile.json").read_text(encoding="utf-8"))
-        name = str(data.get("name") or "").strip()
-        if name:
-            return name
+        parsed = json.loads((path / "teamyra-profile.json").read_text(encoding="utf-8"))
+        if isinstance(parsed, dict):
+            data = parsed
     except Exception:
         pass
-    return path.name
+
+    name = str(data.get("name") or path.name).strip() or path.name
+    try:
+        priority = int(data.get("priority", 100))
+    except (TypeError, ValueError):
+        priority = 100
+
+    return {
+        "name": name,
+        "enabled": data.get("enabled", True) is not False,
+        "priority": max(0, min(priority, 10000)),
+        "model": data.get("model"),
+        "effort": data.get("effort"),
+        "permission_mode": data.get("permission_mode"),
+    }
+
+
+def profile_label(path):
+    return profile_metadata(path)["name"]
 
 
 def build_worker_registry(root, home=None):
@@ -76,13 +94,17 @@ def build_worker_registry(root, home=None):
             worker_id = "codex-" + part
             if worker_id in workers:
                 continue
+            meta = profile_metadata(path)
             workers[worker_id] = {
                 "id": worker_id,
                 "provider": "codex",
-                "label": profile_label(path),
+                "label": meta["name"],
                 "profile_id": path.name,
                 "home": str(path),
                 "native": False,
+                "enabled": meta["enabled"],
+                "priority": meta["priority"],
+                "settings": {k: meta[k] for k in ("model", "effort", "permission_mode") if meta[k] is not None},
             }
 
     claude_profiles = profiles / "claude"
@@ -92,13 +114,17 @@ def build_worker_registry(root, home=None):
             worker_id = "claude-" + part
             if worker_id in workers:
                 continue
+            meta = profile_metadata(path)
             workers[worker_id] = {
                 "id": worker_id,
                 "provider": "claude",
-                "label": profile_label(path),
+                "label": meta["name"],
                 "profile_id": path.name,
                 "home": str(path),
                 "native": False,
+                "enabled": meta["enabled"],
+                "priority": meta["priority"],
+                "settings": {k: meta[k] for k in ("model", "effort", "permission_mode") if meta[k] is not None},
             }
 
     return workers
