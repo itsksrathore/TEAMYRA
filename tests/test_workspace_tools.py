@@ -368,6 +368,39 @@ class WorkspaceToolTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 service.execute("filesystem.read", {"path": ".git/config"}, token=token)
 
+    def test_workspace_root_cannot_be_moved_or_renamed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+            for tool, args in (
+                ("filesystem.move", {"path": ".", "destination": "moved"}),
+                ("filesystem.rename", {"path": ".", "new_name": "renamed"}),
+            ):
+                with self.assertRaises(PermissionError, msg=tool):
+                    service.execute(tool, args, token=token)
+
+    def test_git_add_requires_explicit_files_and_blocks_credential_like_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+            (workspace / "safe.txt").write_text("ok", encoding="utf-8")
+            (workspace / ".npmrc").write_text("_authToken=secret", encoding="utf-8")
+
+            with self.assertRaises(PermissionError):
+                service.execute("git.add", {"paths": ["."]}, token=token)
+            with self.assertRaises(PermissionError):
+                service.execute("git.add", {"paths": [".npmrc"]}, token=token)
+
+            added = service.execute("git.add", {"paths": ["safe.txt"]}, token=token)
+            self.assertEqual(added["exit_code"], 0)
+
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
