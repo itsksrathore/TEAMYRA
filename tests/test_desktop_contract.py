@@ -18,7 +18,7 @@ class DesktopContractTests(unittest.TestCase):
         ids = [
             "navCommand", "navWorktrees", "commandView", "worktreesView",
             "worktreeList", "wtTitle", "wtState", "wtMeta", "wtSummary",
-            "wtDiff", "wtMerge", "wtDiscard", "wtForceDiscard",
+            "wtDiff", "wtRebase", "wtMerge", "wtDiscard", "wtForceDiscard",
             "wtOpenTerminal", "createWorktree", "refreshWorktrees",
             "wtManaged", "wtDirty", "wtConflicts",
         ]
@@ -32,6 +32,7 @@ class DesktopContractTests(unittest.TestCase):
             "worktreeStatus": "teamyra:worktree-status",
             "worktreeDiff": "teamyra:worktree-diff",
             "createWorktree": "teamyra:worktree-create",
+            "rebaseWorktree": "teamyra:worktree-rebase",
             "mergeWorktree": "teamyra:worktree-merge",
             "discardWorktree": "teamyra:worktree-discard",
         }
@@ -41,9 +42,11 @@ class DesktopContractTests(unittest.TestCase):
             self.assertIn(channel, self.main)
 
     def test_destructive_worktree_ipc_requires_confirmation_twice(self):
+        self.assertIn("Rebase requires explicit confirmation", self.main)
         self.assertIn("Merge requires explicit confirmation", self.main)
         self.assertIn("Discard requires explicit confirmation", self.main)
         desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
+        self.assertIn('worktree.rebase requires confirm=true', desktop_api)
         self.assertIn('worktree.merge requires confirm=true', desktop_api)
         self.assertIn('worktree.discard requires confirm=true', desktop_api)
 
