@@ -114,7 +114,8 @@ async function callCore(action, payload = {}, options = {}) {
     env: {
       ...process.env,
       TEAMYRA_ROOT: ROOT,
-      ...(PACKAGED_CORE && fs.existsSync(PACKAGED_CORE) ? { TEAMYRA_CORE_EXE: PACKAGED_CORE } : {})
+      ...(PACKAGED_CORE && fs.existsSync(PACKAGED_CORE) ? { TEAMYRA_CORE_EXE: PACKAGED_CORE } : {}),
+      ...(options.env || {})
     }
   });
 
