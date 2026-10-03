@@ -84,3 +84,15 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Existing TEAMYRA task/job/handoff/failover integration and persistent worker-conversation metadata.
 - [x] Automated Windows/Linux contract, routing and security tests.
 - [ ] Live Windows acceptance with a real logged-in ChatGPT account: sign-in, restart persistence, manual chat, and current production DOM automation.
+
+
+## Phase 9 — Minimal Nami-style Desktop
+- [x] Reduce permanent primary navigation to Tasks and Agents only.
+- [x] Replace dashboard metrics/sections with live agent task tiles and transcript tails.
+- [x] Add a compact New Task flow backed by the existing `server.start_job` and cancellation lifecycle.
+- [x] Replace provider settings dashboard with a clean agent/account connection shelf.
+- [x] Nest ChatGPT Normal inside Agents instead of giving it a separate primary menu.
+- [x] Keep Worktrees, conflict resolution, Observability, Memory, MCP/CLI, updates, and orchestration intact behind the simplified frontend.
+- [x] Port the Nami Glass visual language: aurora desk, frosted panes, coral accent, capsule controls, status pills, and floating task/agent cards.
+- [x] Add UI architecture guardrails and Apache-2.0 attribution for the adapted Nami visual system.
+- [x] Verify Python/unit contracts, desktop JavaScript checks, runtime dependency audit, and renderer build on GitHub CI.
