@@ -458,16 +458,14 @@ def follow_info(job_id):
 def job_result(job_id):
     requested_job_id = job_id
     chain = failover_chain(job_id)
-    job_id = chain[-1]["id"]
-    m = read_meta(job_id)
+    terminal = chain[-1]
+    job_id = terminal["id"]
+    m = terminal
     res = summary(m)
-    if requested_job_id != job_id or len(chain) > 1:
-        res["requested_job_id"] = requested_job_id
-        res["terminal_job_id"] = job_id
-        res["failover_chain"] = [
-            {k: item.get(k) for k in ("id", "worker", "state", "reason", "failover_attempt")}
-            for item in chain
-        ]
+    res["requested_job_id"] = requested_job_id
+    res["terminal_job_id"] = job_id
+    if len(chain) > 1:
+        res["failover_chain"] = [summary(item, events=False) for item in chain]
     final = JOBS / job_id / "final.txt"
     res["final_message"] = clip(final.read_text(encoding="utf-8", errors="replace"), 6000) if final.exists() else None
     cwd, head = m.get("cwd"), m.get("head_start")
@@ -482,7 +480,6 @@ def job_result(job_id):
         res["stderr_tail"] = clip(err.read_text(encoding="utf-8", errors="replace")[-1500:], 1500)
     res["transcript"] = str(JOBS / job_id / "transcript.md")
     return res
-
 
 def job_events(job_id, since=0, limit=40):
     read_meta(job_id)
@@ -522,11 +519,20 @@ def job_wait(job_ids, mode="all", timeout_seconds=1500):
         done = [j for j in ids if chain_is_complete(j)]
         if (mode == "any" and done) or len(done) == len(ids):
             break
-        time.sleep(2)
-    completed = [j for j in ids if chain_is_complete(j)]
-    timed_out = (not completed) if mode == "any" else len(completed) != len(ids)
-    return {"timed_out": timed_out, "jobs": [chain_summary(j) for j in ids]}
+        time.sleep(5)
 
+    completed = [chain_is_complete(j) for j in ids]
+    rows = []
+    for requested_id in ids:
+        terminal_id = failover_terminal_job_id(requested_id)
+        row = summary(read_meta(terminal_id))
+        row["requested_job_id"] = requested_id
+        row["terminal_job_id"] = terminal_id
+        rows.append(row)
+    return {
+        "timed_out": not all(completed) if mode == "all" else not any(completed),
+        "jobs": rows,
+    }
 
 def worker_status():
     out = []
