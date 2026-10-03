@@ -80,27 +80,42 @@ async function nativeStatus(provider) {
 }
 
 function managedProfiles(provider) {
+  const profiles = [];
   const root = path.join(PROFILES_ROOT, provider.id);
-  if (!fileExists(root)) return [];
-  try {
-    return fs.readdirSync(root, { withFileTypes: true })
-      .filter(entry => entry.isDirectory())
-      .map(entry => {
+
+  if (fileExists(root)) {
+    try {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
         const dir = path.join(root, entry.name);
         const signedIn = provider.id === 'codex'
           ? fileExists(path.join(dir, 'auth.json'))
           : false;
-        return {
+        profiles.push({
           id: entry.name,
           name: entry.name,
           kind: 'managed',
           path: dir,
           signedIn
-        };
-      });
-  } catch {
-    return [];
+        });
+      }
+    } catch {}
   }
+
+  if (provider.id === 'codex') {
+    const legacy = path.join(PROFILES_ROOT, 'codex2');
+    if (fileExists(legacy) && !profiles.some(profile => profile.path === legacy)) {
+      profiles.push({
+        id: 'codex2',
+        name: 'Codex 2',
+        kind: 'legacy',
+        path: legacy,
+        signedIn: fileExists(path.join(legacy, 'auth.json'))
+      });
+    }
+  }
+
+  return profiles;
 }
 
 async function detectProviders() {
