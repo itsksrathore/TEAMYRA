@@ -63,6 +63,29 @@ class DesktopContractTests(unittest.TestCase):
         self.assertNotIn("screenX", self.chatgpt_automation)
         self.assertNotIn("screenY", self.chatgpt_automation)
 
+    def test_chatgpt_worker_requires_workspace_ready_heartbeat(self):
+        server = (ROOT / "bridge" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('status.get("worker_ready") is True', server)
+        self.assertIn("worker_ready:", self.chatgpt_provider)
+        self.assertIn("Delegated task workspace does not match", self.chatgpt_provider)
+
+    def test_chatgpt_read_only_jobs_block_mutating_tools(self):
+        self.assertIn("READ_ONLY_BLOCKED_TOOLS", self.chatgpt_provider)
+        self.assertIn("spec.write === false", self.chatgpt_provider)
+        self.assertIn("mutating Git tools are disabled", self.chatgpt_provider)
+
+    def test_chatgpt_permissions_default_to_workspace_only_and_terminal_off(self):
+        self.assertIn('id="chatgptPermTerminal" /> Terminal commands', self.html)
+        self.assertIn('id="chatgptPermOutside" disabled', self.html)
+        tools = (ROOT / "bridge" / "workspace_tools.py").read_text(encoding="utf-8")
+        self.assertIn('"terminal": False', tools)
+        self.assertIn('if not inside:', tools)
+
+    def test_chatgpt_changes_include_staged_diff_and_full_tracked_revert(self):
+        bridge = (ROOT / "apps" / "desktop" / "src" / "workspace-bridge.js").read_text(encoding="utf-8")
+        self.assertIn("stagedDiff", bridge)
+        self.assertIn("staged: true", self.main)
+
     def test_worktree_renderer_ids_exist_in_html(self):
         ids = [
             "navCommand", "navWorktrees", "commandView", "worktreesView",
