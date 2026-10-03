@@ -14,7 +14,7 @@ const PROVIDERS = [
     bin: 'claude',
     nativeHome: path.join(HOME, '.claude'),
     status: { kind: 'command', argv: ['claude', 'auth', 'status', '--json'] },
-    managed: { verified: false, env: 'CLAUDE_CONFIG_DIR' },
+    managed: { verified: true, env: 'CLAUDE_CONFIG_DIR', loginArgv: ['auth', 'login'] },
     color: 'amber'
   },
   {
@@ -90,7 +90,9 @@ function managedProfiles(provider) {
         const dir = path.join(root, entry.name);
         const signedIn = provider.id === 'codex'
           ? fileExists(path.join(dir, 'auth.json'))
-          : false;
+          : provider.id === 'claude'
+            ? fileExists(path.join(dir, '.credentials.json'))
+            : false;
         profiles.push({
           id: entry.name,
           name: entry.name,
