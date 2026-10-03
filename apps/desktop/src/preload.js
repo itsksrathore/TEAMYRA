@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('teamyra', {
+  platform: process.platform,
   updateStatus: () => ipcRenderer.invoke('teamyra:update-status'),
   checkUpdates: () => ipcRenderer.invoke('teamyra:update-check'),
   installUpdate: () => ipcRenderer.invoke('teamyra:update-install'),
