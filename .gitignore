@@ -1,0 +1,23 @@
+# TEAMYRA / AI-Orchestrator runtime and credentials
+.env
+.env.*
+profiles/
+jobs/
+logs/
+results/
+worktrees/
+tasks/
+
+# Python/runtime caches
+bridge/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.lock
+
+# Local backup/temp files
+*.bak-*
+*.tmp

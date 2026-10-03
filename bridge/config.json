@@ -1,0 +1,15 @@
+{
+  "codex": {
+    "model": "gpt-6.1-sol",
+    "effort": "high"
+  },
+  "antigravity": {
+    "model": "gemini-3.1-pro-high",
+    "mode": "accept-edits",
+    "sandbox": false
+  },
+  "auto_order": ["antigravity", "codex1", "codex2"],
+  "auto_resume": 2,
+  "job_timeout_minutes": 180,
+  "dashboard_port": 8765
+}
