@@ -20,16 +20,17 @@
   --amber: #aa7417;
   --red: #b2322f;
   --pane: rgba(255, 255, 255, 0.48);
-  --pane-strong: rgba(255, 255, 255, 0.72);
+  --pane-strong: rgba(255, 255, 255, 0.62);
   --pane-solid: rgba(248, 249, 252, 0.96);
   --pane-dim: rgba(255, 255, 255, 0.24);
   --rim: rgba(255, 255, 255, 0.76);
   --rim-hi: rgba(255, 255, 255, 0.96);
-  --rim-dim: rgba(29, 29, 34, 0.14);
+  --rim-dim: rgba(255, 255, 255, 0.45);
   --line: rgba(29, 29, 34, 0.10);
   --shadow: 45 52 90;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
   --mono: "SF Mono", "Cascadia Mono", "Segoe UI Mono", ui-monospace, Menlo, monospace;
+  --dot: "Doto", "SF Mono", "Cascadia Mono", ui-monospace, monospace;
   --pop: cubic-bezier(.22, 1.28, .36, 1);
   --slab:
     inset 0 1.5px 0 rgba(255,255,255,.96),
@@ -63,6 +64,13 @@ body {
 
 button, input, textarea, select { font: inherit; color: inherit; }
 button { -webkit-app-region: no-drag; }
+
+body {
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 8 12'><path fill='%231d1d22' shape-rendering='crispEdges' d='M0 0h1v1H0z M0 1h2v1H0z M0 2h3v1H0z M0 3h4v1H0z M0 4h5v1H0z M0 5h6v1H0z M0 6h7v1H0z M0 7h8v1H0z M0 8h5v1H0z M0 9h2v1H0z M3 9h2v1H3z M0 10h1v1H0z M4 10h2v1H4z M4 11h2v1H4z'/></svg>") 1 1, default;
+}
+button, .task-card, .agent-card, .workspace-chip, .workspace-field, select {
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 8 12'><path fill='%23ef6461' shape-rendering='crispEdges' d='M0 0h1v1H0z M0 1h2v1H0z M0 2h3v1H0z M0 3h4v1H0z M0 4h5v1H0z M0 5h6v1H0z M0 6h7v1H0z M0 7h8v1H0z M0 8h5v1H0z M0 9h2v1H0z M3 9h2v1H3z M0 10h1v1H0z M4 10h2v1H4z M4 11h2v1H4z'/></svg>") 1 1, pointer;
+}
 button:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 2px solid rgba(239,100,97,.65);
   outline-offset: 2px;
@@ -88,7 +96,7 @@ button:focus-visible, textarea:focus-visible, select:focus-visible {
 .desk {
   position: absolute;
   inset: 0;
-  padding: 10px;
+  padding: 0;
 }
 
 .sheet {
@@ -98,14 +106,14 @@ button:focus-visible, textarea:focus-visible, select:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--rim);
-  border-radius: 22px;
-  background: rgba(255,255,255,.18);
-  -webkit-backdrop-filter: blur(30px) saturate(1.55);
-  backdrop-filter: blur(30px) saturate(1.55);
+  border: 0;
+  border-radius: 0;
+  background: rgba(255,255,255,.22);
+  -webkit-backdrop-filter: blur(8px) saturate(1.25);
+  backdrop-filter: blur(8px) saturate(1.25);
   box-shadow:
-    var(--slab),
-    0 30px 90px rgb(var(--shadow) / .18);
+    inset 0 1.5px 0 rgba(255,255,255,.8),
+    inset 0 -18px 44px rgb(var(--shadow) / .08);
 }
 
 .lights-deck { display: none; flex: none; -webkit-app-region: drag; }
@@ -170,7 +178,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   color: var(--muted);
   background: transparent;
   cursor: pointer;
-  font-family: var(--mono);
+  font-family: var(--dot);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: .08em;
@@ -215,7 +223,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   color: var(--muted);
   background: var(--pane);
   box-shadow: var(--slab);
-  font-family: var(--mono);
+  font-family: var(--dot);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: .09em;
@@ -291,7 +299,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 
 .micro-label,
 .quiet-status {
-  font-family: var(--mono);
+  font-family: var(--dot);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: .16em;
@@ -342,7 +350,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   background: var(--pane);
   box-shadow: var(--slab), 0 4px 14px rgb(var(--shadow) / .07);
   cursor: pointer;
-  font-family: var(--mono);
+  font-family: var(--dot);
   font-size: 9.5px;
   font-weight: 850;
   letter-spacing: .08em;
@@ -466,7 +474,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   border-radius: 999px;
   color: var(--muted);
   background: rgba(255,255,255,.42);
-  font-family: var(--mono);
+  font-family: var(--dot);
   font-size: 8.5px;
   font-weight: 850;
   letter-spacing: .08em;
