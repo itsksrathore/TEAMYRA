@@ -33,11 +33,13 @@ function renderProviders(providers) {
       plus.disabled = true;
       plus.textContent = '…';
       try {
-        const result = await window.teamyra.addAccount(provider.id);
+        const requestedName = prompt('Name this ' + provider.name + ' account:', provider.name + ' 2');
+        if (requestedName === null) return;
+        const result = await window.teamyra.addAccount(provider.id, requestedName);
         if (!result.ok) {
           alert('Managed multi-account isolation is not verified for ' + provider.name + ' yet.');
         } else {
-          alert('Login started for ' + provider.name + '. Complete the provider sign-in, then press Refresh.');
+          alert('Login started for ' + result.name + '. Complete the provider sign-in, then press Refresh.');
         }
       } catch (error) {
         alert('Could not start account login: ' + String(error));
