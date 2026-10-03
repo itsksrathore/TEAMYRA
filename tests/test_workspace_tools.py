@@ -290,6 +290,27 @@ class WorkspaceToolTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 service.execute("terminal.run", {"argv": ["git", "status"]}, token="x" * 64)
 
+    def test_switching_workspace_resets_high_risk_permissions(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "runtime"
+            first = base / "first"
+            second = base / "second"
+            first.mkdir()
+            second.mkdir()
+            service = self.make_service(root, first)
+            token = "x" * 64
+            service.configure(
+                first,
+                {"terminal": True, "destructive_without_confirmation": True},
+                token=token,
+            )
+            self.assertTrue(service.status(token=token)["permissions"]["terminal"])
+            service.configure(second, {}, token=token)
+            permissions = service.status(token=token)["permissions"]
+            self.assertFalse(permissions["terminal"])
+            self.assertFalse(permissions["destructive_without_confirmation"])
+
     def test_explicit_workspace_execution_does_not_change_chatgpt_selection(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
