@@ -49,7 +49,12 @@ function renderProviders(providers) {
         if (!result.ok) {
           alert('Managed multi-account isolation is not verified for ' + provider.name + ' yet.');
         } else {
-          alert('Login started for ' + result.name + '. Complete the provider sign-in, then press Refresh.');
+          await openTerminal({
+            providerId: provider.id,
+            profileId: result.profileId,
+            label: provider.name + ' · ' + result.name + ' · Login',
+            login: true
+          });
         }
       } catch (error) {
         alert('Could not start account login: ' + String(error));
@@ -235,7 +240,7 @@ async function openTerminal(options = {}) {
   ensureTerminalView();
 
   const requestedKey = options.providerId
-    ? options.providerId + ':' + (options.profileId || 'native')
+    ? options.providerId + ':' + (options.profileId || 'native') + (options.login ? ':login' : ':session')
     : 'shell';
 
   if (terminalSessionId && terminalContextKey === requestedKey) {
@@ -254,10 +259,12 @@ async function openTerminal(options = {}) {
   const result = await window.teamyra.openTerminal({
     cwd: job?.cwd || '',
     providerId: options.providerId || '',
-    profileId: options.profileId || 'native'
+    profileId: options.profileId || 'native',
+    login: options.login === true
   });
   if (!result.ok) {
-    terminal.write('\x1b[31mPTY unavailable. Install desktop dependencies and restart TEAMYRA.\x1b[0m\r\n');
+    const reason = result.reason || 'terminal-unavailable';
+    terminal.write('\x1b[31mCould not start terminal: ' + reason + '\x1b[0m\r\n');
     return;
   }
 
