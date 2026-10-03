@@ -19,6 +19,10 @@ Use TEAMYRA when work benefits from delegation, independent review, deterministi
 - Merge, rebase, or discard only through guarded TEAMYRA worktree actions when TEAMYRA owns the worktree.
 - Prefer compact job status/results first; inspect full transcripts only when debugging needs them.
 - Preserve correct partial work during failover and continuation instead of restarting completed steps.
+- Before substantial project work, use `teamyra.memory_context` when prior architecture, decisions, handoffs, or project facts could materially affect the task.
+- After a verified architecture/design decision or durable project fact changes, add or update structured project memory with `teamyra.memory_add` / `teamyra.memory_update`.
+- Keep memory concise and project-scoped. Never store passwords, access tokens, API keys, session cookies, private auth state, or other secrets in TEAMYRA memory.
+- Prefer archive over deletion when a memory becomes obsolete so decision history remains auditable.
 
 ## Suggested flow
 

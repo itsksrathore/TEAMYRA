@@ -16,3 +16,7 @@ Use TEAMYRA as the control plane instead of manually juggling multiple local age
 - Use managed worktree diff/rebase/merge/discard tools for isolated branches.
 - Use compact results first; open full transcripts only for debugging.
 - Preserve valid partial work during failover.
+- Before substantial project work, use `teamyra.memory_context` when prior architecture, decisions, handoffs, or project facts could materially affect the task.
+- After a verified architecture/design decision or durable project fact changes, add or update structured project memory with `teamyra.memory_add` / `teamyra.memory_update`.
+- Keep memory concise and project-scoped. Never store passwords, access tokens, API keys, session cookies, private auth state, or other secrets in TEAMYRA memory.
+- Prefer archive over deletion when a memory becomes obsolete so decision history remains auditable.
