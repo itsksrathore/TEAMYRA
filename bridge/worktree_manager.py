@@ -101,6 +101,7 @@ def create(project_path, storage_root, label="task", base_ref="HEAD"):
         "created_at": time.time(),
         "merged_at": None,
         "merged_commit": None,
+        "rebased_at": None,
     }
     _write_meta(storage_root, meta)
     return status(storage_root, worktree_id)
@@ -156,6 +157,52 @@ def diff(storage_root, worktree_id, max_chars=50000):
         "diff": text[:max_chars],
         "clipped": clipped,
         "total_chars": len(text),
+    }
+
+
+def rebase(storage_root, worktree_id):
+    meta = load(storage_root, worktree_id)
+    root = Path(meta["repo_root"])
+    path = Path(meta["path"])
+    if not root.exists() or not path.exists():
+        raise ValueError("repository or worktree path no longer exists")
+    if _changes(path):
+        raise ValueError("worktree has uncommitted changes; commit or discard them before rebase")
+
+    target_branch = meta["target_branch"]
+    _, target_head, _ = _git(root, "rev-parse", target_branch)
+    current_head = _git(path, "rev-parse", "HEAD")[1]
+    if current_head == target_head:
+        meta["base_commit"] = target_head
+        meta["rebased_at"] = time.time()
+        _write_meta(storage_root, meta)
+        return {
+            "ok": True,
+            "id": worktree_id,
+            "branch": meta["branch"],
+            "target_branch": target_branch,
+            "base_commit": target_head,
+            "head": current_head,
+            "changed": False,
+        }
+
+    rc, out, err = _git(path, "rebase", target_head, check=False)
+    if rc != 0:
+        _git(path, "rebase", "--abort", check=False)
+        raise RuntimeError((err or out or "rebase failed").strip())
+
+    head = _git(path, "rev-parse", "HEAD")[1]
+    meta["base_commit"] = target_head
+    meta["rebased_at"] = time.time()
+    _write_meta(storage_root, meta)
+    return {
+        "ok": True,
+        "id": worktree_id,
+        "branch": meta["branch"],
+        "target_branch": target_branch,
+        "base_commit": target_head,
+        "head": head,
+        "changed": head != current_head,
     }
 
 
