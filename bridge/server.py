@@ -380,10 +380,66 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     return job_id, worker
 
 
+def failover_task(meta, original_task):
+    return (
+        "TEAMYRA failover continuation. The previous worker "
+        f"{meta.get('worker')} failed with reason {meta.get('reason')}. "
+        "Work in the same folder. Inspect git status, git diff, existing files, logs and partial work first. "
+        "Preserve correct completed work, repair or continue what is incomplete, and do not redo finished steps. "
+        "Then complete the original task below.\n\nORIGINAL TASK:\n" + original_task
+    )
+
+
+def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2, previous_workers=None):
+    meta = read_meta(job_id)
+    if not is_done(job_id):
+        raise ValueError("cannot fail over a running job")
+    if not failover_eligible(meta):
+        raise ValueError(f"job is not eligible for automatic failover: {meta.get('reason')}")
+
+    task_path = JOBS / job_id / "task.txt"
+    if not task_path.exists():
+        raise ValueError("original task text is missing")
+    original_task = task_path.read_text(encoding="utf-8", errors="replace")
+    previous = list(previous_workers or [])
+    if meta.get("worker") and meta["worker"] not in previous:
+        previous.append(meta["worker"])
+
+    next_worker = pick_worker("auto", exclude=previous)
+    root_id = root_job_id or meta.get("failover_root") or job_id
+    continuation = failover_task(meta, original_task)
+    timeout_minutes = max(1, min(int((meta.get("timeout_s") or 5400) / 60), 360))
+    label = f"failover {attempt}: {meta.get('label') or job_id}"[:80]
+    new_id, worker = start_job(
+        next_worker,
+        continuation,
+        meta["cwd"],
+        label,
+        timeout_minutes,
+        meta.get("write", True),
+        None,
+        job_id,
+        False,
+        max_failovers,
+        attempt,
+        root_id,
+        previous,
+        False,
+    )
+    patch_job_meta(
+        job_id,
+        failover_job_id=new_id,
+        failover_worker=worker,
+        failover_attempt_next=attempt,
+    )
+    return {"job_id": new_id, "worker": worker, "root_job_id": root_id, "attempt": attempt}
+
+
 # --- views ---------------------------------------------------------------------------------
 def summary(m, events=True):
     out = {k: m.get(k) for k in ("id", "label", "worker", "state", "reason", "branch", "session_id",
-                                 "exit_code", "last_event")}
+                                 "exit_code", "last_event", "parent", "failover_root", "failover_attempt",
+                                 "failover_job_id", "failover_worker", "failover_complete")}
     start, end = m.get("started") or m.get("created"), m.get("ended") or time.time()
     out["elapsed_s"] = int(end - start) if start else None
     if m.get("usage"):
@@ -400,8 +456,18 @@ def follow_info(job_id):
 
 
 def job_result(job_id):
+    requested_job_id = job_id
+    chain = failover_chain(job_id)
+    job_id = chain[-1]["id"]
     m = read_meta(job_id)
     res = summary(m)
+    if requested_job_id != job_id or len(chain) > 1:
+        res["requested_job_id"] = requested_job_id
+        res["terminal_job_id"] = job_id
+        res["failover_chain"] = [
+            {k: item.get(k) for k in ("id", "worker", "state", "reason", "failover_attempt")}
+            for item in chain
+        ]
     final = JOBS / job_id / "final.txt"
     res["final_message"] = clip(final.read_text(encoding="utf-8", errors="replace"), 6000) if final.exists() else None
     cwd, head = m.get("cwd"), m.get("head_start")
@@ -434,18 +500,32 @@ def job_events(job_id, since=0, limit=40):
     return {"events": evs, "next": since + len(chunk), "total": len(lines), "done": is_done(job_id)}
 
 
+def chain_summary(job_id):
+    chain = failover_chain(job_id)
+    terminal = chain[-1]
+    out = summary(terminal)
+    out["requested_job_id"] = job_id
+    out["terminal_job_id"] = terminal["id"]
+    out["failover_chain"] = [
+        {k: item.get(k) for k in ("id", "worker", "state", "reason", "failover_attempt")}
+        for item in chain
+    ]
+    return out
+
+
 def job_wait(job_ids, mode="all", timeout_seconds=1500):
     ids = [job_ids] if isinstance(job_ids, str) else list(job_ids)
     for j in ids:
         read_meta(j)
     deadline = time.time() + max(5, min(int(timeout_seconds), 3000))
     while time.time() < deadline:
-        done = [j for j in ids if is_done(j)]
+        done = [j for j in ids if chain_is_complete(j)]
         if (mode == "any" and done) or len(done) == len(ids):
             break
-        time.sleep(5)
-    return {"timed_out": not all(is_done(j) for j in ids) if mode == "all" else not any(is_done(j) for j in ids),
-            "jobs": [summary(read_meta(j)) for j in ids]}
+        time.sleep(2)
+    completed = [j for j in ids if chain_is_complete(j)]
+    timed_out = (not completed) if mode == "any" else len(completed) != len(ids)
+    return {"timed_out": timed_out, "jobs": [chain_summary(j) for j in ids]}
 
 
 def worker_status():
