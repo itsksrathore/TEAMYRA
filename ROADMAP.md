@@ -64,7 +64,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Local project memory and architecture decisions with structured entries, provenance, archive lifecycle, ranked search, MCP/CLI/Desktop access, and bounded context packs.
 - [x] Shared structured handoffs with persistent envelopes, lineage, acceptance criteria, artifacts, and bounded project-memory context.
 - [x] MCP pooling for shared external stdio MCP processes through the long-lived TEAMYRA HTTP gateway.
-- [ ] Crash recovery.
+- [x] Crash recovery with heartbeat/PID-aware job reconciliation, same-session resume, graph/failover monitor restart, and duplicate-safe interrupted review preservation.
 
 ## Phase 7 — Distribution
 - [ ] Automated tests and CI.

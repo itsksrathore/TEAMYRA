@@ -257,6 +257,11 @@ def cmd_pool(args):
     return 0
 
 
+def cmd_recover(args):
+    emit(call("recovery_scan", {}))
+    return 0
+
+
 def cmd_test(args):
     argv = list(args.command or [])
     if argv and argv[0] == "--":
@@ -526,6 +531,9 @@ def parser():
     pool_remove.add_argument("server")
     pool_remove.add_argument("--yes", action="store_true")
     pool_remove.set_defaults(func=cmd_pool)
+
+    recover = sub.add_parser("recover", help="Reconcile persisted jobs/graphs/reviews after a restart")
+    recover.set_defaults(func=cmd_recover)
 
     test = sub.add_parser("test", help="Run one deterministic no-shell test command")
     test.add_argument("--project", required=True)

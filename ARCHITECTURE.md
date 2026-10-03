@@ -35,6 +35,7 @@ The source of truth for:
 - approvals
 - memory
 - state persistence
+- startup crash recovery with runner/monitor heartbeats and provider-session resume
 
 ### 3. Provider adapters
 Every agent provider implements a common interface:

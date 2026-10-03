@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
@@ -48,6 +49,25 @@ class HttpMcpTests(unittest.TestCase):
         status = response.status
         conn.close()
         return status, headers_out, data
+
+    def test_serve_runs_recovery_scan_before_listening(self):
+        class FakeServer:
+            server_address = ("127.0.0.1", 8787)
+            def __init__(self):
+                self.served = False
+                self.closed = False
+            def serve_forever(self, poll_interval=0.25):
+                self.served = True
+            def server_close(self):
+                self.closed = True
+
+        fake = FakeServer()
+        with patch.object(http_mcp.server.recovery, "recover_all", return_value={"ok": True, "errors": []}) as recover_all, \
+             patch.object(http_mcp, "create_server", return_value=fake):
+            http_mcp.serve("127.0.0.1", 8787)
+        recover_all.assert_called_once_with(server.ROOT, server.BRIDGE, server.PYTHON)
+        self.assertTrue(fake.served)
+        self.assertTrue(fake.closed)
 
     def test_initialize_negotiates_supported_handshake_version(self):
         status, headers, data = self.request("POST", payload={

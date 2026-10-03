@@ -351,6 +351,8 @@ def tick(graph_id):
 
     graph.setdefault("max_parallel", 1)
     graph.setdefault("active_node_ids", [])
+    graph["conductor_pid"] = os.getpid()
+    graph["conductor_heartbeat_at"] = time.time()
     if graph.get("state") in {"draft", "starting"}:
         graph["state"] = "running"
         graph["conductor_pid"] = os.getpid()

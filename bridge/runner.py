@@ -246,9 +246,14 @@ class Job:
         timed_out, cancelled = threading.Event(), threading.Event()
 
         def watchdog():
+            last_heartbeat = 0.0
             while proc.poll() is None:
-                if time.time() > deadline or (self.dir / "CANCEL").exists():
-                    (timed_out if time.time() > deadline else cancelled).set()
+                now_ts = time.time()
+                if now_ts - last_heartbeat >= 10:
+                    last_heartbeat = now_ts
+                    self.save_meta(heartbeat_at=now_ts)
+                if now_ts > deadline or (self.dir / "CANCEL").exists():
+                    (timed_out if now_ts > deadline else cancelled).set()
                     subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
                     return
                 time.sleep(3)
@@ -292,8 +297,14 @@ class Job:
         env = os.environ.copy()
         env.update(spec.get("env") or {})
         self.emit("info", f"start {spec['worker']} in {spec['cwd']}")
-        self.save_meta(started=time.time())
-        deadline = time.time() + spec.get("timeout", 3600)
+        started = self.meta.get("started") or time.time()
+        self.save_meta(
+            started=started,
+            runner_pid=os.getpid(),
+            heartbeat_at=time.time(),
+            recovery_state="running" if self.meta.get("recovery_requested") else self.meta.get("recovery_state"),
+        )
+        deadline = started + spec.get("timeout", 3600)
         cmd, resumes, max_resumes = spec["cmd"], 0, int(spec.get("auto_resume", 2))
         while True:
             attempt_start = time.time()
@@ -340,7 +351,16 @@ class Job:
         self.emit("done", f"{state}{' (' + reason + ')' if reason else ''}, exit {rc}, "
                           f"{int(time.time() - self.meta['started'])} s"
                           f"{f', {resumes} auto-resume(s)' if resumes else ''}")
-        self.save_meta(state=state, reason=reason, exit_code=rc, ended=time.time())
+        self.save_meta(
+            state=state,
+            reason=reason,
+            exit_code=rc,
+            ended=time.time(),
+            runner_pid=None,
+            worker_pid=None,
+            heartbeat_at=None,
+            recovery_state="completed" if self.meta.get("recovery_requested") else self.meta.get("recovery_state"),
+        )
         (self.dir / "DONE").write_text(state, encoding="utf-8")
 
 if __name__ == "__main__":
@@ -349,5 +369,8 @@ if __name__ == "__main__":
         job.run()
     except Exception as exc:
         job.emit("error", f"runner crashed: {exc}")
-        job.save_meta(state="failed", reason="runner_crash", ended=time.time())
+        job.save_meta(
+            state="failed", reason="runner_crash", ended=time.time(),
+            runner_pid=None, worker_pid=None,
+        )
         (job.dir / "DONE").write_text("failed", encoding="utf-8")

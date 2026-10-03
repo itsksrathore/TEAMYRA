@@ -191,6 +191,14 @@ def create_server(host="127.0.0.1", port=8787):
 
 
 def serve(host="127.0.0.1", port=8787):
+    recovery_report = server.recovery.recover_all(server.ROOT, server.BRIDGE, server.PYTHON)
+    if recovery_report.get("errors"):
+        print(
+            "TEAMYRA recovery scan completed with "
+            f"{len(recovery_report['errors'])} error(s)",
+            file=__import__("sys").stderr,
+            flush=True,
+        )
     httpd = create_server(host, port)
     actual_host, actual_port = httpd.server_address[:2]
     print(

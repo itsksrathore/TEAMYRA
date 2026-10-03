@@ -7,6 +7,7 @@ The monitor never retries permission denials, explicit cancellation, or timeouts
 It only reassigns eligible worker/provider failures to another ready worker and
 keeps lineage in each job's metadata.
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,10 +31,17 @@ def main():
         max_failovers=max_failovers,
         failover_complete=False,
         failover_active_job=root_job_id,
+        failover_monitor_pid=os.getpid(),
+        failover_monitor_heartbeat_at=time.time(),
     )
 
     while True:
         while not server.is_done(current):
+            server.patch_job_meta(
+                root_job_id,
+                failover_monitor_pid=os.getpid(),
+                failover_monitor_heartbeat_at=time.time(),
+            )
             time.sleep(2)
 
         meta = server.read_meta(current)
@@ -49,6 +57,7 @@ def main():
                 failover_attempts=attempt,
                 failover_terminal_state=meta.get("state"),
                 failover_terminal_reason=meta.get("reason"),
+                failover_monitor_pid=None,
             )
             return
 
@@ -64,6 +73,7 @@ def main():
                 failover_active_job=current,
                 failover_attempts=attempt,
                 failover_exhausted=True,
+                failover_monitor_pid=None,
             )
             return
 
@@ -89,6 +99,7 @@ def main():
                 failover_attempts=attempt - 1,
                 failover_exhausted=True,
                 failover_error=str(exc),
+                failover_monitor_pid=None,
             )
             return
 

@@ -1,5 +1,7 @@
 """Detached bounded reviewer/fixer loop for TEAMYRA."""
+import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -77,7 +79,21 @@ def finish(state, status, decision=None, error=None):
     state["decision"] = decision
     state["error"] = error
     state["active_job_id"] = None
+    state["monitor_pid"] = None
     review_cycle.save(server.ROOT, state)
+
+
+def _heartbeat(review_id, pid):
+    while True:
+        time.sleep(10)
+        try:
+            state = review_cycle.load(server.ROOT, review_id)
+        except Exception:
+            return
+        if state.get("monitor_pid") != pid or state.get("state") in {"done", "failed", "cancelled", "exhausted"}:
+            return
+        state["monitor_heartbeat_at"] = time.time()
+        review_cycle.save(server.ROOT, state)
 
 
 def main():
@@ -87,7 +103,15 @@ def main():
     review_id = sys.argv[1]
     state = review_cycle.load(server.ROOT, review_id)
     state["state"] = "running"
+    state["monitor_pid"] = os.getpid()
+    state["monitor_heartbeat_at"] = time.time()
     review_cycle.save(server.ROOT, state)
+    threading.Thread(
+        target=_heartbeat,
+        args=(review_id, os.getpid()),
+        daemon=True,
+        name=f"teamyra-review-heartbeat-{review_id}",
+    ).start()
 
     source_job_id = state["source_job_id"]
     if not server.chain_is_complete(source_job_id):

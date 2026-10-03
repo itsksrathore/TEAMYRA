@@ -17,6 +17,7 @@ import observability
 import project_memory
 import handoff_store
 import mcp_pool
+import recovery
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -367,13 +368,14 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     log = open(jdir / "runner.log", "w", encoding="utf-8")
     try:  # break away from the MCP server's job object so a bridge restart does not kill the job
         try:
-            subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
-                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                             creationflags=flags | 0x01000000)
+            runner_proc = subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
+                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                           creationflags=flags | 0x01000000)
         except OSError:
-            subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
-                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                             creationflags=flags)
+            runner_proc = subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
+                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                           creationflags=flags)
+        patch_job_meta(job_id, runner_pid=runner_proc.pid)
     finally:
         log.close()
 
@@ -382,13 +384,14 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
         monitor_cmd = [str(PYTHON), str(BRIDGE / "failover_monitor.py"), job_id, str(max_failovers)]
         try:
             try:
-                subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                 stdout=monitor_log, stderr=monitor_log, close_fds=True,
-                                 creationflags=flags | 0x01000000)
+                failover_proc = subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                                 stdout=monitor_log, stderr=monitor_log, close_fds=True,
+                                                 creationflags=flags | 0x01000000)
             except OSError:
-                subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                 stdout=monitor_log, stderr=monitor_log, close_fds=True,
-                                 creationflags=flags)
+                failover_proc = subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                                 stdout=monitor_log, stderr=monitor_log, close_fds=True,
+                                                 creationflags=flags)
+            patch_job_meta(job_id, failover_monitor_pid=failover_proc.pid)
         finally:
             monitor_log.close()
     return job_id, worker
@@ -604,7 +607,7 @@ def start_conductor(graph_id):
     try:
         try:
             try:
-                subprocess.Popen(
+                conductor_proc = subprocess.Popen(
                     cmd,
                     cwd=str(ROOT),
                     stdin=subprocess.DEVNULL,
@@ -614,7 +617,7 @@ def start_conductor(graph_id):
                     creationflags=flags | 0x01000000,
                 )
             except OSError:
-                subprocess.Popen(
+                conductor_proc = subprocess.Popen(
                     cmd,
                     cwd=str(ROOT),
                     stdin=subprocess.DEVNULL,
@@ -623,6 +626,9 @@ def start_conductor(graph_id):
                     close_fds=True,
                     creationflags=flags,
                 )
+            graph = task_graph.load_graph(ROOT, graph_id)
+            graph["conductor_pid"] = conductor_proc.pid
+            task_graph.save_graph(ROOT, graph)
         finally:
             log.close()
     except Exception as exc:
@@ -655,7 +661,7 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allo
     cmd = [str(PYTHON), str(BRIDGE / "review_monitor.py"), state["id"]]
     try:
         try:
-            subprocess.Popen(
+            review_proc = subprocess.Popen(
                 cmd,
                 cwd=str(ROOT),
                 stdin=subprocess.DEVNULL,
@@ -665,7 +671,7 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allo
                 creationflags=flags | 0x01000000,
             )
         except OSError:
-            subprocess.Popen(
+            review_proc = subprocess.Popen(
                 cmd,
                 cwd=str(ROOT),
                 stdin=subprocess.DEVNULL,
@@ -674,6 +680,9 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allo
                 close_fds=True,
                 creationflags=flags,
             )
+        state = review_cycle.load(ROOT, state["id"])
+        state["monitor_pid"] = review_proc.pid
+        review_cycle.save(ROOT, state)
     finally:
         log.close()
     return review_cycle.summary(state)
@@ -851,6 +860,8 @@ TOOLS = [
          "max_chars": {"type": "integer", "default": 8000, "minimum": 1000, "maximum": 24000},
          "limit": {"type": "integer", "default": 40, "minimum": 1, "maximum": 100}},
          "required": ["project_path"], "additionalProperties": False}},
+    {"name": "recovery_scan", "description": "Reconcile persisted TEAMYRA jobs, task graphs, review cycles, and failover monitors after a process/app/PC restart. Resumes only persisted provider sessions; never blindly reruns an orphaned task.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "mcp_pool_list", "description": "List configured shared external MCP servers and live pooled-process status. Runtime config lives under ignored profiles/.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "mcp_pool_tools", "description": "Start/reuse one pooled MCP server and list its tools.",
@@ -1109,6 +1120,8 @@ def tool_call(name, a):
         state["cancel_requested"] = True
         review_cycle.save(ROOT, state)
         return review_cycle.summary(state)
+    if name == "recovery_scan":
+        return recovery.recover_all(ROOT, BRIDGE, PYTHON)
     if name == "mcp_pool_list":
         return mcp_pool.list_servers(ROOT)
     if name == "mcp_pool_tools":

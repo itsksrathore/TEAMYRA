@@ -258,6 +258,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(call.call_args.args[0], tool)
             self.assertTrue(call.call_args.args[1]["confirm"])
 
+    def test_recover_delegates_recovery_scan(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"ok": True, "actions": {}}) as call:
+            code, out, _ = self.run_cli(["recover"])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out)["ok"])
+        call.assert_called_once_with("recovery_scan", {})
+
     def test_worktree_merge_requires_yes(self):
         with patch.object(teamyra_cli.server, "tool_call") as call:
             code, _, err = self.run_cli(["worktree", "merge", "wt-test"])
