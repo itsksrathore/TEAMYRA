@@ -11,6 +11,8 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         cls.session = (ROOT / "apps" / "desktop" / "src" / "chatgpt-session-manager.js").read_text(encoding="utf-8")
         cls.automation = (ROOT / "apps" / "desktop" / "src" / "chatgpt-automation-adapter.js").read_text(encoding="utf-8")
         cls.workspace = (ROOT / "bridge" / "workspace_tools.py").read_text(encoding="utf-8")
+        cls.workspace_bridge = (ROOT / "apps" / "desktop" / "src" / "workspace-bridge.js").read_text(encoding="utf-8")
+        cls.desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
         cls.server = (ROOT / "bridge" / "server.py").read_text(encoding="utf-8")
         cls.gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
@@ -45,6 +47,15 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.workspace)
         self.assertIn("destructive operation requires explicit confirmation", self.workspace)
+
+    def test_local_bridge_token_is_not_sent_in_process_argv_payload(self):
+        self.assertNotIn("bridge_token: this.token", self.workspace_bridge)
+        self.assertIn("TEAMYRA_LOCAL_AGENT_TOKEN", self.workspace_bridge)
+        self.assertIn("TEAMYRA_LOCAL_AGENT_TOKEN", self.desktop_api)
+
+    def test_git_internals_are_not_exposed_through_filesystem_tools(self):
+        self.assertIn('relative.parts[0].lower() == ".git"', self.workspace)
+        self.assertIn("direct filesystem access to Git internals is blocked", self.workspace)
 
     def test_runtime_state_and_backups_are_gitignored(self):
         self.assertIn("chatgpt/", self.gitignore)
