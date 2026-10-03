@@ -6,6 +6,10 @@ const { ChatGPTAutomationAdapter } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
+const READ_ONLY_BLOCKED_TOOLS = new Set([
+  'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
+  'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore'
+]);
 const ALLOWED_HOSTS = new Set([
   'chatgpt.com', 'www.chatgpt.com', 'auth.openai.com', 'auth0.openai.com', 'openai.com', 'www.openai.com',
   'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'
@@ -178,6 +182,8 @@ class ChatGPTWebProvider {
     const status = await this.getStatus();
     this.writeStatus({
       automation_ready: status.automationReady,
+      worker_ready: Boolean(status.automationReady && status.workspace?.available),
+      workspace: status.workspace?.workspace || '',
       connected: status.connected,
       login_visible: status.loginVisible,
       challenged: status.challenged,
@@ -342,7 +348,16 @@ class ChatGPTWebProvider {
     try {
       const spec = JSON.parse(fs.readFileSync(path.join(jobDir, 'spec.json'), 'utf8'));
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
-      await this.workspaceBridge.configure(spec.cwd, undefined);
+      const workspaceState = await this.workspaceBridge.status();
+      if (!workspaceState?.available) throw new Error('ChatGPT worker has no selected workspace');
+      const selected = path.resolve(workspaceState.workspace || '');
+      const requested = path.resolve(spec.cwd || '');
+      const sameWorkspace = process.platform === 'win32'
+        ? selected.toLowerCase() === requested.toLowerCase()
+        : selected === requested;
+      if (!sameWorkspace) {
+        throw new Error('Delegated task workspace does not match the selected ChatGPT workspace');
+      }
 
       const requestedConversation = spec.session_id
         ? { conversationId: spec.session_id }
@@ -412,6 +427,9 @@ class ChatGPTWebProvider {
         this.appendJobEvent(jobDir, 'command', request.tool + ' ' + JSON.stringify(request.args).slice(0, 1000));
         let toolResult;
         try {
+          if (spec.write === false && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
+            throw new Error('This delegated job is read-only; write, terminal, and mutating Git tools are disabled');
+          }
           toolResult = await this.workspaceBridge.execute(request.tool, request.args, false);
         } catch (error) {
           toolResult = { ok: false, error: String(error?.message || error) };
@@ -440,6 +458,15 @@ class ChatGPTWebProvider {
   }
 
   destroy() {
+    try {
+      this.writeStatus({
+        automation_ready: false,
+        worker_ready: false,
+        connected: false,
+        busy: false,
+        detail: 'TEAMYRA Desktop ChatGPT worker is closed.'
+      });
+    } catch {}
     clearInterval(this.jobTimer);
     clearInterval(this.heartbeatTimer);
     this.jobTimer = null;
