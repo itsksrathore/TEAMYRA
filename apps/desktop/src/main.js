@@ -5,6 +5,10 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { detectProviders, providerById, profileRoot } = require('./provider-registry');
 
+let pty = null;
+try { pty = require('@lydell/node-pty'); } catch {}
+const TERMINALS = new Map();
+
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const JOBS = path.join(ROOT, 'jobs');
 
@@ -48,6 +52,31 @@ function readTranscript(jobId, offset = 0) {
   return { text: data.slice(start, end), next: end };
 }
 
+function terminalShell() {
+  if (process.platform === 'win32') return process.env.COMSPEC || 'cmd.exe';
+  return process.env.SHELL || '/bin/bash';
+}
+
+function terminalArgs(shell) {
+  const base = path.basename(shell).toLowerCase();
+  if (base.includes('powershell') || base === 'pwsh' || base === 'pwsh.exe') return ['-NoLogo'];
+  return [];
+}
+
+function terminalFor(event, id) {
+  const item = TERMINALS.get(id);
+  if (!item || item.owner !== event.sender.id) return null;
+  return item;
+}
+
+function killTerminalsFor(owner) {
+  for (const [id, item] of TERMINALS) {
+    if (item.owner !== owner) continue;
+    try { item.proc.kill(); } catch {}
+    TERMINALS.delete(id);
+  }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1480,
@@ -63,11 +92,60 @@ function createWindow() {
     }
   });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  win.webContents.on('destroyed', () => killTerminalsFor(win.webContents.id));
 }
 
 ipcMain.handle('teamyra:providers', () => detectProviders());
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
+
+ipcMain.handle('teamyra:terminal-open', (event, options = {}) => {
+  if (!pty) return { ok: false, reason: 'pty-unavailable' };
+  const requested = typeof options.cwd === 'string' ? options.cwd : '';
+  const cwd = requested && path.isAbsolute(requested) && fs.existsSync(requested) ? requested : ROOT;
+  const shell = terminalShell();
+  const id = crypto.randomBytes(8).toString('hex');
+  const proc = pty.spawn(shell, terminalArgs(shell), {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 30,
+    cwd,
+    env: { ...process.env }
+  });
+
+  const owner = event.sender.id;
+  TERMINALS.set(id, { proc, owner, cwd });
+  proc.onData(data => {
+    if (!event.sender.isDestroyed()) event.sender.send('teamyra:terminal-data', { id, data });
+  });
+  proc.onExit(({ exitCode }) => {
+    TERMINALS.delete(id);
+    if (!event.sender.isDestroyed()) event.sender.send('teamyra:terminal-exit', { id, exitCode });
+  });
+  return { ok: true, id, cwd, shell };
+});
+
+ipcMain.on('teamyra:terminal-input', (event, payload = {}) => {
+  const item = terminalFor(event, payload.id);
+  if (!item || typeof payload.data !== 'string') return;
+  item.proc.write(payload.data.slice(0, 100000));
+});
+
+ipcMain.on('teamyra:terminal-resize', (event, payload = {}) => {
+  const item = terminalFor(event, payload.id);
+  if (!item) return;
+  const cols = Math.max(20, Math.min(300, Number(payload.cols) || 80));
+  const rows = Math.max(5, Math.min(120, Number(payload.rows) || 24));
+  try { item.proc.resize(cols, rows); } catch {}
+});
+
+ipcMain.handle('teamyra:terminal-close', (event, id) => {
+  const item = terminalFor(event, id);
+  if (!item) return { ok: false };
+  try { item.proc.kill(); } catch {}
+  TERMINALS.delete(id);
+  return { ok: true };
+});
 
 function safeProfileSlug(value) {
   return String(value || 'account')
