@@ -8,17 +8,61 @@ import json
 import sys
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 BRIDGE = Path(__file__).resolve().parent
 ROOT = BRIDGE.parent
 WORKTREES = ROOT / "worktrees"
 sys.path.insert(0, str(BRIDGE))
 
 import worktree_manager
+import observability
 
 
 def handle(action, payload):
     payload = payload if isinstance(payload, dict) else {}
 
+    if action == "observability.timeline":
+        return observability.timeline(
+            ROOT,
+            payload.get("limit", 120),
+            payload.get("project_path"),
+            payload.get("worker"),
+            payload.get("sources"),
+            payload.get("query"),
+            payload.get("since"),
+        )
+    if action == "observability.search":
+        return observability.search_logs(
+            ROOT,
+            payload.get("query"),
+            payload.get("limit", 50),
+            payload.get("project_path"),
+            payload.get("worker"),
+            payload.get("kinds"),
+        )
+    if action == "observability.usage":
+        import server
+        rows = []
+        for worker, info in server.worker_registry().items():
+            settings = server.worker_settings(info)
+            rows.append({
+                "worker": worker,
+                "provider": info.get("provider"),
+                "ready": None,
+                "cooldown_seconds": server.cooldown_left(worker),
+                "model": settings.get("model"),
+                "effort": settings.get("effort"),
+                "running_jobs": [item["id"] for item in server.running_jobs(worker)],
+            })
+        return observability.usage_snapshot(
+            ROOT,
+            rows,
+            payload.get("project_path"),
+        )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)
     if action == "worktree.status":

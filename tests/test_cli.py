@@ -55,6 +55,43 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["tests"][0]["argv"][0], sys.executable)
         self.assertEqual(payload["tests"][0]["argv"][1:], ["-c", "print('ok')"])
 
+    def test_timeline_command_delegates_filters(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"items": []}) as call:
+            code, out, _ = self.run_cli([
+                "timeline", "--limit", "12", "--project", "P", "--worker", "codex1",
+                "--source", "job", "--query", "needle", "--since", "10",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["items"], [])
+        name, payload = call.call_args.args
+        self.assertEqual(name, "timeline_list")
+        self.assertEqual(payload["limit"], 12)
+        self.assertEqual(payload["project_path"], "P")
+        self.assertEqual(payload["worker"], "codex1")
+        self.assertEqual(payload["sources"], ["job"])
+        self.assertEqual(payload["query"], "needle")
+        self.assertEqual(payload["since"], 10.0)
+
+    def test_search_command_delegates_filters(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"results": []}) as call:
+            code, _, _ = self.run_cli([
+                "search", "needle", "--limit", "7", "--project", "P",
+                "--worker", "claude1", "--kind", "transcript.md",
+            ])
+        self.assertEqual(code, 0)
+        name, payload = call.call_args.args
+        self.assertEqual(name, "logs_search")
+        self.assertEqual(payload["query"], "needle")
+        self.assertEqual(payload["kinds"], ["transcript.md"])
+
+    def test_usage_command_delegates_project_scope(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"workers": []}) as call:
+            code, _, _ = self.run_cli(["usage", "--project", "P"])
+        self.assertEqual(code, 0)
+        name, payload = call.call_args.args
+        self.assertEqual(name, "usage_snapshot")
+        self.assertEqual(payload["project_path"], "P")
+
     def test_worktree_merge_requires_yes(self):
         with patch.object(teamyra_cli.server, "tool_call") as call:
             code, _, err = self.run_cli(["worktree", "merge", "wt-test"])

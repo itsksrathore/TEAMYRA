@@ -13,6 +13,7 @@ import task_graph
 import test_policy
 import review_cycle
 import worktree_manager
+import observability
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -720,6 +721,27 @@ TOOLS = [
     {"name": "review_cancel", "description": "Request cancellation of an active review/fix loop.",
      "inputSchema": {"type": "object", "properties": {"review_id": {"type": "string"}},
                      "required": ["review_id"], "additionalProperties": False}},
+    {"name": "timeline_list", "description": "Read a bounded unified TEAMYRA timeline across jobs, graphs, reviews, and managed worktrees.",
+     "inputSchema": {"type": "object", "properties": {
+         "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
+         "project_path": {"type": "string"},
+         "worker": {"type": "string"},
+         "sources": {"type": "array", "items": {"type": "string", "enum": ["job", "graph", "review", "worktree"]}},
+         "query": {"type": "string"},
+         "since": {"type": "number"}},
+         "additionalProperties": False}},
+    {"name": "logs_search", "description": "Search bounded TEAMYRA job events, transcripts, stderr, runner logs, and task text.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string"},
+         "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+         "project_path": {"type": "string"},
+         "worker": {"type": "string"},
+         "kinds": {"type": "array", "items": {"type": "string", "enum": ["events.jsonl", "transcript.md", "stderr.txt", "runner.log", "task.txt"]}}},
+         "required": ["query"], "additionalProperties": False}},
+    {"name": "usage_snapshot", "description": "Aggregate real worker token usage with current readiness, cooldown, model, and running-job telemetry. Does not fabricate unavailable provider quota percentages.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"}},
+         "additionalProperties": False}},
     {"name": "test_run", "description": "Run deterministic no-shell test steps in a project directory. Commands are argv arrays, run sequentially, and stop on first failure or timeout.",
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"},
@@ -857,6 +879,31 @@ TOOLS = [
 
 
 def tool_call(name, a):
+    if name == "timeline_list":
+        return observability.timeline(
+            ROOT,
+            a.get("limit", 100),
+            a.get("project_path"),
+            a.get("worker"),
+            a.get("sources"),
+            a.get("query"),
+            a.get("since"),
+        )
+    if name == "logs_search":
+        return observability.search_logs(
+            ROOT,
+            a["query"],
+            a.get("limit", 50),
+            a.get("project_path"),
+            a.get("worker"),
+            a.get("kinds"),
+        )
+    if name == "usage_snapshot":
+        return observability.usage_snapshot(
+            ROOT,
+            worker_status(),
+            a.get("project_path"),
+        )
     if name == "review_start":
         return start_review_cycle(
             a["job_id"],

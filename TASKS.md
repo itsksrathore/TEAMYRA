@@ -67,9 +67,10 @@ This checklist is updated as implementation lands.
 - [x] Antigravity plugin + skill + MCP integration; live agent MCP tool call verified.
 
 ## Phase 6 — Observability / Memory
-- [ ] Unified timeline.
-- [ ] Usage/quota/context dashboard.
-- [ ] Searchable logs.
+- [x] Unified timeline across jobs, graphs, reviews, and managed worktrees — MCP/CLI/Desktop + Windows runtime verified.
+- [x] Usage/quota dashboard — real persisted token usage + live readiness/cooldowns; unavailable provider quota percentages are not guessed.
+- [ ] Context-window visibility when providers expose reliable context telemetry.
+- [x] Searchable logs — bounded job events/transcripts/stderr/runner/task search via MCP/CLI/Desktop.
 - [ ] Project memory.
 - [ ] MCP pooling.
 - [ ] Crash recovery.

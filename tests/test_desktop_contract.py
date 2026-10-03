@@ -26,6 +26,47 @@ class DesktopContractTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', self.html, element_id)
             self.assertIn(f"#{element_id}", self.renderer, element_id)
 
+    def test_observability_renderer_ids_exist_in_html(self):
+        ids = [
+            "navObservability", "observabilityView",
+            "obsWorkers", "obsReady", "obsRunning", "obsJobs",
+            "usageCards", "timelineList", "obsProject", "obsWorker",
+            "obsSource", "obsQuery", "refreshObservability",
+            "logSearchForm", "logSearchQuery", "logSearchKind", "logSearchResults",
+        ]
+        for element_id in ids:
+            self.assertIn(f'id="{element_id}"', self.html, element_id)
+            self.assertIn(f"#{element_id}", self.renderer, element_id)
+
+    def test_observability_does_not_treat_unknown_readiness_as_ready(self):
+        self.assertIn("worker.ready === true", self.renderer)
+        self.assertIn("'detected'", self.renderer)
+
+    def test_observability_preload_api_matches_main_ipc_handlers(self):
+        contracts = {
+            "timeline": "teamyra:timeline",
+            "searchLogs": "teamyra:logs-search",
+            "usage": "teamyra:usage",
+        }
+        for method, channel in contracts.items():
+            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
+            self.assertIn(channel, self.preload)
+            self.assertIn(channel, self.main)
+
+        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
+        for action in ("observability.timeline", "observability.search", "observability.usage"):
+            self.assertIn(action, desktop_api)
+
+    def test_observability_usage_reuses_cached_provider_state(self):
+        self.assertIn("PROVIDER_CACHE_MS", self.main)
+        self.assertIn("providersCached(false)", self.main)
+        self.assertIn("mergeUsageProviderState", self.main)
+        self.assertIn("workerIdForProfile", self.main)
+        self.assertIn("'claude1'", self.main)
+        self.assertIn("'codex1'", self.main)
+        self.assertIn("'codex2'", self.main)
+        self.assertIn("'antigravity'", self.main)
+
     def test_preload_worktree_api_matches_main_ipc_handlers(self):
         contracts = {
             "worktrees": "teamyra:worktrees",

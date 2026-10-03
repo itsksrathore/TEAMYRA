@@ -11,6 +11,60 @@ const TERMINALS = new Map();
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const JOBS = path.join(ROOT, 'jobs');
+let PROVIDER_CACHE = { at: 0, data: null, pending: null };
+const PROVIDER_CACHE_MS = 30000;
+
+async function providersCached(force = false) {
+  const now = Date.now();
+  if (!force && PROVIDER_CACHE.data && now - PROVIDER_CACHE.at < PROVIDER_CACHE_MS) {
+    return PROVIDER_CACHE.data;
+  }
+  if (PROVIDER_CACHE.pending) return PROVIDER_CACHE.pending;
+  PROVIDER_CACHE.pending = detectProviders()
+    .then(data => {
+      PROVIDER_CACHE = { at: Date.now(), data, pending: null };
+      return data;
+    })
+    .catch(error => {
+      PROVIDER_CACHE.pending = null;
+      throw error;
+    });
+  return PROVIDER_CACHE.pending;
+}
+
+function safeWorkerPart(value) {
+  const cleaned = String(value || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[._-]+|[._-]+$/g, '');
+  return (cleaned || 'account').slice(0, 48);
+}
+
+function workerIdForProfile(providerId, profileId) {
+  if (providerId === 'claude') return profileId === 'native' ? 'claude1' : 'claude-' + safeWorkerPart(profileId);
+  if (providerId === 'codex') {
+    if (profileId === 'native') return 'codex1';
+    if (profileId === 'codex2') return 'codex2';
+    return 'codex-' + safeWorkerPart(profileId);
+  }
+  if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
+  return '';
+}
+
+function mergeUsageProviderState(snapshot, providers) {
+  const rows = Array.isArray(snapshot?.workers) ? snapshot.workers : [];
+  const byWorker = new Map(rows.map(row => [row.worker, row]));
+  for (const provider of providers || []) {
+    for (const profile of provider.profiles || []) {
+      const workerId = workerIdForProfile(provider.id, profile.id);
+      if (!workerId) continue;
+      const row = byWorker.get(workerId);
+      if (!row) continue;
+      row.provider = provider.id || row.provider;
+      row.ready = Boolean(provider.installed && profile.signedIn && profile.enabled !== false);
+    }
+  }
+  snapshot.provider_status_at = PROVIDER_CACHE.at / 1000;
+  snapshot.provider_status_age_s = PROVIDER_CACHE.at ? Math.max(0, Math.round((Date.now() - PROVIDER_CACHE.at) / 1000)) : null;
+  return snapshot;
+}
 
 function listJobs(limit = 30) {
   if (!fs.existsSync(JOBS)) return [];
@@ -106,9 +160,39 @@ function createWindow() {
   win.webContents.on('destroyed', () => killTerminalsFor(webContentsId));
 }
 
-ipcMain.handle('teamyra:providers', () => detectProviders());
+ipcMain.handle('teamyra:providers', () => providersCached(true));
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
+
+ipcMain.handle('teamyra:timeline', (_event, options = {}) =>
+  callCore('observability.timeline', {
+    limit: Number(options.limit) || 120,
+    project_path: String(options.projectPath || ''),
+    worker: String(options.worker || ''),
+    sources: Array.isArray(options.sources) ? options.sources : [],
+    query: String(options.query || ''),
+    since: Number.isFinite(Number(options.since)) ? Number(options.since) : null
+  }, { maxBuffer: 12 * 1024 * 1024 })
+);
+ipcMain.handle('teamyra:logs-search', (_event, options = {}) =>
+  callCore('observability.search', {
+    query: String(options.query || ''),
+    limit: Number(options.limit) || 50,
+    project_path: String(options.projectPath || ''),
+    worker: String(options.worker || ''),
+    kinds: Array.isArray(options.kinds) ? options.kinds : []
+  }, { maxBuffer: 12 * 1024 * 1024 })
+);
+ipcMain.handle('teamyra:usage', async (_event, options = {}) => {
+  const projectPath = String(options.projectPath || '');
+  const [snapshot, providers] = await Promise.all([
+    callCore('observability.usage', {
+      project_path: projectPath
+    }, { timeout: 30000, maxBuffer: 12 * 1024 * 1024 }),
+    providersCached(false)
+  ]);
+  return mergeUsageProviderState(snapshot, providers);
+});
 
 ipcMain.handle('teamyra:worktrees', () => callCore('worktree.list'));
 ipcMain.handle('teamyra:worktree-status', (_event, worktreeId) =>

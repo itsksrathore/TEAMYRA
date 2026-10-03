@@ -16,6 +16,8 @@ let currentJobs = [];
 let activeView = 'command';
 let currentWorktrees = [];
 let selectedWorktreeId = null;
+let currentUsage = null;
+let currentTimeline = [];
 
 const providersEl = document.querySelector('#providers');
 const jobsEl = document.querySelector('#jobs');
@@ -269,12 +271,17 @@ async function refresh() {
 }
 
 document.querySelector('#refresh').addEventListener('click', () => {
-  const action = activeView === 'worktrees' ? refreshWorktrees() : refresh();
+  const action = activeView === 'worktrees'
+    ? refreshWorktrees()
+    : activeView === 'observability'
+      ? refreshObservability()
+      : refresh();
   action.catch(error => alert('Refresh failed: ' + String(error?.message || error)));
 });
 setInterval(() => refreshJobs().catch(() => {}), 3000);
 setInterval(() => {
   if (activeView === 'worktrees') refreshWorktrees({ preserveSelection: true }).catch(() => {});
+  if (activeView === 'observability') refreshObservability({ preserveFilters: true, lightweight: true }).catch(() => {});
 }, 5000);
 refresh().catch(err => {
   providersEl.innerHTML = '<div class="empty">Desktop core error: ' + escapeHtml(err) + '</div>';
@@ -395,8 +402,10 @@ document.querySelector('#closeTerminal').addEventListener('click', closeTerminal
 
 const commandView = document.querySelector('#commandView');
 const worktreesView = document.querySelector('#worktreesView');
+const observabilityView = document.querySelector('#observabilityView');
 const navCommand = document.querySelector('#navCommand');
 const navWorktrees = document.querySelector('#navWorktrees');
+const navObservability = document.querySelector('#navObservability');
 const worktreeListEl = document.querySelector('#worktreeList');
 const wtDiffEl = document.querySelector('#wtDiff');
 const wtSummaryEl = document.querySelector('#wtSummary');
@@ -409,19 +418,48 @@ const wtDiscardButton = document.querySelector('#wtDiscard');
 const wtForceDiscardButton = document.querySelector('#wtForceDiscard');
 const wtOpenTerminalButton = document.querySelector('#wtOpenTerminal');
 
+const usageCardsEl = document.querySelector('#usageCards');
+const timelineListEl = document.querySelector('#timelineList');
+const obsProjectEl = document.querySelector('#obsProject');
+const obsWorkerEl = document.querySelector('#obsWorker');
+const obsSourceEl = document.querySelector('#obsSource');
+const obsQueryEl = document.querySelector('#obsQuery');
+const logSearchForm = document.querySelector('#logSearchForm');
+const logSearchQueryEl = document.querySelector('#logSearchQuery');
+const logSearchKindEl = document.querySelector('#logSearchKind');
+const logSearchResultsEl = document.querySelector('#logSearchResults');
+
 function setView(view) {
-  activeView = view === 'worktrees' ? 'worktrees' : 'command';
+  activeView = ['worktrees', 'observability'].includes(view) ? view : 'command';
+  const isCommand = activeView === 'command';
   const isWorktrees = activeView === 'worktrees';
-  commandView.hidden = isWorktrees;
+  const isObservability = activeView === 'observability';
+
+  commandView.hidden = !isCommand;
   worktreesView.hidden = !isWorktrees;
-  navCommand.classList.toggle('active', !isWorktrees);
+  observabilityView.hidden = !isObservability;
+  navCommand.classList.toggle('active', isCommand);
   navWorktrees.classList.toggle('active', isWorktrees);
-  document.querySelector('#pageEyebrow').textContent =
-    isWorktrees ? 'ISOLATED GIT WORKSPACES' : 'MULTI-AGENT CONTROL PLANE';
-  document.querySelector('#pageTitle').textContent = isWorktrees ? 'Worktrees' : 'Command Desk';
-  document.querySelector('#openTerminal').hidden = isWorktrees;
+  navObservability.classList.toggle('active', isObservability);
+
+  document.querySelector('#pageEyebrow').textContent = isWorktrees
+    ? 'ISOLATED GIT WORKSPACES'
+    : isObservability
+      ? 'RUNTIME TELEMETRY'
+      : 'MULTI-AGENT CONTROL PLANE';
+  document.querySelector('#pageTitle').textContent = isWorktrees
+    ? 'Worktrees'
+    : isObservability
+      ? 'Observability'
+      : 'Command Desk';
+  document.querySelector('#openTerminal').hidden = !isCommand;
+
   if (isWorktrees) refreshWorktrees({ preserveSelection: true }).catch(error => {
     worktreeListEl.innerHTML = '<div class="empty">Could not load worktrees: ' + escapeHtml(error?.message || error) + '</div>';
+  });
+  if (isObservability) refreshObservability({ preserveFilters: true }).catch(error => {
+    document.querySelector('#timelineList').innerHTML =
+      '<div class="empty">Could not load observability: ' + escapeHtml(error?.message || error) + '</div>';
   });
 }
 
@@ -565,8 +603,317 @@ function selectedWorktreeData() {
   return currentWorktrees.find(item => item.id === selectedWorktreeId) || null;
 }
 
+
+function compactNumber(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return '0';
+  return new Intl.NumberFormat(undefined, {
+    notation: Math.abs(number) >= 1000 ? 'compact' : 'standard',
+    maximumFractionDigits: 1
+  }).format(number);
+}
+
+function formatTimelineTime(ts) {
+  const value = Number(ts || 0);
+  if (!value) return '—';
+  try {
+    return new Date(value * 1000).toLocaleString([], {
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch {
+    return '—';
+  }
+}
+
+function renderUsageCards(snapshot) {
+  currentUsage = snapshot;
+  const workers = Array.isArray(snapshot?.workers) ? snapshot.workers : [];
+  usageCardsEl.innerHTML = '';
+
+  if (!workers.length) {
+    usageCardsEl.innerHTML = '<div class="empty">No worker usage telemetry yet.</div>';
+  } else {
+    for (const worker of workers) {
+      const card = document.createElement('article');
+      card.className = 'usage-card' + (worker.ready === false ? ' unavailable' : '');
+
+      const head = document.createElement('div');
+      head.className = 'usage-card-head';
+      const titleWrap = document.createElement('div');
+      const title = document.createElement('b');
+      title.textContent = worker.worker || 'worker';
+      const subtitle = document.createElement('span');
+      subtitle.textContent = [worker.provider, worker.model, worker.effort].filter(Boolean).join(' · ');
+      titleWrap.append(title, subtitle);
+
+      const state = document.createElement('span');
+      const cooldown = Number(worker.cooldown_seconds || 0);
+      const readiness = worker.ready === true ? 'ready' : worker.ready === false ? 'blocked' : 'detected';
+      state.className = 'usage-state ' + (cooldown > 0 ? 'blocked' : readiness);
+      state.textContent = cooldown > 0
+        ? 'cooldown ' + Math.ceil(cooldown / 60) + 'm'
+        : worker.ready === true
+          ? 'ready'
+          : worker.ready === false
+            ? 'unavailable'
+            : 'detected';
+
+      head.append(titleWrap, state);
+
+      const tokens = worker.tokens || {};
+      const stats = document.createElement('div');
+      stats.className = 'usage-stats';
+      const rows = [
+        ['Jobs', worker.jobs || 0],
+        ['Input', compactNumber(tokens.input_tokens)],
+        ['Cached', compactNumber((tokens.cached_input_tokens || 0) + (tokens.cache_read_tokens || 0))],
+        ['Output', compactNumber(tokens.output_tokens)],
+        ['Reasoning', compactNumber((tokens.reasoning_output_tokens || 0) + (tokens.thinking_tokens || 0))],
+        ['Cache', worker.cache_ratio == null ? '—' : Math.round(worker.cache_ratio * 100) + '%']
+      ];
+      for (const [label, value] of rows) {
+        const cell = document.createElement('div');
+        const strong = document.createElement('strong');
+        strong.textContent = String(value);
+        const small = document.createElement('span');
+        small.textContent = label;
+        cell.append(strong, small);
+        stats.appendChild(cell);
+      }
+
+      const foot = document.createElement('div');
+      foot.className = 'usage-card-foot';
+      const running = Array.isArray(worker.running_jobs) ? worker.running_jobs.length : Number(worker.running || 0);
+      foot.textContent = running
+        ? running + ' running · latest ' + (worker.latest_job_id || 'job')
+        : 'Latest ' + (worker.latest_job_id || 'no persisted job yet');
+
+      card.append(head, stats, foot);
+      usageCardsEl.appendChild(card);
+    }
+  }
+
+  document.querySelector('#obsWorkers').textContent = workers.length;
+  document.querySelector('#obsReady').textContent = workers.filter(worker => worker.ready === true && !(worker.cooldown_seconds > 0)).length;
+  document.querySelector('#obsRunning').textContent = workers.reduce(
+    (sum, worker) => sum + (Array.isArray(worker.running_jobs) ? worker.running_jobs.length : Number(worker.running || 0)),
+    0
+  );
+  document.querySelector('#obsJobs').textContent = Number(snapshot?.jobs || 0);
+
+  const previous = obsWorkerEl.value;
+  obsWorkerEl.innerHTML = '<option value="">All workers</option>';
+  for (const worker of workers) {
+    const option = document.createElement('option');
+    option.value = worker.worker || '';
+    option.textContent = worker.worker || '';
+    obsWorkerEl.appendChild(option);
+  }
+  if ([...obsWorkerEl.options].some(option => option.value === previous)) {
+    obsWorkerEl.value = previous;
+  }
+}
+
+function renderTimeline(result) {
+  currentTimeline = Array.isArray(result?.items) ? result.items : [];
+  timelineListEl.innerHTML = '';
+
+  if (!currentTimeline.length) {
+    timelineListEl.innerHTML = '<div class="empty">No timeline items match the current filters.</div>';
+    return;
+  }
+
+  for (const item of currentTimeline) {
+    const row = document.createElement(item.job_id ? 'button' : 'div');
+    if (item.job_id) row.type = 'button';
+    row.className = 'timeline-item' + (item.job_id ? ' clickable' : '');
+
+    const rail = document.createElement('div');
+    rail.className = 'timeline-rail';
+    const dot = document.createElement('span');
+    dot.className = 'timeline-dot ' + (item.source || 'job');
+    rail.appendChild(dot);
+
+    const body = document.createElement('div');
+    body.className = 'timeline-body';
+
+    const top = document.createElement('div');
+    top.className = 'timeline-top';
+    const label = document.createElement('b');
+    label.textContent = item.label || item.source_id || item.kind || 'event';
+    const badge = document.createElement('span');
+    badge.className = 'timeline-source ' + (item.source || '');
+    badge.textContent = item.source || 'event';
+    const time = document.createElement('time');
+    time.textContent = formatTimelineTime(item.ts);
+    top.append(label, badge, time);
+
+    const message = document.createElement('p');
+    message.textContent = item.message || item.kind || '';
+
+    const meta = document.createElement('small');
+    meta.textContent = [
+      item.kind,
+      item.worker,
+      item.state,
+      item.branch,
+      item.node_id
+    ].filter(Boolean).join(' · ');
+
+    body.append(top, message, meta);
+    row.append(rail, body);
+
+    if (item.job_id) {
+      row.addEventListener('click', async () => {
+        setView('command');
+        if (!currentJobs.some(job => job.id === item.job_id)) {
+          try { await refreshJobs(); } catch {}
+        }
+        if (currentJobs.some(job => job.id === item.job_id)) {
+          selectJob(item.job_id).catch(() => {});
+        }
+      });
+    }
+    timelineListEl.appendChild(row);
+  }
+}
+
+function renderLogResults(result) {
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  logSearchResultsEl.innerHTML = '';
+
+  if (!rows.length) {
+    logSearchResultsEl.innerHTML = '<div class="empty">No log matches found.</div>';
+    return;
+  }
+
+  for (const item of rows) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'log-result';
+
+    const top = document.createElement('div');
+    top.className = 'log-result-top';
+    const job = document.createElement('b');
+    job.textContent = item.label || item.job_id || 'job';
+    const file = document.createElement('code');
+    file.textContent = (item.file || 'log') + ':' + (item.line || '—');
+    top.append(job, file);
+
+    const text = document.createElement('pre');
+    text.textContent = item.text || '';
+    const meta = document.createElement('small');
+    meta.textContent = [item.worker, item.project_path].filter(Boolean).join(' · ');
+
+    row.append(top, text, meta);
+    row.addEventListener('click', async () => {
+      setView('command');
+      if (!currentJobs.some(jobItem => jobItem.id === item.job_id)) {
+        try { await refreshJobs(); } catch {}
+      }
+      if (currentJobs.some(jobItem => jobItem.id === item.job_id)) {
+        selectJob(item.job_id).catch(() => {});
+      }
+    });
+    logSearchResultsEl.appendChild(row);
+  }
+}
+
+async function refreshObservability(options = {}) {
+  const filters = {
+    projectPath: obsProjectEl.value.trim(),
+    worker: obsWorkerEl.value,
+    sources: obsSourceEl.value ? [obsSourceEl.value] : [],
+    query: obsQueryEl.value.trim(),
+    limit: 120
+  };
+
+  const timelinePromise = window.teamyra.timeline(filters);
+  let usagePromise = null;
+
+  if (!options.lightweight || !currentUsage) {
+    usageCardsEl.classList.add('loading');
+    usagePromise = window.teamyra.usage({ projectPath: filters.projectPath })
+      .then(usage => {
+        renderUsageCards(usage);
+        return usage;
+      })
+      .catch(error => {
+        if (!currentUsage) {
+          usageCardsEl.innerHTML =
+            '<div class="empty">Usage telemetry unavailable: ' + escapeHtml(error?.message || error) + '</div>';
+        }
+        return currentUsage;
+      })
+      .finally(() => usageCardsEl.classList.remove('loading'));
+  }
+
+  const timeline = await timelinePromise;
+  renderTimeline(timeline);
+
+  if (usagePromise) {
+    usagePromise.catch(() => {});
+  }
+  return { usage: currentUsage, timeline };
+}
+
+async function runLogSearch() {
+  const query = logSearchQueryEl.value.trim();
+  if (!query) {
+    logSearchResultsEl.innerHTML = '<div class="empty">Enter a query to search persisted TEAMYRA logs.</div>';
+    return;
+  }
+
+  logSearchResultsEl.innerHTML = '<div class="empty">Searching logs…</div>';
+  const kind = logSearchKindEl.value;
+  const result = await window.teamyra.searchLogs({
+    query,
+    limit: 80,
+    projectPath: obsProjectEl.value.trim(),
+    worker: obsWorkerEl.value,
+    kinds: kind ? [kind] : []
+  });
+  renderLogResults(result);
+}
+
+let observabilityFilterTimer = null;
+function scheduleTimelineRefresh(full = false) {
+  clearTimeout(observabilityFilterTimer);
+  observabilityFilterTimer = setTimeout(() => {
+    refreshObservability({
+      preserveFilters: true,
+      lightweight: !full
+    }).catch(error => {
+      timelineListEl.innerHTML = '<div class="empty">Timeline refresh failed: ' + escapeHtml(error?.message || error) + '</div>';
+    });
+  }, 300);
+}
+
+
 navCommand.addEventListener('click', () => setView('command'));
 navWorktrees.addEventListener('click', () => setView('worktrees'));
+navObservability.addEventListener('click', () => setView('observability'));
+
+document.querySelector('#refreshObservability').addEventListener('click', () => {
+  refreshObservability().catch(error => {
+    timelineListEl.innerHTML = '<div class="empty">Observability refresh failed: ' + escapeHtml(error?.message || error) + '</div>';
+  });
+});
+obsProjectEl.addEventListener('change', () => scheduleTimelineRefresh(true));
+obsWorkerEl.addEventListener('change', () => scheduleTimelineRefresh(false));
+obsSourceEl.addEventListener('change', () => scheduleTimelineRefresh(false));
+obsQueryEl.addEventListener('input', () => scheduleTimelineRefresh(false));
+logSearchForm.addEventListener('submit', event => {
+  event.preventDefault();
+  runLogSearch().catch(error => {
+    logSearchResultsEl.innerHTML = '<div class="empty">Log search failed: ' + escapeHtml(error?.message || error) + '</div>';
+  });
+});
+
 document.querySelector('#refreshWorktrees').addEventListener('click', () => {
   refreshWorktrees({ preserveSelection: true }).catch(error => alert('Worktree refresh failed: ' + String(error?.message || error)));
 });

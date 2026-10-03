@@ -57,9 +57,10 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Add Claude/Codex/Antigravity project bootstrap files for agent interoperability.
 
 ## Phase 6 — Observability and Memory
-- [ ] Unified task timeline.
-- [ ] Usage, quota, and context visibility.
-- [ ] Searchable logs.
+- [x] Unified task timeline across jobs, graphs, reviews, and managed worktrees.
+- [x] Real token usage plus live readiness/cooldown visibility without fabricated quota percentages.
+- [ ] Reliable provider context-window visibility.
+- [x] Searchable bounded job logs and transcripts.
 - [ ] Project memory and architecture decisions.
 - [ ] Shared structured handoffs.
 - [ ] MCP pooling and crash recovery.

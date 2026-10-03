@@ -13,6 +13,7 @@
       <button class="active" id="navCommand" data-view="command">Command Desk</button>
       <button disabled>Tasks</button>
       <button id="navWorktrees" data-view="worktrees">Worktrees</button>
+      <button id="navObservability" data-view="observability">Observability</button>
       <button disabled>Connections</button>
       <button disabled>Memory</button>
       <button disabled>Settings</button>
@@ -123,6 +124,66 @@
           <pre id="wtDiff" class="diff-viewer">No worktree selected.</pre>
         </aside>
       </section>
+    </div>
+
+    <div id="observabilityView" class="app-view" hidden>
+      <section class="obs-hero">
+        <div>
+          <span class="ready">● LIVE TELEMETRY</span>
+          <h2>Observability</h2>
+          <p>Real worker readiness, persisted token usage, unified execution history, and bounded log search from one local view.</p>
+        </div>
+        <div class="obs-metrics">
+          <div><strong id="obsWorkers">0</strong><span>Workers</span></div>
+          <div><strong id="obsReady">0</strong><span>Ready</span></div>
+          <div><strong id="obsRunning">0</strong><span>Running</span></div>
+          <div><strong id="obsJobs">0</strong><span>Jobs</span></div>
+        </div>
+      </section>
+
+      <section class="section-title">
+        <div><p class="eyebrow">USAGE / QUOTA</p><h3>Worker telemetry</h3></div>
+        <span>Real tokens and readiness only. Unavailable quota percentages are not guessed.</span>
+      </section>
+      <section id="usageCards" class="usage-grid"></section>
+
+      <section class="section-title">
+        <div><p class="eyebrow">UNIFIED TIMELINE</p><h3>Jobs, graphs, reviews & worktrees</h3></div>
+        <button class="secondary" id="refreshObservability">Refresh</button>
+      </section>
+      <section class="obs-filters">
+        <label><span>Project path</span><input id="obsProject" placeholder="Optional project/repo path" /></label>
+        <label><span>Worker</span><select id="obsWorker"><option value="">All workers</option></select></label>
+        <label><span>Source</span>
+          <select id="obsSource">
+            <option value="">All sources</option>
+            <option value="job">Jobs</option>
+            <option value="graph">Graphs</option>
+            <option value="review">Reviews</option>
+            <option value="worktree">Worktrees</option>
+          </select>
+        </label>
+        <label class="obs-query-field"><span>Filter timeline</span><input id="obsQuery" placeholder="Search timeline text" /></label>
+      </section>
+      <section id="timelineList" class="timeline-list"><div class="empty">Loading timeline…</div></section>
+
+      <section class="section-title">
+        <div><p class="eyebrow">SEARCHABLE LOGS</p><h3>Find anything in worker history</h3></div>
+        <span>Searches events, transcripts, stderr, runner logs, and task text.</span>
+      </section>
+      <form id="logSearchForm" class="log-search-bar">
+        <input id="logSearchQuery" required placeholder="Search logs, commands, errors, messages…" />
+        <select id="logSearchKind">
+          <option value="">All log types</option>
+          <option value="events.jsonl">Events</option>
+          <option value="transcript.md">Transcripts</option>
+          <option value="stderr.txt">stderr</option>
+          <option value="runner.log">Runner logs</option>
+          <option value="task.txt">Task text</option>
+        </select>
+        <button class="primary" type="submit">Search</button>
+      </form>
+      <section id="logSearchResults" class="log-results"><div class="empty">Enter a query to search persisted TEAMYRA logs.</div></section>
     </div>
 
     <section id="terminalPanel" class="terminal-panel" hidden>

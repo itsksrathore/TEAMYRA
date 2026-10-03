@@ -84,6 +84,36 @@ def cmd_result(args):
     return 0
 
 
+def cmd_timeline(args):
+    emit(call("timeline_list", {
+        "limit": args.limit,
+        "project_path": args.project,
+        "worker": args.worker,
+        "sources": args.source or [],
+        "query": args.query,
+        "since": args.since,
+    }))
+    return 0
+
+
+def cmd_search(args):
+    emit(call("logs_search", {
+        "query": args.query,
+        "limit": args.limit,
+        "project_path": args.project,
+        "worker": args.worker,
+        "kinds": args.kind or [],
+    }))
+    return 0
+
+
+def cmd_usage(args):
+    emit(call("usage_snapshot", {
+        "project_path": args.project,
+    }))
+    return 0
+
+
 def cmd_test(args):
     argv = list(args.command or [])
     if argv and argv[0] == "--":
@@ -204,6 +234,27 @@ def parser():
     result = sub.add_parser("result", help="Read a terminal job result")
     result.add_argument("job_id")
     result.set_defaults(func=cmd_result)
+
+    timeline = sub.add_parser("timeline", help="Read the unified jobs/graphs/reviews/worktrees timeline")
+    timeline.add_argument("--limit", type=int, default=100)
+    timeline.add_argument("--project")
+    timeline.add_argument("--worker")
+    timeline.add_argument("--source", action="append", choices=["job", "graph", "review", "worktree"])
+    timeline.add_argument("--query")
+    timeline.add_argument("--since", type=float)
+    timeline.set_defaults(func=cmd_timeline)
+
+    search = sub.add_parser("search", help="Search TEAMYRA job logs and transcripts")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=50)
+    search.add_argument("--project")
+    search.add_argument("--worker")
+    search.add_argument("--kind", action="append", choices=["events.jsonl", "transcript.md", "stderr.txt", "runner.log", "task.txt"])
+    search.set_defaults(func=cmd_search)
+
+    usage = sub.add_parser("usage", help="Show real token usage plus live readiness/cooldown telemetry")
+    usage.add_argument("--project")
+    usage.set_defaults(func=cmd_usage)
 
     test = sub.add_parser("test", help="Run one deterministic no-shell test command")
     test.add_argument("--project", required=True)
