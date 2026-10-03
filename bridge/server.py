@@ -658,6 +658,33 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2):
     return review_cycle.summary(state)
 
 
+def handoff_task(source_job_id, message):
+    terminal_id = failover_terminal_job_id(source_job_id)
+    meta = read_meta(terminal_id)
+    result = job_result(source_job_id)
+    final_message = clip(result.get("final_message") or "", 5000)
+    git_status = "\n".join(result.get("git_status") or [])[:2000]
+    diffstat = result.get("diffstat") or ""
+    return f"""TEAMYRA structured handoff.
+
+Source job: {source_job_id}
+Terminal job: {terminal_id}
+Source worker: {meta.get('worker')}
+Source state: {meta.get('state')}
+Diffstat: {diffstat}
+Git status:
+{git_status or '(clean or unavailable)'}
+
+Source worker final message:
+{final_message or '(no final message)'}
+
+Handoff request:
+{message}
+
+Inspect the actual workspace before acting. Treat the source summary as context, not as proof that the code is correct.
+"""
+
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic Codex profiles are discovered at runtime."}
@@ -730,6 +757,13 @@ TOOLS = [
                      "mode": {"type": "string", "enum": ["all", "any"], "default": "all"},
                      "timeout_seconds": {"type": "integer", "default": 1500}},
                      "required": ["job_ids"], "additionalProperties": False}},
+    {"name": "job_handoff", "description": "Hand a completed job's compact result and workspace context to another worker/account for review, continuation, testing, or a new task.",
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"}, "target_worker": W_ENUM,
+         "message": {"type": "string"},
+         "write": {"type": "boolean", "default": False},
+         "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360}},
+         "required": ["job_id", "message"], "additionalProperties": False}},
     {"name": "job_message", "description": "Send a follow-up message to a finished job's worker session (resumes the same Codex thread or Antigravity conversation in the same folder). Returns a new job_id.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "message": {"type": "string"},
                      "timeout_minutes": {"type": "integer", "default": 60}},
@@ -820,6 +854,33 @@ def tool_call(name, a):
         return chain_summary(a["job_id"])
     if name == "job_wait":
         return job_wait(a["job_ids"], a.get("mode", "all"), a.get("timeout_seconds", 1500))
+    if name == "job_handoff":
+        terminal_id = failover_terminal_job_id(a["job_id"])
+        source = read_meta(terminal_id)
+        if not chain_is_complete(a["job_id"]):
+            raise ValueError("source job is still running")
+        requested = a.get("target_worker", "auto")
+        target = requested
+        if requested == "auto":
+            target = pick_worker("auto", exclude=[source.get("worker")] if source.get("worker") else [])
+        job_id, worker = start_job(
+            target,
+            handoff_task(a["job_id"], a["message"]),
+            source["cwd"],
+            f"handoff from {source.get('label') or a['job_id']}"[:80],
+            a.get("timeout_minutes", 90),
+            a.get("write", False),
+            parent=terminal_id,
+            auto_failover=requested == "auto",
+            max_failovers=config().get("max_failovers", 2),
+        )
+        patch_job_meta(
+            job_id,
+            handoff_from_job_id=a["job_id"],
+            handoff_from_terminal_job_id=terminal_id,
+            handoff_from_worker=source.get("worker"),
+        )
+        return {"job_id": job_id, "worker": worker, "source_job_id": a["job_id"], **follow_info(job_id)}
     if name == "job_message":
         terminal_id = failover_terminal_job_id(a["job_id"])
         m = read_meta(terminal_id)
