@@ -19,7 +19,8 @@ This checklist is updated as implementation lands.
 - [x] Codex Add Account flow (isolated CODEX_HOME profile + provider login launch).
 - [ ] Claude Add Account flow after profile-isolation verification.
 - [ ] Antigravity Add Account flow after profile-isolation verification.
-- [x] Live jobs list/status.\n- [ ] Live job event/transcript streaming.
+- [x] Live jobs list/status.
+- [x] Live job transcript streaming.
 - [ ] Embedded terminals.
 - [x] Desktop JavaScript syntax CI workflow.
 
