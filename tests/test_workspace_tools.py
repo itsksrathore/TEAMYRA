@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -153,6 +154,41 @@ class WorkspaceToolTests(unittest.TestCase):
             command = ["git", "reset", "--hard", "HEAD"]
             with self.assertRaises(PermissionError):
                 service.execute("terminal.run", {"argv": command}, token="x" * 64)
+
+
+    def test_terminal_environment_scrubs_bridge_and_secret_variables(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            script = workspace / "env_check.py"
+            script.write_text(
+                "import os; print(os.getenv('TEAMYRA_LOCAL_AGENT_TOKEN_FILE')); print(os.getenv('MY_API_KEY'))",
+                encoding="utf-8",
+            )
+            old_token = os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN_FILE")
+            old_key = os.environ.get("MY_API_KEY")
+            os.environ["TEAMYRA_LOCAL_AGENT_TOKEN_FILE"] = str(Path(td) / "security" / "token")
+            os.environ["MY_API_KEY"] = "do-not-leak"
+            try:
+                result = service.execute(
+                    "terminal.run",
+                    {"argv": [sys.executable, "env_check.py"]},
+                    token="x" * 64,
+                )
+            finally:
+                if old_token is None:
+                    os.environ.pop("TEAMYRA_LOCAL_AGENT_TOKEN_FILE", None)
+                else:
+                    os.environ["TEAMYRA_LOCAL_AGENT_TOKEN_FILE"] = old_token
+                if old_key is None:
+                    os.environ.pop("MY_API_KEY", None)
+                else:
+                    os.environ["MY_API_KEY"] = old_key
+            self.assertEqual(result["exit_code"], 0)
+            self.assertNotIn("do-not-leak", result["stdout"])
+            self.assertNotIn("security", result["stdout"])
 
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:
