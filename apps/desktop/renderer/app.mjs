@@ -537,8 +537,18 @@ async function refreshChatgptStatus() {
   document.querySelector('#chatgptUrl').textContent = status.url || 'Not loaded';
   chatgptWorkspaceEl.value = workspace?.workspace || '';
   if (workspace?.permissions) applyChatgptPermissions(workspace.permissions);
-  chatgptPermissionHint.textContent = status.challenged
-    ? 'ChatGPT requires user verification. Complete it manually inside the embedded panel.'
+  const busyLockedIds = [
+    'chatgptNew', 'chatgptReload', 'chatgptReconnect', 'chatgptSelectWorkspace',
+    'chatgptSavePermissions', 'chatgptAttach', 'chatgptRevert'
+  ];
+  for (const id of busyLockedIds) {
+    const button = document.querySelector('#' + id);
+    if (button) button.disabled = status.busy === true;
+  }
+  chatgptPermissionHint.textContent = status.busy
+    ? 'A delegated ChatGPT worker task is running. Manual browser interaction and workspace changes are temporarily locked.'
+    : status.challenged
+      ? 'ChatGPT requires user verification. Complete it manually inside the embedded panel.'
     : status.loginVisible
       ? 'ChatGPT session expired or is not signed in. Log in manually inside the embedded panel.'
       : workspace?.available
@@ -1318,7 +1328,10 @@ async function buildMemoryContext() {
 
 
 document.querySelector('#chatgptOpen').addEventListener('click', () => openChatgptPanel().catch(error => alert(String(error?.message || error))));
-document.querySelector('#chatgptReconnect').addEventListener('click', () => openChatgptPanel().catch(error => alert(String(error?.message || error))));
+document.querySelector('#chatgptReconnect').addEventListener('click', async () => {
+  await window.teamyra.reconnectChatgpt();
+  await refreshChatgptStatus();
+});
 document.querySelector('#chatgptReload').addEventListener('click', async () => {
   await window.teamyra.reloadChatgpt();
   await refreshChatgptStatus();
