@@ -33,6 +33,10 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
     def test_persistent_session_is_dedicated(self):
         self.assertIn("persist:teamyra-chatgpt-profile", self.session)
         self.assertIn("session.fromPartition", self.session)
+        self.assertIn("setPermissionCheckHandler", self.session)
+        self.assertIn("setPermissionRequestHandler", self.session)
+        self.assertIn("will-download", self.session)
+        self.assertIn("item.cancel()", self.session)
 
     def test_workspace_tools_are_shared_with_mcp(self):
         self.assertIn('"workspace_tool"', self.server)
@@ -69,7 +73,10 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
     def test_automation_protocol_is_bounded(self):
         self.assertIn("TEAMYRA_TOOL_REQUEST", self.automation)
         self.assertIn("TEAMYRA_CANCELLED", self.automation)
+        self.assertIn("Array.isArray(data.args)", self.automation)
         self.assertIn("for (let step = 0; step < 16; step += 1)", self.provider)
+        self.assertIn("MAX_TOOL_RESULT_CHARS", self.provider)
+        self.assertIn("next_offset", self.provider)
 
 
 if __name__ == "__main__":
