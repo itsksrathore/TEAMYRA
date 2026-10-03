@@ -1,0 +1,14 @@
+{
+  "name": "@teamyra/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TEAMYRA multi-agent control desk",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check renderer/app.js"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  }
+}
