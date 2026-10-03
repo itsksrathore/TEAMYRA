@@ -23,7 +23,7 @@ const PROVIDERS = [
     bin: 'codex',
     nativeHome: path.join(HOME, '.codex'),
     status: { kind: 'files', files: [path.join(HOME, '.codex', 'auth.json')] },
-    managed: { verified: true, env: 'CODEX_HOME' },
+    managed: { verified: true, env: 'CODEX_HOME', loginArgv: ['login', '--device-auth'] },
     color: 'green'
   },
   {
@@ -139,4 +139,12 @@ async function detectProviders() {
   return rows;
 }
 
-module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders };
+function providerById(id) {
+  return PROVIDERS.find(provider => provider.id === id) || null;
+}
+
+function profileRoot(providerId) {
+  return path.join(PROFILES_ROOT, providerId);
+}
+
+module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot };
