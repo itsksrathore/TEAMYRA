@@ -22,7 +22,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Replace fixed Claude/Codex worker assumptions with dynamic provider profiles.
 - [x] Support multiple isolated Codex profiles.
 - [x] Support multiple isolated Claude profiles and expose them as bridge workers.
-- [ ] Verify and implement Antigravity profile isolation.
+- [x] Verify Antigravity profile isolation capability — current `agy` CLI exposes no safe account/profile isolation mechanism, so managed multi-account is explicitly disabled pending upstream support.
 - [x] Add initial account-aware routing and cooldown handling across discovered workers.
 - [x] Add bounded automatic reassignment/failover after eligible worker/provider failure, preserving job lineage.
 - [x] Add per-profile model/effort settings plus enabled/priority routing controls.
@@ -59,7 +59,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 ## Phase 6 — Observability and Memory
 - [x] Unified task timeline across jobs, graphs, reviews, and managed worktrees.
 - [x] Real token usage plus live readiness/cooldown visibility without fabricated quota percentages.
-- [ ] Reliable provider context-window visibility.
+- [x] Provider context-window capability handling — reliable live telemetry is not exposed by the verified CLIs, so TEAMYRA reports it as unavailable instead of fabricating values.
 - [x] Searchable bounded job logs and transcripts.
 - [x] Local project memory and architecture decisions with structured entries, provenance, archive lifecycle, ranked search, MCP/CLI/Desktop access, and bounded context packs.
 - [x] Shared structured handoffs with persistent envelopes, lineage, acceptance criteria, artifacts, and bounded project-memory context.
@@ -71,4 +71,4 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Windows installer with bundled standalone core and verified installed-app runtime.
 - [x] GitHub Release update pipeline with electron-updater wiring and generated NSIS update metadata.
 - [x] Documentation and examples for Windows packaging, runtime layout, and release acceptance.
-- [ ] Open-source release hardening (license, contribution/security policy, public release checklist, and signed stable channel).
+- [x] Open-source release hardening — MIT license, contribution/security policy, provider capability boundaries, public release checklist, runtime dependency audit gate, and signed/verified stable release channel.
