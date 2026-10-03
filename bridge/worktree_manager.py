@@ -140,23 +140,66 @@ def status(storage_root, worktree_id):
     return out
 
 
+
+def _untracked_preview(path, remaining):
+    _, raw, _ = _git(path, "ls-files", "--others", "--exclude-standard", "-z")
+    if not raw or remaining <= 0:
+        return ""
+    root = Path(path).resolve()
+    parts = []
+    used = 0
+    for rel in [item for item in raw.split("\0") if item]:
+        if used >= remaining:
+            break
+        candidate = (root / rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+
+        header = f"\n\n# TEAMYRA untracked file: {rel}\n"
+        size = candidate.stat().st_size
+        if size > 128 * 1024:
+            body = f"[untracked file omitted: {size} bytes]\n"
+        else:
+            data = candidate.read_bytes()
+            if b"\x00" in data:
+                body = f"[binary untracked file omitted: {size} bytes]\n"
+            else:
+                text = data.decode("utf-8", errors="replace")
+                lines = text.splitlines()
+                body = "\n".join("+" + line for line in lines)
+                if text.endswith("\n"):
+                    body += "\n"
+        chunk = header + body
+        take = min(len(chunk), remaining - used)
+        parts.append(chunk[:take])
+        used += take
+    return "".join(parts)
+
+
 def diff(storage_root, worktree_id, max_chars=50000):
     meta = load(storage_root, worktree_id)
     path = Path(meta["path"])
     if not path.exists():
         raise ValueError("worktree path no longer exists")
     max_chars = max(1000, min(int(max_chars), 200000))
-    _, text, _ = _git(
+    _, tracked, _ = _git(
         path, "diff", "--no-ext-diff", "--unified=3", "--no-color", meta["base_commit"]
     )
-    clipped = len(text) > max_chars
+    untracked = _untracked_preview(path, max(0, max_chars - min(len(tracked), max_chars)))
+    text = tracked + untracked
+    total_chars = len(text)
+    clipped = total_chars > max_chars
     return {
         "id": worktree_id,
         "branch": meta["branch"],
         "base_commit": meta["base_commit"],
         "diff": text[:max_chars],
         "clipped": clipped,
-        "total_chars": len(text),
+        "total_chars": total_chars,
     }
 
 
