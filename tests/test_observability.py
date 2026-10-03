@@ -69,6 +69,20 @@ class ObservabilityTests(unittest.TestCase):
                 "created_at": 31,
                 "updated_at": 33,
             })
+            self.write_json(root / "tasks" / "handoffs" / "handoff-a.json", {
+                "id": "handoff-a",
+                "project_path": str(project),
+                "source_job_id": "job-1",
+                "terminal_job_id": "job-1",
+                "source_worker": "codex1",
+                "target_worker": "claude1",
+                "target_job_id": "job-2",
+                "label": "Review implementation",
+                "objective": "Validate and finish",
+                "message": "Review the implementation",
+                "created_at": 34,
+                "updated_at": 35,
+            })
             self.write_json(root / "worktrees" / ".teamyra" / "wt-a.json", {
                 "id": "wt-a",
                 "label": "Node A",
@@ -84,13 +98,45 @@ class ObservabilityTests(unittest.TestCase):
             result = observability.timeline(root, limit=100)
             sources = {item["source"] for item in result["items"]}
             kinds = {item["kind"] for item in result["items"]}
-            self.assertEqual(sources, {"job", "graph", "review", "worktree"})
+            self.assertEqual(sources, {"job", "graph", "review", "handoff", "worktree"})
             self.assertIn("job.command", kinds)
             self.assertIn("graph.node.ended", kinds)
             self.assertIn("review.updated", kinds)
+            self.assertIn("handoff.created", kinds)
+            self.assertIn("handoff.target.attached", kinds)
             self.assertIn("worktree.merged", kinds)
             timestamps = [item["ts"] for item in result["items"]]
             self.assertEqual(timestamps, sorted(timestamps, reverse=True))
+
+    def test_timeline_filters_handoff_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            self.write_json(root / "tasks" / "handoffs" / "handoff-filter.json", {
+                "id": "handoff-filter",
+                "project_path": str(project),
+                "source_job_id": "source-job",
+                "terminal_job_id": "terminal-job",
+                "source_worker": "codex1",
+                "target_worker": "claude1",
+                "target_job_id": "target-job",
+                "label": "Security review",
+                "objective": "needle objective",
+                "message": "Review it",
+                "created_at": 40,
+                "updated_at": 41,
+            })
+            result = observability.timeline(
+                root,
+                project_path=project,
+                worker="claude1",
+                sources=["handoff"],
+                query="needle",
+            )
+            self.assertEqual(result["total_matches"], 1)
+            self.assertEqual(result["items"][0]["handoff_id"], "handoff-filter")
+            self.assertEqual(result["items"][0]["kind"], "handoff.created")
 
     def test_timeline_filters_worker_project_query_and_source(self):
         with tempfile.TemporaryDirectory() as td:

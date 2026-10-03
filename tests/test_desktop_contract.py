@@ -57,6 +57,12 @@ class DesktopContractTests(unittest.TestCase):
         for action in ("observability.timeline", "observability.search", "observability.usage"):
             self.assertIn(action, desktop_api)
 
+    def test_observability_supports_handoff_timeline_source(self):
+        self.assertIn('<option value="handoff">Handoffs</option>', self.html)
+        styles = (ROOT / "apps" / "desktop" / "renderer" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".timeline-dot.handoff", styles)
+        self.assertIn(".timeline-source.handoff", styles)
+
     def test_observability_usage_reuses_cached_provider_state(self):
         self.assertIn("PROVIDER_CACHE_MS", self.main)
         self.assertIn("providersCached(false)", self.main)
@@ -66,47 +72,6 @@ class DesktopContractTests(unittest.TestCase):
         self.assertIn("'codex1'", self.main)
         self.assertIn("'codex2'", self.main)
         self.assertIn("'antigravity'", self.main)
-
-    def test_memory_renderer_ids_exist_in_html(self):
-        ids = [
-            "navMemory", "memoryView", "memoryProject", "loadMemory",
-            "memorySearch", "memoryKindFilter", "memoryStatusFilter",
-            "memoryNew", "memoryContext", "memoryList", "memoryForm",
-            "memoryKind", "memoryImportance", "memoryTitle", "memoryTags",
-            "memoryContent", "memoryMeta", "memoryArchive", "memoryReset",
-            "memorySave", "memoryContextPreview", "memoryContextClose",
-        ]
-        for element_id in ids:
-            self.assertIn(f'id="{element_id}"', self.html, element_id)
-            self.assertIn(f"#{element_id}", self.renderer, element_id)
-
-    def test_memory_preload_api_matches_main_ipc_handlers(self):
-        contracts = {
-            "memoryList": "teamyra:memory-list",
-            "memorySearch": "teamyra:memory-search",
-            "memoryGet": "teamyra:memory-get",
-            "memoryAdd": "teamyra:memory-add",
-            "memoryUpdate": "teamyra:memory-update",
-            "memoryArchive": "teamyra:memory-archive",
-            "memoryContext": "teamyra:memory-context",
-        }
-        for method, channel in contracts.items():
-            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
-            self.assertIn(channel, self.preload)
-            self.assertIn(channel, self.main)
-
-        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
-        for action in (
-            "memory.list", "memory.search", "memory.get", "memory.add",
-            "memory.update", "memory.archive", "memory.context",
-        ):
-            self.assertIn(action, desktop_api)
-
-    def test_memory_renderer_uses_textcontent_for_dynamic_entry_fields(self):
-        self.assertIn("title.textContent = item.title", self.renderer)
-        self.assertIn("tags.textContent =", self.renderer)
-        self.assertIn("memoryContentEl.value = item.content", self.renderer)
-        self.assertNotIn("memoryListEl.innerHTML = items.map", self.renderer)
 
     def test_memory_renderer_ids_exist_in_html(self):
         ids = [
@@ -143,6 +108,12 @@ class DesktopContractTests(unittest.TestCase):
             "memory.update", "memory.archive", "memory.context",
         ):
             self.assertIn(action, desktop_api)
+
+    def test_memory_renderer_uses_textcontent_for_dynamic_entry_fields(self):
+        self.assertIn("title.textContent = item.title", self.renderer)
+        self.assertIn("tags.textContent =", self.renderer)
+        self.assertIn("memoryContentEl.value = item.content", self.renderer)
+        self.assertNotIn("memoryListEl.innerHTML = items.map", self.renderer)
 
     def test_memory_is_runtime_only_and_archives_instead_of_deleting(self):
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
