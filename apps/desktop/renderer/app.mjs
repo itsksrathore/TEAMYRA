@@ -1,6 +1,7 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { agentIconSvg } from './agent-icons.mjs';
 
 const $ = selector => document.querySelector(selector);
 
@@ -17,11 +18,11 @@ const transcriptState = new Map();
 
 const ACTIVE_STATES = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
 const WORKER_META = {
-  claude: { code: 'CL', cls: 'claude', label: 'Claude' },
-  codex: { code: 'CX', cls: 'codex', label: 'Codex' },
-  antigravity: { code: 'AG', cls: 'antigravity', label: 'Antigravity' },
-  chatgpt: { code: 'GPT', cls: 'chatgpt', label: 'ChatGPT' },
-  other: { code: 'AI', cls: '', label: 'Agent' }
+  claude: { code: 'CL', icon: 'claude', cls: 'claude', label: 'Claude' },
+  codex: { code: 'CX', icon: 'openai', cls: 'codex', label: 'Codex' },
+  antigravity: { code: 'AG', icon: 'antigravity', cls: 'antigravity', label: 'Antigravity' },
+  chatgpt: { code: 'GPT', icon: 'openai', cls: 'chatgpt', label: 'ChatGPT' },
+  other: { code: 'AI', icon: '', cls: '', label: 'Agent' }
 };
 
 function escapeHtml(value) {
@@ -155,7 +156,7 @@ function taskCardHtml(job) {
   return `
     <article class="task-card ${active ? 'running' : ''}" data-job-id="${escapeHtml(job.id)}">
       <div class="task-head">
-        <span class="agent-avatar ${meta.cls}">${meta.code}</span>
+        <span class="agent-avatar ${meta.cls}">${agentIconSvg(meta.icon) || escapeHtml(meta.code)}</span>
         <div class="task-title">
           <strong title="${escapeHtml(taskTitle(job))}">${escapeHtml(taskTitle(job))}</strong>
           <span>${escapeHtml(meta.label)} · ${escapeHtml(shortTime(job.started || job.created))}</span>
@@ -267,7 +268,7 @@ function agentCardHtml(provider) {
   return `
     <article class="agent-card" data-provider-card="${escapeHtml(provider.id)}">
       <div class="agent-card-head">
-        <span class="agent-avatar ${meta.cls}">${meta.code}</span>
+        <span class="agent-avatar ${meta.cls}">${agentIconSvg(meta.icon) || escapeHtml(meta.code)}</span>
         <div class="agent-card-title">
           <strong>${escapeHtml(provider.name)}</strong>
           <span>${escapeHtml(status)}</span>
@@ -685,6 +686,8 @@ $('#chatgptStop').addEventListener('click', () => window.teamyra.stopChatgpt().c
 window.teamyra.onUpdateState(updateUpdateNote);
 
 async function boot() {
+  const chatgptAvatar = $('.chatgpt-avatar');
+  if (chatgptAvatar) chatgptAvatar.innerHTML = agentIconSvg('openai') || 'GPT';
   window.teamyra.updateStatus().then(updateUpdateNote).catch(() => {});
   await Promise.allSettled([refreshJobs(), refreshAgents()]);
   await window.teamyra.setChatgptVisible(false).catch(() => {});
