@@ -1,3 +1,6 @@
+import json
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -10,6 +13,59 @@ import server
 
 
 class RoutingTests(unittest.TestCase):
+
+    def test_chatgpt_worker_readiness_uses_fresh_desktop_heartbeat(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            status_dir = root / "chatgpt"
+            status_dir.mkdir()
+            (status_dir / "status.json").write_text(json.dumps({
+                "heartbeat_at": time.time(),
+                "automation_ready": True,
+                "detail": "embedded ChatGPT session is active",
+            }), encoding="utf-8")
+            info = {"id": "chatgpt-normal", "provider": "chatgpt-web"}
+            server.AUTH_CACHE.clear()
+            with patch.object(server, "ROOT", root):
+                ready, detail = server.worker_auth_status(info, use_cache=False)
+            self.assertTrue(ready)
+            self.assertIn("ChatGPT", detail)
+
+    def test_chatgpt_job_queues_for_desktop_instead_of_spawning_cli_runner(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs"
+            jobs.mkdir()
+            project = Path(td) / "project"
+            project.mkdir()
+            registry = {
+                "chatgpt-normal": {
+                    "id": "chatgpt-normal",
+                    "provider": "chatgpt-web",
+                    "label": "ChatGPT Normal",
+                    "profile_id": "web",
+                    "native": True,
+                    "enabled": True,
+                }
+            }
+            with patch.object(server, "JOBS", jobs), \
+                 patch.object(server, "worker_registry", return_value=registry), \
+                 patch.object(server, "worker_auth_status", return_value=(True, "ready")), \
+                 patch.object(server, "worker_settings", return_value={}), \
+                 patch.object(server, "cooldown_left", return_value=0), \
+                 patch.object(server, "git", return_value="head"), \
+                 patch.object(server, "config", return_value={"auto_resume": 2, "max_failovers": 2}), \
+                 patch.object(server.subprocess, "Popen") as popen:
+                job_id, worker = server.start_job(
+                    "chatgpt-normal", "Inspect the project", project, auto_failover=False
+                )
+            self.assertEqual(worker, "chatgpt-normal")
+            meta = json.loads((jobs / job_id / "meta.json").read_text(encoding="utf-8"))
+            spec = json.loads((jobs / job_id / "spec.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["state"], "waiting_for_desktop")
+            self.assertEqual(meta["provider"], "chatgpt-web")
+            self.assertEqual(spec["cmd"], [])
+            popen.assert_not_called()
+
     def test_auto_excludes_disabled_and_uses_priority(self):
         registry = {
             "disabled": {"id": "disabled", "provider": "codex", "enabled": False, "priority": 0},
