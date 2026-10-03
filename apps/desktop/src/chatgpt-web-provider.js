@@ -46,9 +46,7 @@ class ChatGPTWebProvider {
     this.visible = false;
     this.loaded = false;
     this.busy = false;
-    this.activeJobDir = null;
     this.lastProbe = null;
-    this.interactionCssKey = null;
     this.jobTimer = null;
     this.heartbeatTimer = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
@@ -92,10 +90,11 @@ class ChatGPTWebProvider {
       }
       return { action: 'deny' };
     });
-    this.view.webContents.on('will-navigate', event => {
-      const url = event.url;
-      if (!safeHttps(url)) event.preventDefault();
-    });
+    const guardTopLevelNavigation = event => {
+      if (!safeHttps(event.url)) event.preventDefault();
+    };
+    this.view.webContents.on('will-navigate', guardTopLevelNavigation);
+    this.view.webContents.on('will-redirect', guardTopLevelNavigation);
     this.view.webContents.on('did-finish-load', () => {
       this.loaded = true;
       this.refreshStatus().catch(() => {});
@@ -545,6 +544,9 @@ class ChatGPTWebProvider {
     }
     this.view = null;
     this.automation = null;
+    this.interactionCssKey = null;
+    this.activeJobDir = null;
+    this.busy = false;
   }
 }
 
