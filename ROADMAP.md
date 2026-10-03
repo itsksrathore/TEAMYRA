@@ -44,7 +44,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Safe diff/status plus guarded merge/discard/cleanup backend.
 - [x] Desktop visual diff/worktree review code path with guarded merge/discard/update actions.
 - [x] Rebase/update-branch backend with automatic conflict abort.
-- [ ] Windows runtime UX verification for Phase 4 desktop actions.
+- [x] Windows runtime UX verification for Phase 4 desktop actions.
 - [ ] Interactive conflict-resolution experience.
 
 ## Phase 5 — MCP, CLI, and Plugins

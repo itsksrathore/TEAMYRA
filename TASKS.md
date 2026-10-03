@@ -50,11 +50,11 @@ This checklist is updated as implementation lands.
 - [x] Managed worktree status, commits, diffstat, conflict detection and bounded unified diff.
 - [x] Safe merge/discard backend with explicit confirmation and dirty/unmerged protection.
 - [x] Parallel worker jobs use managed worktree IDs and persist worktree metadata.
-- [x] Desktop Worktrees screen + visual diff viewer — code/CI verified; Windows runtime UX verification pending.
-- [x] Guarded merge/discard/update-branch controls — backend + IPC + renderer contracts CI verified.
+- [x] Desktop Worktrees screen + visual diff viewer — Electron runtime verified on Windows.
+- [x] Guarded merge/discard/update-branch controls — backend + IPC + renderer contracts + Windows runtime verified.
 - [x] Rebase/update-branch workflow with automatic abort on conflict.
 - [x] Bounded untracked text previews; binary/large untracked content is not dumped.
-- [ ] Windows runtime verification of the new Worktrees screen/actions.
+- [x] Windows runtime verification: create/diff/rebase/merge/discard lifecycle validated end-to-end.
 - [ ] Interactive conflict-resolution UI.
 
 ## Phase 5 — MCP / CLI / Plugins
