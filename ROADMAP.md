@@ -28,11 +28,13 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Add per-profile model/effort settings plus enabled/priority routing controls.
 
 ## Phase 3 — Orchestration
-- [ ] Add Conductor/supervisor mode.
-- [ ] Add task decomposition and dependency graphs.
-- [ ] Add parent/child sessions and worker messaging.
-- [ ] Add automatic retry, reassignment, and review loops.
+- [x] Add detached Conductor foundation for dependency-ordered graph execution.
+- [x] Add persistent task graphs with cycle validation and MCP controls.
+- [x] Add graph node → child job lineage plus failover lineage.
+- [x] Add bounded automatic retry/reassignment for eligible provider/worker failures.
+- [ ] Add automated reviewer/tester loops and structured worker messaging.
 - [ ] Add approval gates for sensitive actions.
+- [ ] Enable safe parallel graph execution after Phase 4 worktree merge/rebase semantics are available.
 
 ## Phase 4 — Git Workspace System
 - [ ] First-class Git worktree manager.
