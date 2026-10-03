@@ -78,7 +78,8 @@ class DesktopContractTests(unittest.TestCase):
             "radial-gradient(52% 44% at 12% 6%",
         ):
             self.assertIn(marker, self.styles)
-        self.assertIn("Nami Glass workbench", self.styles)
+        self.assertIn("Portions of this visual language are adapted from Nami", self.styles)
+        self.assertIn("Copyright 2026 Dainami Pte Ltd, licensed under Apache-2.0", self.styles)
 
     def test_chatgpt_is_nested_under_agents_and_keeps_core_controls(self):
         ids = [
