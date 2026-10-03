@@ -16,9 +16,12 @@ This checklist is updated as implementation lands.
 - [x] Installed CLI detection.
 - [x] Existing local login detection.
 - [x] Agent/account cards.
-- [ ] Add Account flow.
+- [x] Codex Add Account flow (isolated CODEX_HOME profile + provider login launch).
+- [ ] Claude Add Account flow after profile-isolation verification.
+- [ ] Antigravity Add Account flow after profile-isolation verification.
 - [x] Live jobs list/status.\n- [ ] Live job event/transcript streaming.
 - [ ] Embedded terminals.
+- [x] Desktop JavaScript syntax CI workflow.
 
 ## Phase 2 — Multi-account Engine
 - [ ] Dynamic provider profiles.
