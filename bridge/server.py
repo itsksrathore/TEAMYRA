@@ -1031,6 +1031,32 @@ def tool_call(name, a):
     raise ValueError("Unknown tool: " + name)
 
 
+MCP_NAMESPACE = "teamyra."
+MCP_SERVER_NAME = "teamyra"
+MCP_SERVER_VERSION = "0.2.0"
+
+
+def canonical_tool_name(name):
+    name = str(name or "")
+    return name[len(MCP_NAMESPACE):] if name.startswith(MCP_NAMESPACE) else name
+
+
+def mcp_tools(include_legacy=True):
+    canonical = []
+    for tool in TOOLS:
+        item = dict(tool)
+        item["name"] = MCP_NAMESPACE + tool["name"]
+        canonical.append(item)
+    if not include_legacy:
+        return canonical
+    legacy = []
+    for tool in TOOLS:
+        item = dict(tool)
+        item["description"] = "Legacy alias. " + str(tool.get("description") or "")
+        legacy.append(item)
+    return canonical + legacy
+
+
 # --- MCP plumbing ------------------------------------------------------------------------------
 def send(obj):
     line = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -1054,15 +1080,20 @@ def handle(msg):
         return {"jsonrpc": "2.0", "id": req_id, "result": {
             "protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "ai-workers", "version": "2.0.0"}}}
+            "serverInfo": {
+                "name": MCP_SERVER_NAME,
+                "title": "TEAMYRA Multi-Agent Engineering OS",
+                "version": MCP_SERVER_VERSION,
+                "description": "Local-first multi-agent orchestration, testing, worktrees, reviews and worker routing."
+            }}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": mcp_tools(include_legacy=True)}}
     if method == "tools/call":
         params = msg.get("params", {})
         try:
-            result = tool_call(params.get("name"), params.get("arguments") or {})
+            result = tool_call(canonical_tool_name(params.get("name")), params.get("arguments") or {})
             return {"jsonrpc": "2.0", "id": req_id, "result": {
                 "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=1)}], "isError": False}}
         except Exception as e:
@@ -1084,7 +1115,7 @@ def handle_and_send(msg):
         if response is not None:
             send(response)
     except Exception as e:
-        print("ai-workers bridge error:", e, file=sys.stderr, flush=True)
+        print("TEAMYRA MCP error:", e, file=sys.stderr, flush=True)
     finally:
         done.set()
 
@@ -1102,7 +1133,7 @@ def main():
         try:
             msg = json.loads(line)
         except ValueError as e:
-            print("ai-workers bridge error:", e, file=sys.stderr, flush=True)
+            print("TEAMYRA MCP error:", e, file=sys.stderr, flush=True)
             continue
         if msg.get("method") == "tools/call":  # calls can block for long: one thread each
             threading.Thread(target=handle_and_send, args=(msg,), daemon=True).start()
