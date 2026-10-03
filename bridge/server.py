@@ -870,10 +870,10 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"},
          "tool": {"type": "string", "enum": [
-             "filesystem.list", "filesystem.read", "filesystem.search", "filesystem.create",
+             "filesystem.list", "filesystem.stat", "filesystem.read", "filesystem.search", "filesystem.create",
              "filesystem.write", "filesystem.patch", "filesystem.move", "filesystem.rename",
              "filesystem.delete", "terminal.run", "git.status", "git.diff", "git.log",
-             "git.add", "git.commit"
+             "git.add", "git.commit", "git.restore"
          ]},
          "args": {"type": "object"},
          "confirm": {"type": "boolean", "default": False}},
