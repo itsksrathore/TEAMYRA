@@ -7,7 +7,7 @@
   "scripts": {
     "build:renderer": "esbuild renderer/app.mjs --bundle --platform=browser --format=iife --outfile=renderer/bundle.js",
     "start": "npm run build:renderer && electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check renderer/app.mjs"
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check renderer/app.mjs"
   },
   "devDependencies": {
     "electron": "43.7.3",
