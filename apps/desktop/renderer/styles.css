@@ -27,3 +27,7 @@ main{grid-column:2;width:100%;max-width:1600px;padding:34px 42px 60px}header{dis
 .terminal-host{height:360px;padding:10px 8px}
 .terminal-host .xterm{height:100%}
 .terminal-host .xterm-viewport{border-radius:8px}
+
+.account-kind{margin-left:auto!important;color:var(--muted)!important;font-size:9px!important;text-transform:uppercase}
+.account-open{border:1px solid var(--line);border-radius:7px;background:#10151d;color:var(--text);font:9px inherit;padding:5px 7px;cursor:pointer}
+.account-open:hover{border-color:#39465b;background:#18202c}
