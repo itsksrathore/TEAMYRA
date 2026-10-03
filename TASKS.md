@@ -35,11 +35,13 @@ This checklist is updated as implementation lands.
 - [x] Per-account model/effort UI and persisted settings, with enabled/priority routing controls.
 
 ## Phase 3 — Orchestration
-- [ ] Conductor.
-- [ ] Task graph.
-- [ ] Parent/child workers.
-- [ ] Retry/failover/review loops.
-- [ ] Approval gates.
+- [x] Conductor foundation — detached sequential dependency scheduler.
+- [x] Persistent dependency task graph with cycle validation and MCP create/start/status/cancel tools.
+- [x] Parent/child worker lineage for graph nodes and failover chains.
+- [x] Bounded retry/failover loop for eligible provider/worker failures.
+- [ ] Automated reviewer/tester loops.
+- [ ] Approval gates for sensitive/destructive actions.
+- [ ] Parallel graph execution after Phase 4 worktree merge/rebase semantics are implemented.
 
 ## Phase 4 — Git Workspace
 - [ ] Worktree manager.
