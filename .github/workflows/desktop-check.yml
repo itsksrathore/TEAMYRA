@@ -1,22 +1,25 @@
-name: Desktop syntax check
+name: TEAMYRA checks
 
 on:
   push:
-    paths:
-      - "apps/desktop/**"
-      - "package.json"
-      - ".github/workflows/desktop-check.yml"
   pull_request:
-    paths:
-      - "apps/desktop/**"
-      - "package.json"
 
 jobs:
-  syntax:
+  foundation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python
+        run: python -m compileall bridge
+      - name: Python unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm run desktop:check
+      - name: Desktop JavaScript syntax
+        run: npm run desktop:check
