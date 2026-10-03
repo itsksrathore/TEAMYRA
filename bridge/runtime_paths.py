@@ -64,3 +64,20 @@ def agy_launch(env=None, home=None):
         ])
     )
     return [binary] if binary else []
+
+
+def claude_launch(env=None, home=None):
+    env = env or os.environ
+    home = Path(home) if home else Path.home()
+    appdata = env.get("APPDATA")
+    binary = (
+        env.get("TEAMYRA_CLAUDE")
+        or shutil.which("claude")
+        or first_existing([
+            Path(appdata) / "npm" / "claude.cmd" if appdata else None,
+            home / "AppData" / "Roaming" / "npm" / "claude.cmd",
+            home / ".local" / "bin" / "claude.exe",
+            home / ".local" / "bin" / "claude",
+        ])
+    )
+    return [binary] if binary else []
