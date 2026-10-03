@@ -10,20 +10,21 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Establish this roadmap as the project source of truth.
 
 ## Phase 1 — Desktop Control Desk
-- [ ] Build the desktop shell and premium control-desk UI.
-- [ ] Add provider adapters for Claude Code, Codex, and Antigravity.
-- [ ] Auto-detect installed CLIs.
-- [ ] Detect existing local signed-in sessions without importing secrets.
-- [ ] Show providers, accounts, sessions, jobs, status, and logs.
-- [ ] Add account-management UI for providers that support isolated profiles.
-- [ ] Add embedded terminal panes.
+- [x] Build the desktop shell and premium control-desk UI.
+- [x] Add provider adapters for Claude Code, Codex, and Antigravity.
+- [x] Auto-detect installed CLIs.
+- [x] Detect existing local signed-in sessions without importing secrets.
+- [x] Show providers, accounts, jobs, status, and live task transcripts.
+- [x] Add account-management UI for providers with verified isolated profiles.
+- [x] Add embedded terminal panes and verify them on Windows.
 
 ## Phase 2 — Multi-account Engine
-- [ ] Replace fixed worker names with dynamic provider profiles.
-- [ ] Support multiple isolated Codex profiles.
-- [ ] Support multiple isolated Claude profiles after verification.
+- [x] Replace fixed Claude/Codex worker assumptions with dynamic provider profiles.
+- [x] Support multiple isolated Codex profiles.
+- [x] Support multiple isolated Claude profiles and expose them as bridge workers.
 - [ ] Verify and implement Antigravity profile isolation.
-- [ ] Add account-aware routing, cooldowns, and failover.
+- [x] Add initial account-aware routing and cooldown handling across discovered workers.
+- [ ] Add automatic reassignment/failover after worker failure.
 - [ ] Add per-profile model and effort settings.
 
 ## Phase 3 — Orchestration

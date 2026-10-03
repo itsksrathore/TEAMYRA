@@ -21,5 +21,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - name: Install desktop dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       - name: Desktop JavaScript syntax
         run: npm run desktop:check
+      - name: Build desktop renderer
+        run: npm --workspace @teamyra/desktop run build:renderer

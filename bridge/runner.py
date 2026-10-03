@@ -122,6 +122,7 @@ class Job:
 
         if t == "system" and ev.get("subtype") == "init":
             model = ev.get("model") or "unknown"
+            self.save_meta(model=model)
             self.emit("info", f"claude session {sid or '?'} model {model}")
             return
 
@@ -156,6 +157,12 @@ class Job:
                 self.emit("result", clip(text, 900))
             return
 
+        if t == "rate_limit_event":
+            info = ev.get("rate_limit_info") or {}
+            self.save_meta(rate_limit=info)
+            self.emit("info", f"claude rate limit {info.get('status', 'update')}")
+            return
+
         if t == "result":
             result = ev.get("result")
             if isinstance(result, str) and result.strip():
@@ -164,8 +171,10 @@ class Job:
             self.save_meta(
                 session_id=sid or self.meta.get("session_id"),
                 usage=ev.get("usage") or self.meta.get("usage"),
+                model_usage=ev.get("modelUsage") or self.meta.get("model_usage"),
                 total_cost_usd=ev.get("total_cost_usd"),
-                worker_status=ev.get("subtype"),
+                worker_status=ev.get("terminal_reason") or ev.get("subtype"),
+                result_subtype=ev.get("subtype"),
                 denied_actions=denied or self.meta.get("denied_actions"),
                 reported_error=bool(ev.get("is_error")),
             )
@@ -243,12 +252,10 @@ class Job:
         provider = self.spec.get("provider")
         if not provider:
             provider = "codex" if self.spec["worker"].startswith("codex") else "antigravity"
-        if provider == "codex":
-            handler = self.codex_event
-        elif provider == "claude":
-            handler = self.claude_event
-        else:
-            handler = self.agy_event
+        handlers = {"codex": self.codex_event, "claude": self.claude_event, "antigravity": self.agy_event}
+        handler = handlers.get(provider)
+        if handler is None:
+            raise RuntimeError(f"unsupported worker provider: {provider}")
         last_save = 0.0
         for line in proc.stdout:
             line = line.strip()

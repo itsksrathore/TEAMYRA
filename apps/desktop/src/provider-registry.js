@@ -31,13 +31,7 @@ const PROVIDERS = [
     name: 'Antigravity',
     bin: 'agy',
     nativeHome: path.join(HOME, '.gemini'),
-    status: {
-      kind: 'files',
-      files: [
-        path.join(HOME, '.gemini', 'oauth_creds.json'),
-        path.join(HOME, '.gemini', 'google_accounts.json')
-      ]
-    },
+    status: { kind: 'command', argv: ['models'], timeout: 30000, successLabel: 'Existing local login detected' },
     managed: { verified: false, env: null },
     color: 'violet'
   }
@@ -73,31 +67,39 @@ function whereBinary(bin) {
   return new Promise((resolve) => {
     const resolver = process.platform === 'win32' ? 'where.exe' : 'which';
     execFile(resolver, [bin], { timeout: 4000 }, (err, stdout) => {
-      const first = !err
-        ? String(stdout || '').split(/\r?\n/).map(s => s.trim()).find(Boolean)
-        : '';
-      resolve(first || findOnDisk(bin));
+      const found = !err
+        ? String(stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+        : [];
+      const preferred = process.platform === 'win32'
+        ? found.find(s => /\.(exe|cmd|bat)$/i.test(s)) || found[0]
+        : found[0];
+      resolve(preferred || findOnDisk(bin));
     });
   });
 }
 
-function commandStatus(binary, argv) {
+function commandStatus(binary, status) {
   return new Promise((resolve) => {
-    execFile(binary, argv, { timeout: 6000, windowsHide: true }, (err, stdout, stderr) => {
-      const raw = String(stdout || stderr || '').trim();
-      if (err) return resolve({ signedIn: false, label: raw || 'Sign-in needed' });
-      let label = 'Existing local login detected';
-      try {
-        const data = JSON.parse(raw || '{}');
-        label = data.email || data.account || data.authMethod || data.auth_method || label;
-      } catch {}
-      resolve({ signedIn: true, label });
-    });
+    const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(binary);
+    try {
+      execFile(binary, status.argv, { timeout: status.timeout || 10000, windowsHide: true, shell: useShell }, (err, stdout, stderr) => {
+        const raw = String(stdout || stderr || '').trim();
+        if (err) return resolve({ signedIn: false, label: raw || 'Sign-in needed' });
+        let label = status.successLabel || 'Existing local login detected';
+        try {
+          const data = JSON.parse(raw || '{}');
+          label = data.email || data.account || data.authMethod || data.auth_method || label;
+        } catch {}
+        resolve({ signedIn: true, label });
+      });
+    } catch (error) {
+      resolve({ signedIn: false, label: error.message || 'Sign-in needed' });
+    }
   });
 }
 
-async function nativeStatus(provider) {
-  if (provider.status.kind === 'command') return commandStatus(binary, provider.status.argv);
+async function nativeStatus(provider, binary) {
+  if (provider.status.kind === 'command') return commandStatus(binary, provider.status);
   const signedIn = provider.status.files.some(fileExists);
   return { signedIn, label: signedIn ? 'Existing local login detected' : 'Sign-in needed' };
 }
@@ -149,11 +151,10 @@ function managedProfiles(provider) {
 }
 
 async function detectProviders() {
-  const rows = [];
-  for (const provider of PROVIDERS) {
+  return Promise.all(PROVIDERS.map(async (provider) => {
     const binary = await whereBinary(provider.bin);
     const status = binary
-      ? await nativeStatus(provider)
+      ? await nativeStatus(provider, binary)
       : { signedIn: false, label: 'CLI not installed' };
 
     const profiles = [];
@@ -168,7 +169,7 @@ async function detectProviders() {
     }
     profiles.push(...managedProfiles(provider));
 
-    rows.push({
+    return {
       id: provider.id,
       name: provider.name,
       color: provider.color,
@@ -179,9 +180,8 @@ async function detectProviders() {
       managedProfilesVerified: provider.managed.verified,
       managedProfileEnv: provider.managed.env,
       profiles
-    });
-  }
-  return rows;
+    };
+  }));
 }
 
 function providerById(id) {

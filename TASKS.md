@@ -21,16 +21,17 @@ This checklist is updated as implementation lands.
 - [ ] Antigravity Add Account flow after profile-isolation verification.
 - [x] Live jobs list/status.
 - [x] Live job transcript streaming.
-- [ ] Embedded terminals — PTY/xterm implementation committed; Windows runtime verification pending.
-- [x] Desktop JavaScript syntax CI workflow.
+- [x] Embedded terminals — Windows verified: PTY spawn/input/output/resize/exit + xterm UI + IPC.
+- [x] Foundation CI: Python compile/tests + npm clean install + desktop syntax + renderer build.
 
 ## Phase 2 — Multi-account Engine
-- [ ] Dynamic provider profiles.
-- [ ] N Codex profiles.
-- [x] Verified Claude profile isolation (official CLAUDE_CONFIG_DIR support).
+- [x] Dynamic Claude/Codex provider profile discovery in desktop and worker bridge.
+- [x] N Codex profiles plus legacy Codex 2 compatibility.
+- [x] Verified Claude profile isolation with CLAUDE_CONFIG_DIR on Windows.
+- [x] Claude profiles available as independent bridge workers.
 - [ ] Verified Antigravity profile isolation.
-- [ ] Account-aware router.
-- [ ] Per-account model/effort.
+- [x] Initial account-aware routing/cooldowns across discovered workers.
+- [ ] Per-account model/effort UI and persisted settings.
 
 ## Phase 3 — Orchestration
 - [ ] Conductor.
