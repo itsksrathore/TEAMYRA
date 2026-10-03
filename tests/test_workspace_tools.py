@@ -68,6 +68,29 @@ class WorkspaceToolTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 service.configure(filesystem_root, token="x" * 64)
 
+    def test_large_reads_are_paged(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            (workspace / "large.txt").write_text("A" * 300000, encoding="utf-8")
+            service = self.make_service(root, workspace)
+            first = service.execute(
+                "filesystem.read",
+                {"path": "large.txt", "max_bytes": 100000},
+                token="x" * 64,
+            )
+            self.assertTrue(first["clipped"])
+            self.assertEqual(first["offset"], 0)
+            self.assertEqual(first["next_offset"], 100000)
+            second = service.execute(
+                "filesystem.read",
+                {"path": "large.txt", "offset": first["next_offset"], "max_bytes": 100000},
+                token="x" * 64,
+            )
+            self.assertEqual(second["offset"], 100000)
+            self.assertEqual(len(second["content"]), 100000)
+
     def test_path_traversal_and_outside_access_are_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
