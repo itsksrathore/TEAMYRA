@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { detectProviders, providerById, profileRoot } = require('./provider-registry');
+const { detectProviders, providerById, profileRoot, PROFILES_ROOT } = require('./provider-registry');
 
 let pty = null;
 try { pty = require('@lydell/node-pty'); } catch {}
@@ -105,16 +105,45 @@ ipcMain.handle('teamyra:terminal-open', (event, options = {}) => {
   const cwd = requested && path.isAbsolute(requested) && fs.existsSync(requested) ? requested : ROOT;
   const shell = terminalShell();
   const id = crypto.randomBytes(8).toString('hex');
+  const env = { ...process.env };
+  let launchCommand = '';
+
+  if (typeof options.providerId === 'string' && options.providerId) {
+    const provider = providerById(options.providerId);
+    if (!provider) return { ok: false, reason: 'unknown-provider' };
+    launchCommand = provider.bin;
+
+    const profileId = typeof options.profileId === 'string' ? options.profileId : 'native';
+    if (profileId !== 'native') {
+      let home = '';
+      if (provider.id === 'codex' && profileId === 'codex2') {
+        const legacy = path.join(PROFILES_ROOT, 'codex2');
+        if (fs.existsSync(legacy)) home = legacy;
+      }
+      if (!home && /^[A-Za-z0-9._-]+$/.test(profileId)) {
+        const candidate = path.join(profileRoot(provider.id), profileId);
+        if (fs.existsSync(candidate)) home = candidate;
+      }
+      if (!home || !provider.managed?.env) return { ok: false, reason: 'profile-not-available' };
+      env[provider.managed.env] = home;
+    }
+  }
+
   const proc = pty.spawn(shell, terminalArgs(shell), {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
     cwd,
-    env: { ...process.env }
+    env
   });
 
   const owner = event.sender.id;
   TERMINALS.set(id, { proc, owner, cwd });
+  if (launchCommand) {
+    setTimeout(() => {
+      try { proc.write(launchCommand + (process.platform === 'win32' ? '\r' : '\n')); } catch {}
+    }, 80);
+  }
   proc.onData(data => {
     if (!event.sender.isDestroyed()) event.sender.send('teamyra:terminal-data', { id, data });
   });
@@ -122,7 +151,7 @@ ipcMain.handle('teamyra:terminal-open', (event, options = {}) => {
     TERMINALS.delete(id);
     if (!event.sender.isDestroyed()) event.sender.send('teamyra:terminal-exit', { id, exitCode });
   });
-  return { ok: true, id, cwd, shell };
+  return { ok: true, id, cwd, shell, providerId: options.providerId || null, profileId: options.profileId || null };
 });
 
 ipcMain.on('teamyra:terminal-input', (event, payload = {}) => {
