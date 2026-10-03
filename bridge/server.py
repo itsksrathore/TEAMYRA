@@ -10,6 +10,7 @@ from pathlib import Path
 from worker_registry import build_worker_registry
 from runtime_paths import codex_launch, agy_launch, claude_launch
 import task_graph
+import test_policy
 import review_cycle
 import worktree_manager
 
@@ -719,6 +720,15 @@ TOOLS = [
     {"name": "review_cancel", "description": "Request cancellation of an active review/fix loop.",
      "inputSchema": {"type": "object", "properties": {"review_id": {"type": "string"}},
                      "required": ["review_id"], "additionalProperties": False}},
+    {"name": "test_run", "description": "Run deterministic no-shell test steps in a project directory. Commands are argv arrays, run sequentially, and stop on first failure or timeout.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"},
+         "tests": {"type": "array", "minItems": 1, "maxItems": 12, "items": {"type": "object", "properties": {
+             "name": {"type": "string"},
+             "argv": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}},
+             "timeout_seconds": {"type": "integer", "default": 300, "minimum": 1, "maximum": 1800}},
+             "required": ["argv"], "additionalProperties": False}}},
+         "required": ["project_path", "tests"], "additionalProperties": False}},
     {"name": "graph_create", "description": "Create a persistent dependency task graph. Set max_parallel > 1 to run independent nodes concurrently; write nodes are isolated in managed Git worktrees and integrated deterministically.",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string"},
@@ -730,6 +740,11 @@ TOOLS = [
              "worker": W_ENUM, "depends_on": {"type": "array", "items": {"type": "string"}},
              "write": {"type": "boolean", "default": True},
              "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
+             "tests": {"type": "array", "maxItems": 12, "items": {"type": "object", "properties": {
+                 "name": {"type": "string"},
+                 "argv": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}},
+                 "timeout_seconds": {"type": "integer", "default": 300, "minimum": 1, "maximum": 1800}},
+                 "required": ["argv"], "additionalProperties": False}},
              "requires_approval": {"type": "boolean", "default": False},
              "approval_reason": {"type": "string"}},
              "required": ["id", "task"], "additionalProperties": False}}},
@@ -856,6 +871,11 @@ def tool_call(name, a):
         state["cancel_requested"] = True
         review_cycle.save(ROOT, state)
         return review_cycle.summary(state)
+    if name == "test_run":
+        project_path = Path(a["project_path"]).resolve()
+        if not project_path.exists():
+            raise ValueError(f"project_path not found: {project_path}")
+        return test_policy.run_steps(a["tests"], project_path)
     if name == "graph_create":
         project_path = Path(a["project_path"]).resolve()
         if not project_path.exists():
