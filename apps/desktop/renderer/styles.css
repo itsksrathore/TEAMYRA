@@ -108,6 +108,10 @@ button:focus-visible, textarea:focus-visible, select:focus-visible {
     0 30px 90px rgb(var(--shadow) / .18);
 }
 
+.lights-deck { display: none; flex: none; -webkit-app-region: drag; }
+body[data-platform="win32"] .lights-deck { display: block; height: 28px; }
+body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
+
 .topbar {
   height: 64px;
   flex: none;
