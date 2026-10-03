@@ -33,7 +33,8 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Add graph node → child job lineage plus failover lineage.
 - [x] Add bounded automatic retry/reassignment for eligible provider/worker failures.
 - [x] Add bounded automated reviewer/fixer loops with provider-session continuation.
-- [ ] Add dedicated tester loops and richer structured worker messaging.
+- [x] Add structured cross-agent handoff for review, continuation and testing tasks.
+- [ ] Add dedicated deterministic tester loops / test-policy stages.
 - [x] Add approval gates for sensitive graph nodes with explicit approve/deny decisions.
 - [ ] Enable safe parallel graph execution after Phase 4 worktree merge/rebase semantics are available.
 
