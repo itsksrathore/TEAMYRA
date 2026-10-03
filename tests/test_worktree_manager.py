@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import sys
 
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
 
 import worktree_manager
+import server
 
 
 def git(cwd, *args):
@@ -116,6 +118,55 @@ class WorktreeManagerTests(unittest.TestCase):
 
             (repo / "local.txt").unlink()
             worktree_manager.discard(storage, created["id"], force=True)
+
+
+    def test_worktree_mcp_tools_are_registered_once(self):
+        names = [tool["name"] for tool in server.TOOLS]
+        for name in (
+            "worktree_create",
+            "worktree_list",
+            "worktree_status",
+            "worktree_diff",
+            "worktree_merge",
+            "worktree_discard",
+        ):
+            self.assertEqual(names.count(name), 1, name)
+
+    def test_merge_requires_explicit_confirmation(self):
+        with patch.object(server.worktree_manager, "merge") as merge:
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.tool_call("worktree_merge", {
+                    "worktree_id": "wt-test",
+                    "confirm": False,
+                })
+            merge.assert_not_called()
+
+    def test_discard_requires_explicit_confirmation(self):
+        with patch.object(server.worktree_manager, "discard") as discard:
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.tool_call("worktree_discard", {
+                    "worktree_id": "wt-test",
+                    "confirm": False,
+                })
+            discard.assert_not_called()
+
+    def test_confirmed_merge_and_discard_delegate_to_manager(self):
+        with patch.object(server.worktree_manager, "merge", return_value={"ok": True}) as merge:
+            result = server.tool_call("worktree_merge", {
+                "worktree_id": "wt-test",
+                "confirm": True,
+            })
+            self.assertTrue(result["ok"])
+            merge.assert_called_once_with(server.WORKTREES, "wt-test")
+
+        with patch.object(server.worktree_manager, "discard", return_value={"ok": True}) as discard:
+            result = server.tool_call("worktree_discard", {
+                "worktree_id": "wt-test",
+                "confirm": True,
+                "force": True,
+            })
+            self.assertTrue(result["ok"])
+            discard.assert_called_once_with(server.WORKTREES, "wt-test", True)
 
 
 if __name__ == "__main__":
