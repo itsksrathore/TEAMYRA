@@ -36,10 +36,12 @@ class WorkspaceToolTests(unittest.TestCase):
             read = service.execute("filesystem.read", {"path": "a.txt"}, token=token)
             self.assertEqual(read["content"], "hello\n")
 
-            service.execute("filesystem.patch", {
+            patched = service.execute("filesystem.patch", {
                 "path": "a.txt",
                 "replacements": [{"find": "hello", "replace": "world", "expected": 1}],
             }, token=token)
+            self.assertTrue(patched["backup"])
+            self.assertTrue(Path(patched["backup"]).is_file())
             found = service.execute("filesystem.search", {"query": "world"}, token=token)
             self.assertEqual(found["results"][0]["path"], "a.txt")
 
@@ -52,6 +54,19 @@ class WorkspaceToolTests(unittest.TestCase):
                 service.execute("filesystem.delete", {"path": "nested/c.txt"}, token=token)
             service.execute("filesystem.delete", {"path": "nested/c.txt"}, token=token, confirm=True)
             self.assertFalse((workspace / "nested" / "c.txt").exists())
+
+
+    def test_workspace_root_and_home_are_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            service = WorkspaceToolService(root)
+            service.state_root.mkdir(parents=True, exist_ok=True)
+            service.token_file.write_text("x" * 64, encoding="utf-8")
+            with self.assertRaises(PermissionError):
+                service.configure(Path.home(), token="x" * 64)
+            filesystem_root = Path(Path(td).anchor)
+            with self.assertRaises(PermissionError):
+                service.configure(filesystem_root, token="x" * 64)
 
     def test_path_traversal_and_outside_access_are_blocked(self):
         with tempfile.TemporaryDirectory() as td:
