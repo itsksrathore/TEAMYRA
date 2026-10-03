@@ -671,11 +671,17 @@ $('#chatgptReload').addEventListener('click', () => window.teamyra.reloadChatgpt
 $('#chatgptStop').addEventListener('click', () => window.teamyra.stopChatgpt().catch(() => {}));
 
 window.teamyra.onUpdateState(updateUpdateNote);
-window.teamyra.updateStatus().then(updateUpdateNote).catch(() => {});
 
-await Promise.allSettled([refreshJobs(), refreshAgents()]);
-await window.teamyra.setChatgptVisible(false).catch(() => {});
-setInterval(() => refreshJobs().catch(() => {}), 2800);
-setInterval(() => {
-  if (activeView === 'agents' && !$('#chatgptDetail').hidden) refreshChatgptStatus().catch(() => {});
-}, 5000);
+async function boot() {
+  window.teamyra.updateStatus().then(updateUpdateNote).catch(() => {});
+  await Promise.allSettled([refreshJobs(), refreshAgents()]);
+  await window.teamyra.setChatgptVisible(false).catch(() => {});
+  setInterval(() => refreshJobs().catch(() => {}), 2800);
+  setInterval(() => {
+    if (activeView === 'agents' && !$('#chatgptDetail').hidden) refreshChatgptStatus().catch(() => {});
+  }, 5000);
+}
+
+boot().catch(error => {
+  console.error('TEAMYRA renderer boot failed', error);
+});
