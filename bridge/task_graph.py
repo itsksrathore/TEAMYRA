@@ -146,17 +146,23 @@ def ready_nodes(graph):
 
 def mark_blocked_nodes(graph):
     nodes = node_map(graph)
-    changed = False
-    for node in graph.get("nodes", []):
-        if node.get("status") != "pending":
-            continue
-        deps = [nodes[dep] for dep in node.get("depends_on", [])]
-        if any(dep.get("status") in {"failed", "cancelled", "blocked"} for dep in deps):
-            node["status"] = "blocked"
-            node["ended_at"] = time.time()
-            node["error"] = "dependency failed or was cancelled"
-            changed = True
-    return changed
+    changed_any = False
+    while True:
+        changed = False
+        for node in graph.get("nodes", []):
+            if node.get("status") != "pending":
+                continue
+            deps = [nodes[dep] for dep in node.get("depends_on", [])]
+            failed = [dep for dep in deps if dep.get("status") in {"failed", "cancelled", "blocked"}]
+            if failed:
+                node["status"] = "blocked"
+                node["ended_at"] = time.time()
+                node["error"] = "blocked by dependency: " + ", ".join(dep["id"] for dep in failed)
+                changed = True
+                changed_any = True
+        if not changed:
+            break
+    return changed_any
 
 
 def graph_summary(graph):
