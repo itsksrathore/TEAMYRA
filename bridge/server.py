@@ -11,6 +11,7 @@ from worker_registry import build_worker_registry
 from runtime_paths import codex_launch, agy_launch, claude_launch
 import task_graph
 import review_cycle
+import worktree_manager
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -738,6 +739,30 @@ TOOLS = [
          "decision": {"type": "string", "enum": ["approve", "deny"]},
          "note": {"type": "string"}},
          "required": ["graph_id", "node_id", "decision"], "additionalProperties": False}},
+    {"name": "worktree_create", "description": "Create an isolated TEAMYRA Git worktree/branch from a repository ref.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"}, "label": {"type": "string"},
+         "base_ref": {"type": "string", "default": "HEAD"}},
+         "required": ["project_path"], "additionalProperties": False}},
+    {"name": "worktree_list", "description": "List TEAMYRA-managed worktrees with branch, dirty state, commits and diffstat.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "worktree_status", "description": "Read one TEAMYRA-managed worktree status.",
+     "inputSchema": {"type": "object", "properties": {"worktree_id": {"type": "string"}},
+                     "required": ["worktree_id"], "additionalProperties": False}},
+    {"name": "worktree_diff", "description": "Read a bounded unified diff for one TEAMYRA-managed worktree against its base commit.",
+     "inputSchema": {"type": "object", "properties": {
+         "worktree_id": {"type": "string"},
+         "max_chars": {"type": "integer", "default": 50000, "minimum": 1000, "maximum": 200000}},
+         "required": ["worktree_id"], "additionalProperties": False}},
+    {"name": "worktree_merge", "description": "Merge a clean TEAMYRA worktree branch into its original target branch. Requires confirm=true and refuses dirty targets/worktrees.",
+     "inputSchema": {"type": "object", "properties": {
+         "worktree_id": {"type": "string"}, "confirm": {"type": "boolean", "default": False}},
+         "required": ["worktree_id", "confirm"], "additionalProperties": False}},
+    {"name": "worktree_discard", "description": "Remove a TEAMYRA worktree and branch. Requires confirm=true. Unmerged/dirty work requires force=true.",
+     "inputSchema": {"type": "object", "properties": {
+         "worktree_id": {"type": "string"}, "confirm": {"type": "boolean", "default": False},
+         "force": {"type": "boolean", "default": False}},
+         "required": ["worktree_id", "confirm"], "additionalProperties": False}},
     {"name": "start_task", "description": (
         "Start a worker job and return at once with its job_id (non-blocking). The worker runs in its own "
         "process with a live transcript. Follow it with job_wait, job_status/job_events, or run the returned "
@@ -843,6 +868,24 @@ def tool_call(name, a):
             task_graph.terminalize_graph(graph)
         task_graph.save_graph(ROOT, graph)
         return task_graph.graph_summary(graph)
+    if name == "worktree_create":
+        return worktree_manager.create(
+            a["project_path"], WORKTREES, a.get("label") or "task", a.get("base_ref", "HEAD")
+        )
+    if name == "worktree_list":
+        return worktree_manager.list_managed(WORKTREES)
+    if name == "worktree_status":
+        return worktree_manager.status(WORKTREES, a["worktree_id"])
+    if name == "worktree_diff":
+        return worktree_manager.diff(WORKTREES, a["worktree_id"], a.get("max_chars", 50000))
+    if name == "worktree_merge":
+        if a.get("confirm") is not True:
+            raise ValueError("worktree_merge requires confirm=true")
+        return worktree_manager.merge(WORKTREES, a["worktree_id"])
+    if name == "worktree_discard":
+        if a.get("confirm") is not True:
+            raise ValueError("worktree_discard requires confirm=true")
+        return worktree_manager.discard(WORKTREES, a["worktree_id"], a.get("force", False))
     if name == "start_task":
         requested_worker = a.get("worker", "auto")
         auto_failover = a.get("auto_failover", requested_worker == "auto")
