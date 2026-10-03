@@ -96,3 +96,15 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Port the Nami Glass visual language: aurora desk, frosted panes, coral accent, capsule controls, status pills, and floating task/agent cards.
 - [x] Add UI architecture guardrails and Apache-2.0 attribution for the adapted Nami visual system.
 - [x] Verify Python/unit contracts, desktop JavaScript checks, runtime dependency audit, and renderer build on GitHub CI.
+
+
+## Phase 9 — Desktop UI Simplification
+- [x] Replace the multi-menu dashboard with exactly two permanent primary views: Tasks and Agents.
+- [x] Rebuild the desktop visual system around the Nami-inspired Glass workbench language with proper Apache-2.0 attribution.
+- [x] Render running/recent jobs as live agent work tiles with transcript tails and stop controls.
+- [x] Wire the minimal New Task composer to the existing TEAMYRA job/orchestration backend.
+- [x] Collapse provider/account management into a clean Agents shelf.
+- [x] Keep ChatGPT Normal inside Agents as an embedded detail surface rather than a separate primary menu.
+- [x] Keep Worktrees, Observability, Memory, conflict tools, and other advanced capabilities available in backend/IPC while removing permanent frontend clutter.
+- [x] Add regression contracts that enforce the two-view information architecture and preserve backend capabilities.
+- [ ] Live Windows visual acceptance of the rebuilt desktop, including resize behavior, agent login flows, live task tiles, and embedded ChatGPT placement.
