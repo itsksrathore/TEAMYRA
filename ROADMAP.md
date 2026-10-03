@@ -39,10 +39,11 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [ ] Enable safe parallel graph execution after Phase 4 worktree merge/rebase semantics are available.
 
 ## Phase 4 — Git Workspace System
-- [ ] First-class Git worktree manager.
-- [ ] One task to one isolated branch/worktree mode.
-- [ ] Visual diff and change review.
-- [ ] Merge, rebase, discard, conflict handling, and cleanup.
+- [x] First-class managed Git worktree lifecycle backend.
+- [x] Parallel task isolation tracked with stable worktree IDs.
+- [x] Safe diff/status plus guarded merge/discard/cleanup backend.
+- [ ] Desktop visual diff and worktree review experience.
+- [ ] Rebase/update-branch workflow and interactive conflict handling.
 
 ## Phase 5 — MCP, CLI, and Plugins
 - [ ] Evolve the existing MCP bridge into TEAMYRA MCP.
