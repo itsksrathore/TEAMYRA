@@ -32,6 +32,46 @@ def _bridge_token(payload):
 def handle(action, payload):
     payload = payload if isinstance(payload, dict) else {}
 
+    if action == "task.start":
+        import server
+        task = str(payload.get("task") or "").strip()
+        project_path = str(payload.get("project_path") or "").strip()
+        worker = str(payload.get("worker") or "auto").strip() or "auto"
+        if not task:
+            raise ValueError("task is required")
+        if len(task) > 24000:
+            raise ValueError("task is too long")
+        if not project_path:
+            raise ValueError("project_path is required")
+        timeout_minutes = max(1, min(int(payload.get("timeout_minutes", 180)), 720))
+        write = payload.get("write") is not False
+        auto_failover = payload.get("auto_failover", worker == "auto") is True
+        label = str(payload.get("label") or task.splitlines()[0])[:80]
+        job_id, selected_worker = server.start_job(
+            worker,
+            task,
+            project_path,
+            label=label,
+            timeout_minutes=timeout_minutes,
+            write=write,
+            auto_failover=auto_failover,
+        )
+        return {"job_id": job_id, "worker": selected_worker}
+
+    if action == "task.cancel":
+        import server
+        job_id = str(payload.get("job_id") or "").strip()
+        if not job_id:
+            raise ValueError("job_id is required")
+        terminal_id = server.failover_terminal_job_id(job_id)
+        server.read_meta(terminal_id)
+        (server.JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "cancelled_job_id": terminal_id,
+        }
+
     if action == "observability.timeline":
         return observability.timeline(
             ROOT,
