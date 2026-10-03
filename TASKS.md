@@ -46,10 +46,14 @@ This checklist is updated as implementation lands.
 - [ ] Parallel graph execution after Phase 4 worktree merge/rebase semantics are implemented.
 
 ## Phase 4 — Git Workspace
-- [ ] Worktree manager.
-- [ ] Visual diff.
-- [ ] Merge/discard/rebase.
-- [ ] Conflict handling.
+- [x] First-class managed worktree lifecycle backend.
+- [x] Managed worktree status, commits, diffstat, conflict detection and bounded unified diff.
+- [x] Safe merge/discard backend with explicit confirmation and dirty/unmerged protection.
+- [x] Parallel worker jobs use managed worktree IDs and persist worktree metadata.
+- [ ] Desktop Worktrees screen and visual diff viewer — implementation in progress; Windows runtime verification pending.
+- [ ] Desktop merge/discard controls runtime verification.
+- [ ] Interactive conflict-resolution UI.
+- [ ] Rebase/update-branch workflow.
 
 ## Phase 5 — MCP / CLI / Plugins
 - [ ] TEAMYRA MCP namespace.
