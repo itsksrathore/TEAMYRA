@@ -240,12 +240,33 @@ function killTerminalsFor(owner) {
   }
 }
 
+function windowChrome() {
+  if (process.platform === 'win32') {
+    return {
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#00000000',
+        symbolColor: '#2f2b26',
+        height: 28
+      }
+    };
+  }
+  if (process.platform === 'darwin') {
+    return {
+      titleBarStyle: 'hiddenInset',
+      trafficLightPosition: { x: 16, y: 11 }
+    };
+  }
+  return {};
+}
+
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1480,
-    height: 920,
-    minWidth: 1060,
-    minHeight: 680,
+    width: 1360,
+    height: 900,
+    minWidth: 560,
+    minHeight: 480,
+    ...windowChrome(),
     backgroundColor: '#e9e9ef',
     title: 'TEAMYRA',
     webPreferences: {
