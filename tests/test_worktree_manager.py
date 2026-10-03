@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "bridge"))
 
 import worktree_manager
 import server
+import desktop_api
 
 
 def git(cwd, *args):
@@ -194,6 +195,38 @@ class WorktreeManagerTests(unittest.TestCase):
                 worktree_id="wt-test-managed",
                 worktree_branch="teamyra/test/branch",
             )
+
+
+    def test_desktop_api_requires_confirmation_for_destructive_actions(self):
+        with patch.object(desktop_api.worktree_manager, "merge") as merge:
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                desktop_api.handle("worktree.merge", {
+                    "worktree_id": "wt-test",
+                    "confirm": False,
+                })
+            merge.assert_not_called()
+
+        with patch.object(desktop_api.worktree_manager, "discard") as discard:
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                desktop_api.handle("worktree.discard", {
+                    "worktree_id": "wt-test",
+                    "confirm": False,
+                })
+            discard.assert_not_called()
+
+    def test_desktop_api_delegates_read_actions_to_core_manager(self):
+        with patch.object(desktop_api.worktree_manager, "list_managed", return_value=[{"id": "wt-1"}]) as listing:
+            result = desktop_api.handle("worktree.list", {})
+            self.assertEqual(result, [{"id": "wt-1"}])
+            listing.assert_called_once_with(desktop_api.WORKTREES)
+
+        with patch.object(desktop_api.worktree_manager, "diff", return_value={"diff": "x"}) as diff:
+            result = desktop_api.handle("worktree.diff", {
+                "worktree_id": "wt-1",
+                "max_chars": 12345,
+            })
+            self.assertEqual(result["diff"], "x")
+            diff.assert_called_once_with(desktop_api.WORKTREES, "wt-1", 12345)
 
 
 if __name__ == "__main__":
