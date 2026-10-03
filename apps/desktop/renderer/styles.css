@@ -19,3 +19,11 @@ main{grid-column:2;width:100%;max-width:1600px;padding:34px 42px 60px}header{dis
 .detail-meta{padding:10px 16px;color:var(--muted);font:10px ui-monospace,Consolas,monospace;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .transcript{margin:0;padding:15px 16px;max-height:520px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#cbd3df;font:11px/1.55 ui-monospace,Consolas,monospace}
 @media(max-width:1250px){.execution-grid{grid-template-columns:1fr}.detail-panel{position:static}}
+
+.terminal-panel{margin-top:13px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#090c12;box-shadow:0 20px 60px #0005}
+.terminal-panel[hidden]{display:none}
+.terminal-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line);background:#0f131b;color:var(--muted);font:10px ui-monospace,Consolas,monospace}
+.terminal-close{border:1px solid var(--line);border-radius:7px;background:#151a24;color:var(--text);font:10px inherit;padding:6px 9px;cursor:pointer}
+.terminal-host{height:360px;padding:10px 8px}
+.terminal-host .xterm{height:100%}
+.terminal-host .xterm-viewport{border-radius:8px}
