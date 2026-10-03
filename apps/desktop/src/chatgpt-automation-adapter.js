@@ -47,8 +47,18 @@ class ChatGPTAutomationAdapter {
         if (setter) setter.call(prompt, value); else prompt.value = value;
         prompt.dispatchEvent(new Event('input', { bubbles:true }));
       } else {
-        prompt.textContent = value;
-        prompt.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'insertText', data:value }));
+        prompt.focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(prompt);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        let inserted = false;
+        try { inserted = document.execCommand('insertText', false, value); } catch {}
+        if (!inserted) {
+          prompt.textContent = value;
+          prompt.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'insertText', data:value }));
+        }
       }
       const send = document.querySelector('button[data-testid="send-button"], button[aria-label*="Send"], button[aria-label*="send"]');
       if (!send || send.disabled) return { ok:false, reason:'send-button-unavailable' };
@@ -70,8 +80,7 @@ class ChatGPTAutomationAdapter {
 
   async assistantSnapshot() {
     return this.evaluate(`(() => {
-      const assistantNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-      const nodes = assistantNodes.length ? assistantNodes : [...document.querySelectorAll('article')];
+      const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
       const messages = nodes.map(node => (node.innerText || '').trim()).filter(Boolean);
       const stop = !!document.querySelector('button[data-testid*="stop"], button[aria-label*="Stop"], button[aria-label*="stop"]');
       return { count:messages.length, text:messages[messages.length - 1] || '', generating:stop };
