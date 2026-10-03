@@ -437,6 +437,13 @@ ipcMain.handle('teamyra:chatgpt-changes', () => {
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
   return chatgptProvider.workspaceBridge.changes();
 });
+ipcMain.handle('teamyra:chatgpt-revert', (_event, paths = ['.'], confirm = false) => {
+  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
+  if (confirm !== true) throw new Error('Revert requires explicit confirmation');
+  return chatgptProvider.workspaceBridge.execute('git.restore', {
+    paths: Array.isArray(paths) ? paths : ['.']
+  }, true);
+});
 ipcMain.handle('teamyra:chatgpt-attach-file', (_event, filePath) => {
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
   return chatgptProvider.attachFile(String(filePath || ''));
