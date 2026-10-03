@@ -4,5 +4,5 @@ contextBridge.exposeInMainWorld('teamyra', {
   providers: () => ipcRenderer.invoke('teamyra:providers'),
   jobs: () => ipcRenderer.invoke('teamyra:jobs'),
   transcript: (jobId, offset = 0) => ipcRenderer.invoke('teamyra:transcript', jobId, offset),
-  addAccount: (providerId) => ipcRenderer.invoke('teamyra:add-account', providerId)
+  addAccount: (providerId, name) => ipcRenderer.invoke('teamyra:add-account', providerId, name)
 });
