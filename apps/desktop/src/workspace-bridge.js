@@ -24,25 +24,36 @@ class WorkspaceBridge {
     return token;
   }
 
+  coreOptions(extra = {}) {
+    return {
+      ...extra,
+      env: {
+        ...(extra.env || {}),
+        TEAMYRA_LOCAL_AGENT_TOKEN: this.token
+      }
+    };
+  }
+
   configure(workspace, permissions = {}) {
     return callCore('chatgpt.workspace.configure', {
-      bridge_token: this.token,
       workspace: String(workspace || ''),
       permissions
-    });
+    }, this.coreOptions());
   }
 
   status() {
-    return callCore('chatgpt.workspace.status', { bridge_token: this.token });
+    return callCore('chatgpt.workspace.status', {}, this.coreOptions());
   }
 
   execute(tool, args = {}, confirm = false) {
     return callCore('chatgpt.tool.execute', {
-      bridge_token: this.token,
       tool: String(tool || ''),
       args: args || {},
       confirm: confirm === true
-    }, { timeout: tool === 'terminal.run' ? 135000 : 45000, maxBuffer: 12 * 1024 * 1024 });
+    }, this.coreOptions({
+      timeout: tool === 'terminal.run' ? 135000 : 45000,
+      maxBuffer: 12 * 1024 * 1024
+    }));
   }
 
   async changes() {
