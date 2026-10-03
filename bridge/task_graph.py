@@ -181,6 +181,10 @@ def graph_summary(graph):
                 "timeout_minutes": node.get("timeout_minutes", 90),
                 "status": node.get("status"),
                 "job_id": node.get("job_id"),
+                "requires_approval": node.get("requires_approval", False),
+                "approval_status": node.get("approval_status", "not_required"),
+                "approval_reason": node.get("approval_reason"),
+                "approval_note": node.get("approval_note"),
                 "error": node.get("error"),
             }
             for node in graph.get("nodes", [])
