@@ -72,7 +72,7 @@ This checklist is updated as implementation lands.
 - [ ] Context-window visibility when providers expose reliable context telemetry.
 - [x] Searchable logs — bounded job events/transcripts/stderr/runner/task search via MCP/CLI/Desktop.
 - [x] Project memory — local per-project structured decisions/facts/notes/handoffs/TODOs with MCP/CLI/Desktop CRUD, ranked search, archive lifecycle, and bounded agent context packs; Windows runtime verified.
-- [ ] MCP pooling.
+- [x] MCP pooling - shared lazy external stdio MCP processes behind the long-lived TEAMYRA HTTP gateway, with runtime-only config, reuse/restart, redacted status, MCP tools, CLI admin surface, and Windows HTTP runtime verification.
 - [ ] Crash recovery.
 
 ## Phase 7 — Distribution

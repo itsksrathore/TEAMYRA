@@ -16,6 +16,7 @@ import worktree_manager
 import observability
 import project_memory
 import handoff_store
+import mcp_pool
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -850,6 +851,36 @@ TOOLS = [
          "max_chars": {"type": "integer", "default": 8000, "minimum": 1000, "maximum": 24000},
          "limit": {"type": "integer", "default": 40, "minimum": 1, "maximum": 100}},
          "required": ["project_path"], "additionalProperties": False}},
+    {"name": "mcp_pool_list", "description": "List configured shared external MCP servers and live pooled-process status. Runtime config lives under ignored profiles/.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "mcp_pool_tools", "description": "Start/reuse one pooled MCP server and list its tools.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string"}, "refresh": {"type": "boolean", "default": False}},
+         "required": ["server"], "additionalProperties": False}},
+    {"name": "mcp_pool_call", "description": "Call one tool on a configured pooled external MCP server. The long-lived process is reused across TEAMYRA clients.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string"}, "tool_name": {"type": "string"},
+         "arguments": {"type": "object"},
+         "timeout_seconds": {"type": "integer", "default": 30, "minimum": 1, "maximum": 300}},
+         "required": ["server", "tool_name"], "additionalProperties": False}},
+    {"name": "mcp_pool_register", "description": "Register or update a runtime-only external stdio MCP server. Requires confirm=true. command is an argv array and is never run through a shell.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string"},
+         "command": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}},
+         "cwd": {"type": "string"},
+         "env": {"type": "object", "additionalProperties": {"type": "string"}},
+         "enabled": {"type": "boolean", "default": True},
+         "timeout_seconds": {"type": "integer", "default": 30, "minimum": 2, "maximum": 300},
+         "confirm": {"type": "boolean"}},
+         "required": ["server", "command", "confirm"], "additionalProperties": False}},
+    {"name": "mcp_pool_restart", "description": "Restart one pooled MCP subprocess and reinitialize/tool-discover it. Requires confirm=true.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string"}, "confirm": {"type": "boolean"}},
+         "required": ["server", "confirm"], "additionalProperties": False}},
+    {"name": "mcp_pool_remove", "description": "Stop and remove one runtime pooled MCP server configuration. Requires confirm=true.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string"}, "confirm": {"type": "boolean"}},
+         "required": ["server", "confirm"], "additionalProperties": False}},
     {"name": "test_run", "description": "Run deterministic no-shell test steps in a project directory. Commands are argv arrays, run sequentially, and stop on first failure or timeout.",
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"},
@@ -1078,6 +1109,38 @@ def tool_call(name, a):
         state["cancel_requested"] = True
         review_cycle.save(ROOT, state)
         return review_cycle.summary(state)
+    if name == "mcp_pool_list":
+        return mcp_pool.list_servers(ROOT)
+    if name == "mcp_pool_tools":
+        return mcp_pool.list_tools(ROOT, a["server"], a.get("refresh", False))
+    if name == "mcp_pool_call":
+        return mcp_pool.call_tool(
+            ROOT,
+            a["server"],
+            a["tool_name"],
+            a.get("arguments") or {},
+            a.get("timeout_seconds", 30),
+        )
+    if name == "mcp_pool_register":
+        if a.get("confirm") is not True:
+            raise ValueError("mcp_pool_register requires confirm=true")
+        return mcp_pool.register(
+            ROOT,
+            a["server"],
+            a["command"],
+            a.get("cwd"),
+            a.get("env") or {},
+            a.get("enabled", True),
+            a.get("timeout_seconds", 30),
+        )
+    if name == "mcp_pool_restart":
+        if a.get("confirm") is not True:
+            raise ValueError("mcp_pool_restart requires confirm=true")
+        return mcp_pool.restart(ROOT, a["server"])
+    if name == "mcp_pool_remove":
+        if a.get("confirm") is not True:
+            raise ValueError("mcp_pool_remove requires confirm=true")
+        return mcp_pool.remove(ROOT, a["server"])
     if name == "test_run":
         project_path = Path(a["project_path"]).resolve()
         if not project_path.exists():

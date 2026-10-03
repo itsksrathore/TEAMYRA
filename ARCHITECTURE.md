@@ -67,6 +67,8 @@ Target tool families:
 - usage.*
 - route.*
 
+TEAMYRA also acts as an inward MCP client/pool. External stdio MCP servers are configured in runtime-only profiles/mcp-pool.json, lazily initialized once inside the long-lived HTTP MCP process, and reused across Claude/Codex/Antigravity callers. See docs/MCP_POOLING.md.
+
 ### 5. CLI
 Headless access for scripts, CI, and advanced users.
 

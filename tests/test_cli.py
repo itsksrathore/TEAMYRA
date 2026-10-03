@@ -195,6 +195,69 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["target_worker"], "claude1")
         self.assertEqual(payload["limit"], 7)
 
+
+    def test_pool_register_requires_yes_and_preserves_argv(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"name": "fake"}) as call:
+            code, _, err = self.run_cli([
+                "pool", "register", "fake",
+                "--cwd", "P",
+                "--env", "TOKEN=secret",
+                "--timeout-seconds", "12",
+                "--",
+                "python", "fake.py",
+            ])
+        self.assertEqual(code, 1)
+        self.assertIn("--yes", err)
+        call.assert_not_called()
+
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"name": "fake"}) as call:
+            code, out, _ = self.run_cli([
+                "pool", "register", "fake",
+                "--cwd", "P",
+                "--env", "TOKEN=secret",
+                "--timeout-seconds", "12",
+                "--yes",
+                "--",
+                "python", "fake.py",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["name"], "fake")
+        name, payload = call.call_args.args
+        self.assertEqual(name, "mcp_pool_register")
+        self.assertEqual(payload["command"], ["python", "fake.py"])
+        self.assertEqual(payload["env"], {"TOKEN": "secret"})
+        self.assertEqual(payload["timeout_seconds"], 12)
+        self.assertTrue(payload["confirm"])
+
+    def test_pool_call_delegates_json_arguments(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"result": {"ok": True}}) as call:
+            code, _, _ = self.run_cli([
+                "pool", "call", "fake", "echo",
+                "--arguments", '{"value":"hello"}',
+                "--timeout-seconds", "9",
+            ])
+        self.assertEqual(code, 0)
+        name, payload = call.call_args.args
+        self.assertEqual(name, "mcp_pool_call")
+        self.assertEqual(payload["server"], "fake")
+        self.assertEqual(payload["tool_name"], "echo")
+        self.assertEqual(payload["arguments"], {"value": "hello"})
+        self.assertEqual(payload["timeout_seconds"], 9)
+
+    def test_pool_restart_and_remove_require_yes(self):
+        for action, tool in (("restart", "mcp_pool_restart"), ("remove", "mcp_pool_remove")):
+            with patch.object(teamyra_cli.server, "tool_call") as call:
+                code, _, err = self.run_cli(["pool", action, "fake"])
+            self.assertEqual(code, 1)
+            self.assertIn("--yes", err)
+            call.assert_not_called()
+
+            with patch.object(teamyra_cli.server, "tool_call", return_value={"ok": True}) as call:
+                code, _, _ = self.run_cli(["pool", action, "fake", "--yes"])
+            self.assertEqual(code, 0)
+            self.assertEqual(call.call_args.args[0], tool)
+            self.assertTrue(call.call_args.args[1]["confirm"])
+
     def test_worktree_merge_requires_yes(self):
         with patch.object(teamyra_cli.server, "tool_call") as call:
             code, _, err = self.run_cli(["worktree", "merge", "wt-test"])

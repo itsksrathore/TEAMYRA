@@ -191,6 +191,72 @@ def cmd_handoff(args):
     return 0
 
 
+def _pool_env(values):
+    out = {}
+    for item in values or []:
+        if "=" not in item:
+            raise ValueError("--env values must use KEY=VALUE")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("--env variable name cannot be empty")
+        out[key] = value
+    return out
+
+
+def cmd_pool(args):
+    action = args.pool_action
+    if action == "list":
+        result = call("mcp_pool_list", {})
+    elif action == "tools":
+        result = call("mcp_pool_tools", {
+            "server": args.server,
+            "refresh": args.refresh,
+        })
+    elif action == "call":
+        try:
+            arguments = json.loads(args.arguments or "{}")
+        except Exception as exc:
+            raise ValueError(f"--arguments must be a JSON object: {exc}")
+        if not isinstance(arguments, dict):
+            raise ValueError("--arguments must decode to a JSON object")
+        result = call("mcp_pool_call", {
+            "server": args.server,
+            "tool_name": args.tool_name,
+            "arguments": arguments,
+            "timeout_seconds": args.timeout_seconds,
+        })
+    elif action == "register":
+        if not args.yes:
+            raise ValueError("pool register requires --yes")
+        command = list(args.command or [])
+        if command and command[0] == "--":
+            command = command[1:]
+        if not command:
+            raise ValueError("pool register requires a command after --")
+        result = call("mcp_pool_register", {
+            "server": args.server,
+            "command": command,
+            "cwd": args.cwd,
+            "env": _pool_env(args.env),
+            "enabled": not args.disabled,
+            "timeout_seconds": args.timeout_seconds,
+            "confirm": True,
+        })
+    elif action == "restart":
+        if not args.yes:
+            raise ValueError("pool restart requires --yes")
+        result = call("mcp_pool_restart", {"server": args.server, "confirm": True})
+    elif action == "remove":
+        if not args.yes:
+            raise ValueError("pool remove requires --yes")
+        result = call("mcp_pool_remove", {"server": args.server, "confirm": True})
+    else:
+        raise ValueError("unsupported pool action")
+    emit(result)
+    return 0
+
+
 def cmd_test(args):
     argv = list(args.command or [])
     if argv and argv[0] == "--":
@@ -424,6 +490,42 @@ def parser():
     handoff_list.add_argument("--target-worker")
     handoff_list.add_argument("--limit", type=int, default=100)
     handoff_list.set_defaults(func=cmd_handoff)
+
+    pool = sub.add_parser("pool", help="Manage shared external MCP stdio servers")
+    pool_sub = pool.add_subparsers(dest="pool_action", required=True)
+    pool_sub.add_parser("list").set_defaults(func=cmd_pool)
+
+    pool_tools = pool_sub.add_parser("tools")
+    pool_tools.add_argument("server")
+    pool_tools.add_argument("--refresh", action="store_true")
+    pool_tools.set_defaults(func=cmd_pool)
+
+    pool_call = pool_sub.add_parser("call")
+    pool_call.add_argument("server")
+    pool_call.add_argument("tool_name")
+    pool_call.add_argument("--arguments", default="{}")
+    pool_call.add_argument("--timeout-seconds", type=int, default=30)
+    pool_call.set_defaults(func=cmd_pool)
+
+    pool_register = pool_sub.add_parser("register")
+    pool_register.add_argument("server")
+    pool_register.add_argument("--cwd")
+    pool_register.add_argument("--env", action="append", default=[])
+    pool_register.add_argument("--disabled", action="store_true")
+    pool_register.add_argument("--timeout-seconds", type=int, default=30)
+    pool_register.add_argument("--yes", action="store_true")
+    pool_register.add_argument("command", nargs="+", help="External MCP argv; place after -- to preserve its flags")
+    pool_register.set_defaults(func=cmd_pool)
+
+    pool_restart = pool_sub.add_parser("restart")
+    pool_restart.add_argument("server")
+    pool_restart.add_argument("--yes", action="store_true")
+    pool_restart.set_defaults(func=cmd_pool)
+
+    pool_remove = pool_sub.add_parser("remove")
+    pool_remove.add_argument("server")
+    pool_remove.add_argument("--yes", action="store_true")
+    pool_remove.set_defaults(func=cmd_pool)
 
     test = sub.add_parser("test", help="Run one deterministic no-shell test command")
     test.add_argument("--project", required=True)
