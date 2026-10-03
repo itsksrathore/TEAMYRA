@@ -38,6 +38,10 @@ class DesktopContractTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', self.html, element_id)
             self.assertIn(f"#{element_id}", self.renderer, element_id)
 
+    def test_observability_ignores_stale_timeline_responses(self):
+        self.assertIn("observabilityTimelineRequestId", self.renderer)
+        self.assertIn("timelineRequestId === observabilityTimelineRequestId", self.renderer)
+
     def test_observability_does_not_treat_unknown_readiness_as_ready(self):
         self.assertIn("worker.ready === true", self.renderer)
         self.assertIn("'detected'", self.renderer)

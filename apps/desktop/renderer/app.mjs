@@ -18,6 +18,7 @@ let currentWorktrees = [];
 let selectedWorktreeId = null;
 let currentUsage = null;
 let currentTimeline = [];
+let observabilityTimelineRequestId = 0;
 let currentMemoryItems = [];
 let selectedMemoryId = null;
 
@@ -866,6 +867,7 @@ async function refreshObservability(options = {}) {
     query: obsQueryEl.value.trim(),
     limit: 120
   };
+  const timelineRequestId = ++observabilityTimelineRequestId;
 
   const timelinePromise = window.teamyra.timeline(filters);
   let usagePromise = null;
@@ -888,12 +890,14 @@ async function refreshObservability(options = {}) {
   }
 
   const timeline = await timelinePromise;
-  renderTimeline(timeline);
+  if (timelineRequestId === observabilityTimelineRequestId) {
+    renderTimeline(timeline);
+  }
 
   if (usagePromise) {
     usagePromise.catch(() => {});
   }
-  return { usage: currentUsage, timeline };
+  return { usage: currentUsage, timeline, stale: timelineRequestId !== observabilityTimelineRequestId };
 }
 
 async function runLogSearch() {
