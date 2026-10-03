@@ -22,7 +22,7 @@ DEFAULT_PERMISSIONS = {
     "create": True,
     "write": True,
     "git": True,
-    "terminal": True,
+    "terminal": False,
     "outside_workspace": False,
     "destructive_without_confirmation": False,
 }
@@ -183,7 +183,7 @@ class WorkspaceToolService:
             raise WorkspaceToolError("path does not exist") from exc
 
         inside = _is_relative_to(candidate, workspace)
-        if not inside and not permissions.get("outside_workspace"):
+        if not inside:
             raise PermissionError("path is outside the selected workspace")
         for blocked in self._sensitive_roots():
             if candidate == blocked or _is_relative_to(candidate, blocked):
@@ -244,8 +244,10 @@ class WorkspaceToolService:
         scoped = Path(str(workspace or "")).expanduser().resolve()
         if not scoped.exists() or not scoped.is_dir():
             raise WorkspaceToolError("workspace must be an existing directory")
+        scoped_permissions = _safe_permissions(permissions)
+        scoped_permissions["outside_workspace"] = False
         return self._execute_scoped(
-            tool, args, scoped, _safe_permissions(permissions), actor, confirm
+            tool, args, scoped, scoped_permissions, actor, confirm
         )
 
     def _execute_scoped(self, tool, args, workspace, permissions, actor, confirm):
@@ -308,6 +310,9 @@ class WorkspaceToolService:
             if not root.is_dir():
                 raise WorkspaceToolError("search path is not a directory")
             pattern = str(args.get("glob") or "*")
+            pattern_path = Path(pattern)
+            if pattern_path.is_absolute() or ".." in pattern_path.parts:
+                raise WorkspaceToolError("search glob must stay inside the workspace")
             limit = max(1, min(int(args.get("limit", 100)), 500))
             needle = query.casefold()
             results, scanned = [], 0
@@ -316,6 +321,15 @@ class WorkspaceToolService:
                 if any(part in skipped_dirs for part in file.parts):
                     continue
                 if not file.is_file():
+                    continue
+                try:
+                    resolved_file = file.resolve(strict=True)
+                except OSError:
+                    continue
+                if not _is_relative_to(resolved_file, workspace):
+                    continue
+                if any(resolved_file == blocked or _is_relative_to(resolved_file, blocked)
+                       for blocked in self._sensitive_roots()):
                     continue
                 scanned += 1
                 if scanned > 5000:
@@ -356,7 +370,10 @@ class WorkspaceToolService:
             path = self._path(args.get("path"), workspace, permissions, must_exist=True)
             if not path.is_file():
                 raise WorkspaceToolError("path is not a file")
-            text = path.read_text(encoding="utf-8")
+            raw = path.read_bytes()
+            if b"\x00" in raw[:8192]:
+                raise WorkspaceToolError("binary files cannot be patched as text")
+            text = raw.decode("utf-8", errors="strict")
             replacements = args.get("replacements")
             if not isinstance(replacements, list) or not replacements or len(replacements) > 100:
                 raise WorkspaceToolError("replacements must be a non-empty list of at most 100 items")
@@ -419,6 +436,10 @@ class WorkspaceToolService:
                 or ("branch" in git_args and "-d" in git_args)
                 or ("branch" in git_args and "-D" in argv[1:])
             )
+            if exe in {"git", "git.exe"}:
+                subcommand = argv[1].lower() if len(argv) > 1 else ""
+                if subcommand not in {"status", "diff", "log", "show", "rev-parse"}:
+                    raise PermissionError("mutating Git commands must use TEAMYRA git tools")
             sensitive_command = (
                 exe in SHELL_EXECUTABLES
                 or exe in DESTRUCTIVE_EXECUTABLES
@@ -428,10 +449,8 @@ class WorkspaceToolService:
                     and any(arg.lower() in INLINE_EVAL_FLAGS for arg in argv[1:3])
                 )
             )
-            if sensitive_command and not (
-                permissions.get("destructive_without_confirmation") or confirm
-            ):
-                raise PermissionError("destructive/shell/eval command requires explicit confirmation")
+            if sensitive_command and not confirm:
+                raise PermissionError("destructive/shell/eval command requires explicit per-command confirmation")
             cwd = self._path(args.get("cwd", "."), workspace, permissions, must_exist=True)
             if not cwd.is_dir():
                 raise WorkspaceToolError("cwd is not a directory")
@@ -492,7 +511,7 @@ class WorkspaceToolService:
             message = str(args.get("message") or "").strip()
             if not message or len(message) > 500:
                 raise WorkspaceToolError("commit message is required and must be <= 500 characters")
-            argv = [*base, "commit", "-m", message]
+            argv = [*base, "commit", "--no-verify", "-m", message]
         elif tool == "git.restore":
             paths = args.get("paths") or ["."]
             if not isinstance(paths, list) or len(paths) > 200:
@@ -501,7 +520,12 @@ class WorkspaceToolService:
             for raw in paths:
                 path = self._path(raw, workspace, permissions, must_exist=False)
                 rel.append(os.path.relpath(path, workspace))
-            argv = [*base, "restore", "--worktree", "--", *rel]
+            argv = [*base, "restore"]
+            if args.get("staged"):
+                argv.extend(["--staged", "--worktree"])
+            else:
+                argv.append("--worktree")
+            argv.extend(["--", *rel])
         else:
             raise WorkspaceToolError(f"unsupported git tool: {tool}")
 
