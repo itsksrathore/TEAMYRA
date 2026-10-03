@@ -52,8 +52,8 @@ class TaskGraphTests(unittest.TestCase):
         }
         self.assertTrue(task_graph.mark_blocked_nodes(graph))
         self.assertEqual(graph["nodes"][1]["status"], "blocked")
-        self.assertTrue(task_graph.mark_blocked_nodes(graph))
         self.assertEqual(graph["nodes"][2]["status"], "blocked")
+        self.assertFalse(task_graph.mark_blocked_nodes(graph))
 
     def test_graph_summary_is_compact(self):
         graph = {
@@ -225,6 +225,7 @@ class TaskGraphTests(unittest.TestCase):
                 approved = server.tool_call("graph_approve", {
                     "graph_id": created["id"],
                     "node_id": "reviewed-write",
+                    "decision": "approve",
                     "note": "Approved in test",
                 })
                 node = approved["nodes"][0]
