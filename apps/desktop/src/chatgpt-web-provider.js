@@ -7,8 +7,8 @@ const { WorkspaceBridge } = require('./workspace-bridge');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
 const ALLOWED_HOSTS = new Set([
-  'chatgpt.com', 'www.chatgpt.com', 'auth.openai.com', 'openai.com', 'www.openai.com',
-  'accounts.google.com', 'login.microsoftonline.com', 'appleid.apple.com'
+  'chatgpt.com', 'www.chatgpt.com', 'auth.openai.com', 'auth0.openai.com', 'openai.com', 'www.openai.com',
+  'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'
 ]);
 
 function sleep(ms) {
@@ -251,7 +251,8 @@ class ChatGPTWebProvider {
   async attachFile(filePath) {
     const status = await this.workspaceBridge.status();
     if (!status?.available) throw new Error('Select a workspace first');
-    await this.workspaceBridge.execute('filesystem.stat', { path: filePath });
+    const verified = await this.workspaceBridge.execute('filesystem.stat', { path: filePath });
+    if (verified.type !== 'file') throw new Error('Only files can be attached');
     const view = this.ensureView();
     await view.webContents.executeJavaScript(`(() => {
       const button = document.querySelector('button[aria-label*="Attach"], button[aria-label*="attach"], button[data-testid*="attach"]');
@@ -269,8 +270,8 @@ class ChatGPTWebProvider {
       const { root } = await debuggerApi.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
       const { nodeId } = await debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="file"]' });
       if (!nodeId) throw new Error('ChatGPT file input was not found');
-      await debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [path.resolve(filePath)] });
-      return { ok: true, path: path.resolve(filePath) };
+      await debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [verified.path] });
+      return { ok: true, path: verified.path };
     } finally {
       if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach();
     }
@@ -338,9 +339,21 @@ class ChatGPTWebProvider {
         task
       ].join('\n');
 
+      const deadline = Date.now() + Number(spec.timeout || 3600) * 1000;
+      const isCancelled = () => fs.existsSync(path.join(jobDir, 'CANCEL'));
+      const waitOptions = previousCount => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('ChatGPT job timed out');
+        return {
+          previousCount,
+          timeoutMs: Math.min(remaining, 300000),
+          shouldCancel: isCancelled
+        };
+      };
+
       let snap = await this.automation.assistantSnapshot();
       await this.sendTask(bootstrap);
-      let reply = await this.automation.waitForAssistantReply({ previousCount: snap.count, timeoutMs: Math.min(spec.timeout * 1000, 300000) });
+      let reply = await this.automation.waitForAssistantReply(waitOptions(snap.count));
 
       for (let step = 0; step < 16; step += 1) {
         if (fs.existsSync(path.join(jobDir, 'CANCEL'))) {
@@ -375,11 +388,12 @@ class ChatGPTWebProvider {
         this.appendJobEvent(jobDir, 'result', JSON.stringify(toolResult).slice(0, 3000));
         snap = await this.automation.assistantSnapshot();
         await this.sendTask('TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: toolResult }) + '\nContinue the task.');
-        reply = await this.automation.waitForAssistantReply({ previousCount: snap.count, timeoutMs: Math.min(spec.timeout * 1000, 300000) });
+        reply = await this.automation.waitForAssistantReply(waitOptions(snap.count));
       }
       throw new Error('ChatGPT exceeded the maximum TEAMYRA tool-call loop');
     } catch (error) {
-      if (state !== 'cancelled') state = 'failed';
+      if (error?.code === 'TEAMYRA_CANCELLED') state = 'cancelled';
+      else if (state !== 'cancelled') state = 'failed';
       this.appendJobEvent(jobDir, 'error', String(error?.message || error));
       this.writeJobMeta(jobDir, {
         state,
