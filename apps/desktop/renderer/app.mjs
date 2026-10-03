@@ -13,7 +13,7 @@ let fitAddon = null;
 let terminalSessionId = null;
 let terminalResizeObserver = null;
 let chatgptBoundsObserver = null;
-const transcriptCache = new Map();
+const transcriptState = new Map();
 
 const ACTIVE_STATES = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
 const WORKER_META = {
@@ -120,18 +120,30 @@ function updateLiveBadge() {
 }
 
 async function loadTranscriptPreview(job) {
+  const state = transcriptState.get(job.id) || { offset: 0, text: '' };
   try {
-    const result = await window.teamyra.transcript(job.id, 0);
-    const text = String(result?.text || '').trim();
-    const preview = text ? text.slice(-9000) : String(job.lastEvent || '').trim();
-    transcriptCache.set(job.id, preview || 'Waiting for agent output…');
+    let loops = 0;
+    do {
+      const result = await window.teamyra.transcript(job.id, state.offset);
+      const chunk = String(result?.text || '');
+      if (chunk) state.text = (state.text + chunk).slice(-12000);
+      const next = Number(result?.next) || state.offset;
+      if (next <= state.offset || chunk.length < 200000) {
+        state.offset = next;
+        break;
+      }
+      state.offset = next;
+      loops += 1;
+    } while (loops < 4);
+    if (!state.text.trim() && job.lastEvent) state.text = String(job.lastEvent);
   } catch (error) {
-    transcriptCache.set(job.id, String(job.lastEvent || error?.message || 'No output yet.'));
+    if (!state.text.trim()) state.text = String(job.lastEvent || error?.message || 'No output yet.');
   }
+  transcriptState.set(job.id, state);
   const output = document.querySelector('[data-task-output="' + CSS.escape(job.id) + '"]');
   if (output) {
-    output.textContent = transcriptCache.get(job.id);
-    output.classList.toggle('empty', !String(transcriptCache.get(job.id) || '').trim());
+    output.textContent = state.text || 'Waiting for agent output…';
+    output.classList.toggle('empty', !state.text.trim());
     output.scrollTop = output.scrollHeight;
   }
 }
@@ -139,7 +151,7 @@ async function loadTranscriptPreview(job) {
 function taskCardHtml(job) {
   const meta = workerMeta(job.worker);
   const active = isActive(job);
-  const preview = transcriptCache.get(job.id) || job.lastEvent || (active ? 'Agent is starting…' : 'No transcript preview.');
+  const preview = transcriptState.get(job.id)?.text || job.lastEvent || (active ? 'Agent is starting…' : 'No transcript preview.');
   return `
     <article class="task-card ${active ? 'running' : ''}" data-job-id="${escapeHtml(job.id)}">
       <div class="task-head">
@@ -194,7 +206,7 @@ function renderJobs() {
   });
 
   for (const job of jobs.slice(0, 12)) {
-    if (isActive(job) || !transcriptCache.has(job.id)) loadTranscriptPreview(job);
+    if (isActive(job) || !transcriptState.has(job.id)) loadTranscriptPreview(job);
   }
 }
 
