@@ -79,7 +79,11 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 def _safe_permissions(value=None) -> dict:
     source = value if isinstance(value, dict) else {}
-    return {key: bool(source.get(key, default)) for key, default in DEFAULT_PERMISSIONS.items()}
+    permissions = {key: bool(source.get(key, default)) for key, default in DEFAULT_PERMISSIONS.items()}
+    # Web/local tools are intentionally workspace-scoped in v1. Keep the field
+    # for forward-compatible settings, but never let persisted state unlock it.
+    permissions["outside_workspace"] = False
+    return permissions
 
 
 class WorkspaceToolService:
@@ -90,6 +94,7 @@ class WorkspaceToolService:
         token_file = os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN_FILE")
         self.token_file = Path(token_file).resolve() if token_file else self.state_root / "local-agent.token"
         self.audit_file = self.root / "logs" / "workspace-tools.jsonl"
+        self.trash_root = self.root / "backups" / "workspace-tools-trash"
 
     def _verify_token(self, supplied, trusted=False):
         if trusted:
@@ -157,7 +162,17 @@ class WorkspaceToolService:
         return path, data["permissions"]
 
     def _sensitive_roots(self):
-        roots = []
+        roots = [
+            self.state_root,
+            self.root / "profiles",
+            self.root / "jobs",
+            self.root / "logs",
+            self.root / "results",
+            self.root / "worktrees",
+            self.root / "tasks",
+            self.root / "memory",
+            self.root / "backups",
+        ]
         home = Path.home().resolve()
         roots.extend([
             home / ".ssh", home / ".gnupg", home / ".aws", home / ".azure",
@@ -186,6 +201,17 @@ class WorkspaceToolService:
             roots.append(Path(token_file).expanduser().resolve().parent)
         return [p.resolve() for p in roots]
 
+    def _sensitive_name(self, path: Path):
+        name = path.name.lower()
+        if name in {"auth.json", ".credentials.json", "credentials.json", "secrets.json",
+                    "id_rsa", "id_ed25519"}:
+            return True
+        if name == ".env" or (name.startswith(".env.") and name not in {
+            ".env.example", ".env.sample", ".env.template"
+        }):
+            return True
+        return path.suffix.lower() in {".pem", ".pfx", ".p12", ".key"}
+
     def _path(self, raw, workspace, permissions, *, must_exist=False):
         text = str(raw or ".")
         candidate = Path(text).expanduser()
@@ -201,7 +227,9 @@ class WorkspaceToolService:
             raise PermissionError("path is outside the selected workspace")
         for blocked in self._sensitive_roots():
             if candidate == blocked or _is_relative_to(candidate, blocked):
-                raise PermissionError("access to system or credential storage is blocked")
+                raise PermissionError("access to TEAMYRA runtime, system, or credential storage is blocked")
+        if self._sensitive_name(candidate):
+            raise PermissionError("access to credential-like files is blocked")
         return candidate
 
     def _check(self, tool, permissions, *, confirm=False):
@@ -234,16 +262,23 @@ class WorkspaceToolService:
             return None
         try:
             size = path.stat().st_size
-        except OSError:
-            return None
-        if size > 10 * 1024 * 1024:
-            return None
+        except OSError as exc:
+            raise WorkspaceToolError("could not inspect existing file for backup") from exc
+        if size > 50 * 1024 * 1024:
+            raise WorkspaceToolError("existing file is too large for a safe automatic backup")
         relative = path.relative_to(workspace) if _is_relative_to(path, workspace) else Path(path.name)
         safe = "__".join(relative.parts)
         backup_root = self.root / "backups" / "workspace-tools"
         backup_root.mkdir(parents=True, exist_ok=True)
         destination = backup_root / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}-{safe}"
         shutil.copy2(path, destination)
+        return str(destination)
+
+    def _move_to_trash(self, path: Path, workspace: Path):
+        relative = path.relative_to(workspace) if _is_relative_to(path, workspace) else Path(path.name)
+        destination = self.trash_root / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(destination))
         return str(destination)
 
     def _atomic_text(self, path: Path, content: str):
@@ -300,8 +335,21 @@ class WorkspaceToolService:
                 raise WorkspaceToolError("path is not a directory")
             limit = max(1, min(int(args.get("limit", 500)), 2000))
             items = []
-            for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:limit]:
-                stat = child.stat()
+            for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+                if len(items) >= limit:
+                    break
+                try:
+                    resolved_child = child.resolve(strict=True)
+                    if not _is_relative_to(resolved_child, workspace):
+                        continue
+                    if self._sensitive_name(resolved_child):
+                        continue
+                    if any(resolved_child == blocked or _is_relative_to(resolved_child, blocked)
+                           for blocked in self._sensitive_roots()):
+                        continue
+                    stat = resolved_child.stat()
+                except (OSError, PermissionError):
+                    continue
                 items.append({
                     "name": child.name,
                     "path": str(child.relative_to(workspace)) if _is_relative_to(child, workspace) else str(child),
@@ -362,6 +410,8 @@ class WorkspaceToolService:
                 if any(resolved_file == blocked or _is_relative_to(resolved_file, blocked)
                        for blocked in self._sensitive_roots()):
                     continue
+                if self._sensitive_name(resolved_file):
+                    continue
                 scanned += 1
                 if scanned > 5000:
                     break
@@ -403,6 +453,8 @@ class WorkspaceToolService:
             if not path.is_file():
                 raise WorkspaceToolError("path is not a file")
             raw = path.read_bytes()
+            if len(raw) > 2 * 1024 * 1024:
+                raise WorkspaceToolError("patch target exceeds 2 MiB")
             if b"\x00" in raw[:8192]:
                 raise WorkspaceToolError("binary files cannot be patched as text")
             text = raw.decode("utf-8", errors="strict")
@@ -437,22 +489,19 @@ class WorkspaceToolService:
                 dst = self._path(destination_raw, workspace, permissions)
             if dst.exists() and not confirm:
                 raise PermissionError("overwriting an existing destination requires confirmation")
+            overwritten_backup = self._move_to_trash(dst, workspace) if dst.exists() else None
             dst.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(src, dst) if dst.exists() else shutil.move(str(src), str(dst))
-            return {"from": str(src), "to": str(dst)}
+            shutil.move(str(src), str(dst))
+            return {"from": str(src), "to": str(dst), "overwritten_backup": overwritten_backup}
 
         if tool == "filesystem.delete":
             path = self._path(args.get("path"), workspace, permissions, must_exist=True)
             if path == workspace:
                 raise PermissionError("deleting the workspace root is blocked")
-            backup = self._backup_file(path, workspace)
-            if path.is_dir():
-                if not args.get("recursive"):
-                    raise WorkspaceToolError("directory deletion requires recursive=true")
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-            return {"deleted": str(path), "backup": backup}
+            if path.is_dir() and not args.get("recursive"):
+                raise WorkspaceToolError("directory deletion requires recursive=true")
+            recoverable_at = self._move_to_trash(path, workspace)
+            return {"deleted": str(path), "recoverable_at": recoverable_at, "backup": recoverable_at}
 
         if tool == "terminal.run":
             argv = args.get("argv")
