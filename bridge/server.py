@@ -395,6 +395,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
                                                 ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "transcript.md").write_text(f"# {meta['label']}\n{worker} | {cwd} | {meta['branch']} @ {head}\n\n",
                                         encoding="utf-8")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     if provider == "chatgpt-web":
         patch_job_meta(
             job_id,
@@ -402,22 +403,20 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             last_event="queued for embedded ChatGPT",
             runner_pid=None,
         )
-        return job_id, worker
-
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    log = open(jdir / "runner.log", "w", encoding="utf-8")
-    try:  # break away from the MCP server's job object so a bridge restart does not kill the job
-        try:
-            runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
-                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                                           creationflags=flags | 0x01000000)
-        except OSError:
-            runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
-                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                                           creationflags=flags)
-        patch_job_meta(job_id, runner_pid=runner_proc.pid)
-    finally:
-        log.close()
+    else:
+        log = open(jdir / "runner.log", "w", encoding="utf-8")
+        try:  # break away from the MCP server's job object so a bridge restart does not kill the job
+            try:
+                runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
+                                               stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                               creationflags=flags | 0x01000000)
+            except OSError:
+                runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
+                                               stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                               creationflags=flags)
+            patch_job_meta(job_id, runner_pid=runner_proc.pid)
+        finally:
+            log.close()
 
     if auto_failover and start_monitor and max_failovers > 0:
         monitor_log = open(jdir / "failover-monitor.log", "a", encoding="utf-8")
