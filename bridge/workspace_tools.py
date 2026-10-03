@@ -204,7 +204,8 @@ class WorkspaceToolService:
     def _sensitive_name(self, path: Path):
         name = path.name.lower()
         if name in {"auth.json", ".credentials.json", "credentials.json", "secrets.json",
-                    "id_rsa", "id_ed25519"}:
+                    "id_rsa", "id_ed25519", ".netrc", "_netrc", ".npmrc", ".pypirc",
+                    ".git-credentials", ".gitconfig.local"}:
             return True
         if name == ".env" or (name.startswith(".env.") and name not in {
             ".env.example", ".env.sample", ".env.template"
@@ -501,6 +502,8 @@ class WorkspaceToolService:
 
         if tool in {"filesystem.move", "filesystem.rename"}:
             src = self._path(args.get("path"), workspace, permissions, must_exist=True)
+            if src == workspace:
+                raise PermissionError("moving or renaming the workspace root is blocked")
             destination_raw = args.get("destination") or args.get("new_name")
             if tool == "filesystem.rename" and destination_raw and not Path(str(destination_raw)).is_absolute():
                 dst = self._path(str(src.parent / str(destination_raw)), workspace, permissions)
@@ -625,6 +628,8 @@ class WorkspaceToolService:
             rel = []
             for raw in paths:
                 path = self._path(raw, workspace, permissions, must_exist=False)
+                if path.exists() and path.is_dir():
+                    raise PermissionError("git.add requires explicit file paths; directory-wide staging is blocked")
                 rel.append(os.path.relpath(path, workspace))
             argv = [*base, "add", "--", *rel]
         elif tool == "git.commit":
