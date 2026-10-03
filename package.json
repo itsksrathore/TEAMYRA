@@ -10,6 +10,7 @@
     "desktop": "npm --workspace @teamyra/desktop start",
     "desktop:check": "npm --workspace @teamyra/desktop run check",
     "teamyra": "python bridge/teamyra_cli.py",
-    "mcp:stdio": "python bridge/teamyra_cli.py mcp stdio"
+    "mcp:stdio": "python bridge/teamyra_cli.py mcp stdio",
+    "mcp:http": "python bridge/teamyra_cli.py mcp http"
   }
 }

@@ -68,6 +68,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         main.assert_called_once_with()
 
+    def test_mcp_http_calls_http_transport(self):
+        import http_mcp
+        with patch.object(http_mcp, "serve") as serve:
+            code, _, _ = self.run_cli(["mcp", "http", "--port", "8899"])
+        self.assertEqual(code, 0)
+        serve.assert_called_once_with("127.0.0.1", 8899)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -155,10 +155,14 @@ def cmd_worktree(args):
 
 
 def cmd_mcp(args):
-    if args.transport != "stdio":
-        raise ValueError("only stdio is implemented in this build")
-    server.main()
-    return 0
+    if args.transport == "stdio":
+        server.main()
+        return 0
+    if args.transport == "http":
+        import http_mcp
+        http_mcp.serve(args.host, args.port)
+        return 0
+    raise ValueError(f"unsupported MCP transport: {args.transport}")
 
 
 def parser():
@@ -237,7 +241,10 @@ def parser():
     wt_discard.set_defaults(func=cmd_worktree)
 
     mcp = sub.add_parser("mcp", help="Run TEAMYRA as an MCP server")
-    mcp.add_argument("transport", choices=["stdio"])
+    mcp.add_argument("transport", choices=["stdio", "http"])
+    mcp.add_argument("--host", default="127.0.0.1",
+                     help="HTTP bind host (localhost-only in this build)")
+    mcp.add_argument("--port", type=int, default=8787)
     mcp.set_defaults(func=cmd_mcp)
 
     return p

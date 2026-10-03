@@ -58,10 +58,10 @@ This checklist is updated as implementation lands.
 - [ ] Interactive conflict-resolution UI.
 
 ## Phase 5 — MCP / CLI / Plugins
-- [ ] TEAMYRA MCP namespace.
-- [ ] Stdio MCP.
-- [ ] HTTP MCP.
-- [ ] TEAMYRA CLI.
+- [x] Canonical TEAMYRA MCP namespace with legacy aliases.
+- [x] Local stdio MCP runtime verified on Windows.
+- [x] Localhost Streamable HTTP MCP JSON-response transport verified on Windows.
+- [x] TEAMYRA CLI with doctor/workers/jobs/run/wait/result/test/graph/worktree/MCP commands.
 - [ ] Codex plugin.
 - [ ] Claude integration.
 - [ ] Antigravity integration.

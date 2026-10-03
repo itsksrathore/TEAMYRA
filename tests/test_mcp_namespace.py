@@ -34,6 +34,8 @@ class McpNamespaceTests(unittest.TestCase):
         info = response["result"]["serverInfo"]
         self.assertEqual(info["name"], "teamyra")
         self.assertIn("TEAMYRA", info["title"])
+        self.assertEqual(response["result"]["protocolVersion"], server.MCP_DEFAULT_PROTOCOL)
+        self.assertIn(server.MCP_DEFAULT_PROTOCOL, server.MCP_SUPPORTED_PROTOCOLS)
 
     def test_namespaced_tool_call_routes_to_legacy_handler(self):
         with patch.object(server, "tool_call", return_value={"ok": True}) as call:

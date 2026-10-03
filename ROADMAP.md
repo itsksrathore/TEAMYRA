@@ -48,11 +48,11 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [ ] Interactive conflict-resolution experience.
 
 ## Phase 5 — MCP, CLI, and Plugins
-- [ ] Evolve the existing MCP bridge into TEAMYRA MCP.
-- [ ] Define stable TEAMYRA tool schemas.
-- [ ] Support local stdio MCP.
-- [ ] Add optional HTTP MCP transport.
-- [ ] Build TEAMYRA CLI.
+- [x] Evolve the existing worker bridge into canonical TEAMYRA MCP.
+- [x] Define stable namespaced TEAMYRA tool schemas with legacy aliases.
+- [x] Support local stdio MCP.
+- [x] Add localhost Streamable HTTP MCP JSON-response transport.
+- [x] Build and Windows-verify TEAMYRA CLI.
 - [ ] Build ecosystem plugins/skills where supported.
 - [ ] Add project bootstrap files for agent interoperability.
 

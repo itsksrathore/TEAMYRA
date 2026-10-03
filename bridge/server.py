@@ -1034,6 +1034,13 @@ def tool_call(name, a):
 MCP_NAMESPACE = "teamyra."
 MCP_SERVER_NAME = "teamyra"
 MCP_SERVER_VERSION = "0.2.0"
+MCP_SUPPORTED_PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26")
+MCP_DEFAULT_PROTOCOL = MCP_SUPPORTED_PROTOCOLS[0]
+
+
+def negotiate_protocol(requested):
+    requested = str(requested or "").strip()
+    return requested if requested in MCP_SUPPORTED_PROTOCOLS else MCP_DEFAULT_PROTOCOL
 
 
 def canonical_tool_name(name):
@@ -1078,7 +1085,7 @@ def handle(msg):
     method, req_id = msg.get("method"), msg.get("id")
     if method == "initialize":
         return {"jsonrpc": "2.0", "id": req_id, "result": {
-            "protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
+            "protocolVersion": negotiate_protocol(msg.get("params", {}).get("protocolVersion")),
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {
                 "name": MCP_SERVER_NAME,

@@ -13,7 +13,21 @@ It is evolving from the existing AI worker bridge into a full desktop system tha
 - compact final results with full local logs.
 - isolated Git worktrees for parallel tasks.
 - live local job dashboard.
-- MCP worker bridge.
+- canonical `teamyra.*` MCP tools with legacy aliases.
+- local stdio MCP and localhost Streamable HTTP MCP.
+- TEAMYRA CLI for workers, jobs, tests, graphs, and worktrees.
+
+## Quick start
+
+```powershell
+npm ci
+npm run desktop
+npm run teamyra -- doctor
+npm run mcp:stdio
+npm run mcp:http -- --port 8787
+```
+
+The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally localhost-only in this build.
 
 ## Target capabilities
 - Nami-style desktop UI.
