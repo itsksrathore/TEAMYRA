@@ -7,7 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
 
-from runtime_paths import agy_launch, codex_launch, find_codex_js, find_node
+from runtime_paths import agy_launch, claude_launch, codex_launch, find_codex_js, find_node
 
 
 class RuntimePathTests(unittest.TestCase):
@@ -28,6 +28,10 @@ class RuntimePathTests(unittest.TestCase):
     def test_explicit_antigravity_binary_wins(self):
         env = {"TEAMYRA_AGY": r"C:\tools\agy.exe"}
         self.assertEqual(agy_launch(env=env, home=Path("C:/Users/Test")), [r"C:\tools\agy.exe"])
+
+    def test_explicit_claude_binary_wins(self):
+        env = {"TEAMYRA_CLAUDE": r"C:\\tools\\claude.exe"}
+        self.assertEqual(claude_launch(env=env, home=Path("C:/Users/Test")), [r"C:\\tools\\claude.exe"])
 
     def test_appdata_codex_js_candidate(self):
         with tempfile.TemporaryDirectory() as td:
