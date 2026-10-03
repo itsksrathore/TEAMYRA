@@ -42,8 +42,10 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] First-class managed Git worktree lifecycle backend.
 - [x] Parallel task isolation tracked with stable worktree IDs.
 - [x] Safe diff/status plus guarded merge/discard/cleanup backend.
-- [ ] Desktop visual diff and worktree review experience.
-- [ ] Rebase/update-branch workflow and interactive conflict handling.
+- [x] Desktop visual diff/worktree review code path with guarded merge/discard/update actions.
+- [x] Rebase/update-branch backend with automatic conflict abort.
+- [ ] Windows runtime UX verification for Phase 4 desktop actions.
+- [ ] Interactive conflict-resolution experience.
 
 ## Phase 5 — MCP, CLI, and Plugins
 - [ ] Evolve the existing MCP bridge into TEAMYRA MCP.
