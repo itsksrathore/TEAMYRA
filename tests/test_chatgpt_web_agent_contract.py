@@ -33,6 +33,7 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
     def test_auth_popups_stay_inside_teamyra(self):
         self.assertIn("createEmbeddedPopup", self.provider)
         self.assertIn("createWindow: options => this.createEmbeddedPopup(options)", self.provider)
+        self.assertIn("url === 'about:blank' || safeHttps(url)", self.provider)
         self.assertIn("new WebContentsView", self.provider)
         self.assertNotIn("new BrowserWindow", self.provider)
 
