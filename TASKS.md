@@ -114,3 +114,17 @@ This checklist is updated as implementation lands.
 - [x] Complete first functional review and second complexity/maintainability review.
 - [x] Retain Nami Apache-2.0 attribution/license for adapted visual implementation.
 - [x] Windows + Linux CI validation for the rebuilt renderer and existing backend.
+
+
+## Phase 9 — Desktop UI Simplification
+- [x] Permanent navigation reduced to Tasks + Agents only.
+- [x] Nami-inspired Glass visual system applied to the full desktop shell.
+- [x] Live task tiles replace dashboard metrics and separate task-detail clutter.
+- [x] New Task flow uses one prompt, one workspace, and one agent choice.
+- [x] Desktop task start/cancel actions reuse the existing TEAMYRA job store and server.start_job path.
+- [x] Agents shelf handles Claude, Codex, Antigravity, and ChatGPT Normal connections.
+- [x] ChatGPT Normal opens inside the Agents view with workspace/tools controls kept secondary.
+- [x] Worktrees, Observability, Memory, and other advanced systems removed from permanent navigation but preserved in core/IPC.
+- [x] Nami Apache-2.0 attribution and UI design rules committed.
+- [x] Linux/Windows automated contract and renderer checks.
+- [ ] Live Windows visual/runtime acceptance of the rebuilt UI.
