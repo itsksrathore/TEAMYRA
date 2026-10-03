@@ -169,5 +169,32 @@ class WorktreeManagerTests(unittest.TestCase):
             discard.assert_called_once_with(server.WORKTREES, "wt-test", True)
 
 
+    def test_run_ai_parallel_returns_and_persists_managed_worktree_id(self):
+        wt = {
+            "id": "wt-test-managed",
+            "path": "/tmp/worktree",
+            "branch": "teamyra/test/branch",
+        }
+        with patch.object(server, "pick_worker", return_value="codex1"), \
+             patch.object(server, "create_worktree", return_value=wt) as create, \
+             patch.object(server, "start_job", return_value=("job-1", "codex1")) as start, \
+             patch.object(server, "patch_job_meta") as patch_meta, \
+             patch.object(server, "follow_info", return_value={}):
+            result = server.tool_call("run_ai_parallel", {
+                "project_path": "/tmp/project",
+                "tasks": [{"task": "Implement feature", "worker": "auto"}],
+                "write": True,
+            })
+            self.assertEqual(result[0]["worktree_id"], "wt-test-managed")
+            self.assertEqual(result[0]["branch"], "teamyra/test/branch")
+            create.assert_called_once()
+            start.assert_called_once()
+            patch_meta.assert_called_once_with(
+                "job-1",
+                worktree_id="wt-test-managed",
+                worktree_branch="teamyra/test/branch",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
