@@ -113,6 +113,66 @@ class Job:
             msg = ev.get("message") or (ev.get("error") or {}).get("message") or json.dumps(ev)
             self.emit("error", clip(msg, 1000))
 
+    # --- claude --output-format stream-json --------------------------------------------
+    def claude_event(self, ev):
+        t = ev.get("type", "")
+        sid = ev.get("session_id")
+        if sid and sid != self.meta.get("session_id"):
+            self.save_meta(session_id=sid)
+
+        if t == "system" and ev.get("subtype") == "init":
+            model = ev.get("model") or "unknown"
+            self.emit("info", f"claude session {sid or '?'} model {model}")
+            return
+
+        if t == "assistant":
+            msg = ev.get("message") or {}
+            if msg.get("usage"):
+                self.save_meta(usage=msg.get("usage"))
+            for block in msg.get("content") or []:
+                kind = block.get("type")
+                if kind == "text" and block.get("text"):
+                    text = block.get("text")
+                    self.final_text = text
+                    self.emit("message", text)
+                elif kind == "tool_use":
+                    name = block.get("name") or "tool"
+                    detail = clip(json.dumps(block.get("input") or {}, ensure_ascii=False), 700)
+                    self.emit("command", f"{name}: {detail}")
+                elif kind == "thinking" and block.get("thinking"):
+                    self.emit("reasoning", clip(block.get("thinking"), 500))
+            return
+
+        if t == "user":
+            msg = ev.get("message") or {}
+            for block in msg.get("content") or []:
+                if block.get("type") != "tool_result":
+                    continue
+                content = block.get("content")
+                if isinstance(content, list):
+                    text = " ".join(str(x.get("text", "")) for x in content if isinstance(x, dict))
+                else:
+                    text = str(content or "")
+                self.emit("result", clip(text, 900))
+            return
+
+        if t == "result":
+            result = ev.get("result")
+            if isinstance(result, str) and result.strip():
+                self.final_text = result
+            denied = ev.get("permission_denials") or []
+            self.save_meta(
+                session_id=sid or self.meta.get("session_id"),
+                usage=ev.get("usage") or self.meta.get("usage"),
+                total_cost_usd=ev.get("total_cost_usd"),
+                worker_status=ev.get("subtype"),
+                denied_actions=denied or self.meta.get("denied_actions"),
+                reported_error=bool(ev.get("is_error")),
+            )
+            if ev.get("is_error"):
+                self.emit("error", clip(str(result or ev.get("subtype") or "Claude run failed"), 1000))
+            return
+
     # --- agy --output-format stream-json ---------------------------------------------
     def agy_event(self, ev):
         e = ev.get("event")
@@ -183,7 +243,12 @@ class Job:
         provider = self.spec.get("provider")
         if not provider:
             provider = "codex" if self.spec["worker"].startswith("codex") else "antigravity"
-        handler = self.codex_event if provider == "codex" else self.agy_event
+        if provider == "codex":
+            handler = self.codex_event
+        elif provider == "claude":
+            handler = self.claude_event
+        else:
+            handler = self.agy_event
         last_save = 0.0
         for line in proc.stdout:
             line = line.strip()
@@ -247,6 +312,8 @@ class Job:
             state, reason = "failed", "usage_or_rate_limit"
         elif self.meta.get("denied_actions"):
             state, reason = "failed", "permission_denied"
+        elif self.meta.get("reported_error"):
+            state, reason = "failed", "worker_reported_error"
         elif rc != 0:
             state, reason = "failed", "worker_error"
         else:
