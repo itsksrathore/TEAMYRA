@@ -72,3 +72,15 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] GitHub Release update pipeline with electron-updater wiring and generated NSIS update metadata.
 - [x] Documentation and examples for Windows packaging, runtime layout, and release acceptance.
 - [x] Open-source release hardening — MIT license, contribution/security policy, provider capability boundaries, public release checklist, runtime dependency audit gate, and signed/verified stable release channel.
+
+
+## Phase 8 — Normal ChatGPT Web Agent
+- [x] Architecture inspection and provider extension design.
+- [x] Desktop-backed `chatgpt-normal` worker/provider registration.
+- [x] Embedded Electron WebContentsView with dedicated persistent ChatGPT session.
+- [x] Shared workspace-scoped filesystem, terminal and Git tool layer.
+- [x] Permission gates, canonical path sandboxing, sensitive-root blocking, audit logs and recovery backups.
+- [x] ChatGPT panel with workspace, permissions, status, diff/change, attach, stop/reload/reconnect controls.
+- [x] Existing TEAMYRA task/job/handoff/failover integration and persistent worker-conversation metadata.
+- [x] Automated Windows/Linux contract, routing and security tests.
+- [ ] Live Windows acceptance with a real logged-in ChatGPT account: sign-in, restart persistence, manual chat, and current production DOM automation.
