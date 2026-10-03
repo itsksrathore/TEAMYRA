@@ -1,0 +1,22 @@
+name: Desktop syntax check
+
+on:
+  push:
+    paths:
+      - "apps/desktop/**"
+      - "package.json"
+      - ".github/workflows/desktop-check.yml"
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "package.json"
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run desktop:check
