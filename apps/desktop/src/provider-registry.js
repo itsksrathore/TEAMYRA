@@ -13,7 +13,7 @@ const PROVIDERS = [
     name: 'Claude Code',
     bin: 'claude',
     nativeHome: path.join(HOME, '.claude'),
-    status: { kind: 'command', argv: ['claude', 'auth', 'status', '--json'] },
+    status: { kind: 'command', argv: ['auth', 'status', '--json'] },
     managed: { verified: true, env: 'CLAUDE_CONFIG_DIR', loginArgv: ['auth', 'login'] },
     color: 'amber'
   },
@@ -47,20 +47,43 @@ function fileExists(file) {
   try { return fs.existsSync(file); } catch { return false; }
 }
 
+function fallbackBinDirs() {
+  const dirs = [];
+  const add = value => { if (value && !dirs.includes(value)) dirs.push(value); };
+  add(process.env.APPDATA && path.join(process.env.APPDATA, 'npm'));
+  add(process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'agy', 'bin'));
+  add(path.join(HOME, 'AppData', 'Roaming', 'npm'));
+  add(path.join(HOME, 'AppData', 'Local', 'agy', 'bin'));
+  add(path.join(HOME, '.local', 'bin'));
+  return dirs;
+}
+
+function findOnDisk(bin) {
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  for (const dir of fallbackBinDirs()) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, bin + ext);
+      if (fileExists(candidate)) return candidate;
+    }
+  }
+  return '';
+}
+
 function whereBinary(bin) {
   return new Promise((resolve) => {
     const resolver = process.platform === 'win32' ? 'where.exe' : 'which';
     execFile(resolver, [bin], { timeout: 4000 }, (err, stdout) => {
-      if (err) return resolve('');
-      const first = String(stdout || '').split(/\r?\n/).map(s => s.trim()).find(Boolean);
-      resolve(first || '');
+      const first = !err
+        ? String(stdout || '').split(/\r?\n/).map(s => s.trim()).find(Boolean)
+        : '';
+      resolve(first || findOnDisk(bin));
     });
   });
 }
 
-function commandStatus(argv) {
+function commandStatus(binary, argv) {
   return new Promise((resolve) => {
-    execFile(argv[0], argv.slice(1), { timeout: 6000, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(binary, argv, { timeout: 6000, windowsHide: true }, (err, stdout, stderr) => {
       const raw = String(stdout || stderr || '').trim();
       if (err) return resolve({ signedIn: false, label: raw || 'Sign-in needed' });
       let label = 'Existing local login detected';
@@ -74,7 +97,7 @@ function commandStatus(argv) {
 }
 
 async function nativeStatus(provider) {
-  if (provider.status.kind === 'command') return commandStatus(provider.status.argv);
+  if (provider.status.kind === 'command') return commandStatus(binary, provider.status.argv);
   const signedIn = provider.status.files.some(fileExists);
   return { signedIn, label: signedIn ? 'Existing local login detected' : 'Sign-in needed' };
 }
