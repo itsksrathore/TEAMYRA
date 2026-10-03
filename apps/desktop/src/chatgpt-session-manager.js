@@ -11,7 +11,9 @@ class ChatGPTSessionManager {
   initialize() {
     if (this.session) return this.session;
     this.session = session.fromPartition(this.partition, { cache: true });
+    this.session.setPermissionCheckHandler(() => false);
     this.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    this.session.on('will-download', (_event, item) => item.cancel());
     return this.session;
   }
 
