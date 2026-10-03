@@ -28,6 +28,7 @@
       </div>
       <div class="actions">
         <button class="secondary" id="refresh">Refresh</button>
+        <button class="secondary" id="openTerminal">Open Terminal</button>
         <button class="primary" disabled>+ New Task</button>
       </div>
     </header>
@@ -72,6 +73,14 @@
         <pre id="transcript" class="transcript">No task selected.</pre>
       </aside>
     </section>
+
+    <section id="terminalPanel" class="terminal-panel" hidden>
+      <div class="terminal-head">
+        <span id="terminalLabel">Terminal · TEAMYRA</span>
+        <button id="closeTerminal" class="terminal-close">Close</button>
+      </div>
+      <div id="terminalHost" class="terminal-host"></div>
+    </section>
   </main>
 
   <template id="providerTpl">
@@ -87,6 +96,7 @@
     </article>
   </template>
 
-  <script src="./app.js"></script>
+  <link rel="stylesheet" href="./bundle.css" />
+  <script src="./bundle.js"></script>
 </body>
 </html>
