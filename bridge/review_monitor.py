@@ -51,6 +51,18 @@ Run appropriate tests and finish the original task. Do not merely explain the fi
 """
 
 
+def select_reviewer(state, impl_meta):
+    allow_self_review = state.get("allow_self_review", False)
+    implementation_worker = impl_meta.get("worker")
+    requested = state.get("reviewer_worker") or "auto"
+    if requested == "auto":
+        exclude = [] if allow_self_review or not implementation_worker else [implementation_worker]
+        return server.pick_worker("auto", exclude=exclude)
+    if not allow_self_review and requested == implementation_worker:
+        raise ValueError("reviewer worker matched implementation worker")
+    return requested
+
+
 def cancel_active(state):
     job_id = state.get("active_job_id")
     if not job_id:
@@ -99,16 +111,11 @@ def main():
 
         impl_terminal = server.failover_terminal_job_id(implementation_job_id)
         impl_meta = server.read_meta(impl_terminal)
-        allow_self_review = state.get("allow_self_review", False)
-        exclude = []
-        if not allow_self_review and impl_meta.get("worker"):
-            exclude = [impl_meta.get("worker")]
         requested_reviewer = state.get("reviewer_worker") or "auto"
-        reviewer = requested_reviewer
-        if reviewer == "auto":
-            reviewer = server.pick_worker("auto", exclude=exclude)
-        elif not allow_self_review and reviewer == impl_meta.get("worker"):
-            finish(state, "failed", error="reviewer worker matched implementation worker")
+        try:
+            reviewer = select_reviewer(state, impl_meta)
+        except Exception as exc:
+            finish(state, "failed", error=str(exc))
             return
 
         review_job_id, review_worker = server.start_job(
