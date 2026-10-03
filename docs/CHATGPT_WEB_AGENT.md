@@ -39,8 +39,9 @@ The browser implementation is isolated from orchestration. Python core code neve
 The core worker ID is `chatgpt-normal`, provider `chatgpt-web`.
 
 A desktop heartbeat is written to runtime state. Core routing considers the worker ready only while:
-1. the heartbeat is fresh; and
-2. the embedded page exposes an interactive ChatGPT prompt.
+1. the heartbeat is fresh;
+2. the embedded page exposes an interactive ChatGPT prompt; and
+3. a valid Teamyra workspace bridge is selected.
 
 If TEAMYRA Desktop is closed, the worker becomes unavailable rather than pretending a headless browser worker exists.
 
@@ -87,7 +88,9 @@ By default:
 - `..\..\` traversal outside the workspace is denied;
 - absolute paths outside the workspace are denied;
 - filesystem/drive roots and the user's home root cannot be selected as a workspace;
-- common credential/provider/browser stores remain blocked even if outside-workspace access is explicitly enabled.
+- outside-workspace access is disabled in the current implementation;
+- TEAMYRA runtime/profile stores and common credential/provider/browser stores remain blocked even when they are physically nested under the selected workspace;
+- credential-like files such as `.env`, provider auth JSON, private key/certificate files, and SSH private-key names are blocked (example/sample env templates remain usable).
 
 Blocked sensitive locations include SSH/GPG, AWS/Azure/GCloud/Kubernetes/Docker credentials, Claude/Codex/Antigravity provider homes, Windows credential/protect stores, Chrome/Edge profiles, Firefox profiles, Windows system directories, and the TEAMYRA local-agent token directory.
 
@@ -101,16 +104,16 @@ Persisted per selected ChatGPT workspace:
 - Edit files
 - Terminal
 - Git
-- Access outside workspace (off by default)
+- Access outside workspace (shown for forward compatibility but disabled in v1)
 - Destructive operations without confirmation (off by default)
 
-Enabling the last two requires explicit UI confirmation. The automation tool loop always submits `confirm=false`; therefore destructive actions are denied unless the user explicitly enabled the destructive-without-confirmation policy.
+Terminal access is also off by default. Enabling destructive-without-confirmation requires an explicit typed UI acknowledgement. The automation tool loop always submits `confirm=false`.
 
-`git.restore`, recursive deletion and destructive terminal/Git patterns are confirmation-gated. Drive formatting/system-management executables are blocked.
+`git.restore` and filesystem deletion are confirmation-gated unless the user explicitly opted into the destructive policy. Shell/eval/destructive terminal commands always require per-command confirmation and therefore cannot be silently executed by the automated ChatGPT loop. Mutating Git commands are rejected through `terminal.run` and must use TEAMYRA's normalized Git tools. Drive formatting/system-management executables are blocked, and TEAMYRA-created commits use `--no-verify` so repository hooks are not executed implicitly.
 
 ## Recoverability and audit
 
-Existing files up to 10 MiB receive a bounded recovery copy before TEAMYRA write/patch/delete operations. Recovery files live under runtime `backups/workspace-tools` and are excluded from source control.
+Existing files up to 50 MiB receive a recovery copy before TEAMYRA write/patch operations; larger overwrite targets are refused instead of being modified without recovery. Delete operations and confirmed destination overwrites are moved into a runtime recovery/trash area rather than being permanently removed. Recovery state lives under ignored TEAMYRA runtime `backups/` paths and is itself inaccessible through ChatGPT workspace tools.
 
 Audit records are JSONL under `logs/workspace-tools.jsonl` and include:
 - timestamp;
