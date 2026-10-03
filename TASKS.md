@@ -41,7 +41,7 @@ This checklist is updated as implementation lands.
 - [x] Bounded retry/failover loop for eligible provider/worker failures.
 - [x] Bounded automated reviewer/fixer loop with explicit PASS/CHANGES marker.
 - [x] Structured cross-agent job handoff for review/continuation/testing.
-- [ ] Dedicated deterministic tester loop / test-policy stage.
+- [x] Dedicated deterministic no-shell tester stage with per-step timeout/failure gating before merge.
 - [x] Approval gates for sensitive/destructive graph nodes via MCP approve/deny.
 - [x] Safe parallel graph execution with max_parallel, managed worktrees, snapshot commits, rebase and deterministic merge.
 
