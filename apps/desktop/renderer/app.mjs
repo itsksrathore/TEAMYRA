@@ -140,6 +140,7 @@ async function loadTranscriptPreview(job) {
   } catch (error) {
     if (!state.text.trim()) state.text = String(job.lastEvent || error?.message || 'No output yet.');
   }
+  state.jobState = job.state;
   transcriptState.set(job.id, state);
   const output = document.querySelector('[data-task-output="' + CSS.escape(job.id) + '"]');
   if (output) {
@@ -207,7 +208,8 @@ function renderJobs() {
   });
 
   for (const job of jobs.slice(0, 12)) {
-    if (isActive(job) || !transcriptState.has(job.id)) loadTranscriptPreview(job);
+    const cached = transcriptState.get(job.id);
+    if (isActive(job) || !cached || cached.jobState !== job.state) loadTranscriptPreview(job);
   }
 }
 
