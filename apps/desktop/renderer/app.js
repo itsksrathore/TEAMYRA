@@ -24,6 +24,23 @@ function renderProviders(providers) {
     fragment.querySelector('.binary').textContent = provider.binary || 'CLI not found on PATH';
     const plus = fragment.querySelector('.plus');
     plus.disabled = !provider.installed || !provider.managedProfilesVerified;
+    plus.addEventListener('click', async () => {
+      plus.disabled = true;
+      plus.textContent = '…';
+      try {
+        const result = await window.teamyra.addAccount(provider.id);
+        if (!result.ok) {
+          alert('Managed multi-account isolation is not verified for ' + provider.name + ' yet.');
+        } else {
+          alert('Login started for ' + provider.name + '. Complete the provider sign-in, then press Refresh.');
+        }
+      } catch (error) {
+        alert('Could not start account login: ' + String(error));
+      } finally {
+        plus.textContent = '+';
+        plus.disabled = !provider.installed || !provider.managedProfilesVerified;
+      }
+    });
 
     const accounts = fragment.querySelector('.accounts');
     if (!provider.profiles.length) {
@@ -41,7 +58,7 @@ function renderProviders(providers) {
 
     const foot = fragment.querySelector('.provider-foot');
     if (provider.managedProfilesVerified) {
-      foot.textContent = 'Managed profile isolation verified. Account creation UI is the next step.';
+      foot.textContent = 'Managed profile isolation verified. Use + to start a separate provider login.';
     } else if (provider.installed) {
       foot.textContent = 'Native session detection is active. Managed multi-account isolation is not enabled until verified.';
     }
