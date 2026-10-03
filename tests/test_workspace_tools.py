@@ -5,7 +5,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
@@ -169,6 +168,7 @@ class WorkspaceToolTests(unittest.TestCase):
             workspace = Path(td) / "project"
             workspace.mkdir()
             service = self.make_service(root, workspace)
+            service.configure(workspace, {"terminal": True}, token="x" * 64)
             command = ["git", "reset", "--hard", "HEAD"]
             with self.assertRaises(PermissionError):
                 service.execute("terminal.run", {"argv": command}, token="x" * 64)
@@ -191,10 +191,17 @@ class WorkspaceToolTests(unittest.TestCase):
             os.environ["TEAMYRA_LOCAL_AGENT_TOKEN_FILE"] = str(Path(td) / "security" / "token")
             os.environ["MY_API_KEY"] = "do-not-leak"
             try:
+                with self.assertRaises(PermissionError):
+                    service.execute(
+                        "terminal.run",
+                        {"argv": [sys.executable, "env_check.py"]},
+                        token="x" * 64,
+                    )
                 result = service.execute(
                     "terminal.run",
                     {"argv": [sys.executable, "env_check.py"]},
                     token="x" * 64,
+                    confirm=True,
                 )
             finally:
                 if old_token is None:
@@ -230,6 +237,26 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertNotIn("profiles", names)
             self.assertNotIn("chatgpt", names)
             self.assertNotIn(".env", names)
+
+    def test_terminal_auto_mode_allows_only_bounded_inspection(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            service.configure(workspace, {"terminal": True}, token="x" * 64)
+
+            version = service.execute(
+                "terminal.run", {"argv": [sys.executable, "--version"]}, token="x" * 64
+            )
+            self.assertEqual(version["exit_code"], 0)
+
+            script = workspace / "script.py"
+            script.write_text("print('no automatic arbitrary code')", encoding="utf-8")
+            with self.assertRaises(PermissionError):
+                service.execute(
+                    "terminal.run", {"argv": [sys.executable, "script.py"]}, token="x" * 64
+                )
 
     def test_default_terminal_permission_is_off(self):
         with tempfile.TemporaryDirectory() as td:
@@ -303,6 +330,20 @@ class WorkspaceToolTests(unittest.TestCase):
             service = self.make_service(root, workspace)
             result = service.execute("filesystem.search", {"query": "TOP-SECRET-SEARCH-TOKEN"}, token="x" * 64)
             self.assertEqual(result["results"], [])
+
+    def test_git_internal_files_are_hidden_from_filesystem_tools(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+
+            listing = service.execute("filesystem.list", {}, token=token)
+            self.assertNotIn(".git", {item["name"] for item in listing["items"]})
+            with self.assertRaises(PermissionError):
+                service.execute("filesystem.read", {"path": ".git/config"}, token=token)
 
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:
