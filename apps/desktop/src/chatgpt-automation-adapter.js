@@ -113,11 +113,10 @@ class ChatGPTAutomationAdapter {
   }
 
   parseToolRequest(text) {
-    const line = String(text || '').split(/\r?\n/).map(item => item.trim())
-      .find(item => item.startsWith(TOOL_REQUEST_PREFIX));
-    if (!line) return null;
+    const value = String(text || '').trim();
+    if (!value.startsWith(TOOL_REQUEST_PREFIX) || /[\r\n]/.test(value)) return null;
     try {
-      const data = JSON.parse(line.slice(TOOL_REQUEST_PREFIX.length));
+      const data = JSON.parse(value.slice(TOOL_REQUEST_PREFIX.length));
       if (!data || typeof data.tool !== 'string' || !data.args || typeof data.args !== 'object' || Array.isArray(data.args)) return null;
       return { tool: data.tool, args: data.args };
     } catch {
