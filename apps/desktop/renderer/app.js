@@ -128,14 +128,31 @@ async function selectJob(jobId) {
   transcriptTimer = setInterval(() => pumpTranscript(false).catch(() => {}), 1500);
 }
 
+async function refreshJobs() {
+  const jobs = await window.teamyra.jobs();
+  renderJobs(jobs);
+
+  if (selectedJob) {
+    const job = jobs.find(item => item.id === selectedJob);
+    if (job) {
+      const state = document.querySelector('#detailState');
+      state.textContent = job.state;
+      state.className = 'detail-state ' + job.state;
+      document.querySelector('#detailMeta').textContent =
+        [job.worker, job.branch || 'no branch', job.cwd].filter(Boolean).join(' · ');
+    }
+  }
+
+  document.querySelector('#mRunning').textContent = jobs.filter(x => x.state === 'running' || x.state === 'starting').length;
+  document.querySelector('#mJobs').textContent = jobs.length;
+  return jobs;
+}
+
 async function refresh() {
-  const [providers, jobs] = await Promise.all([
-    window.teamyra.providers(),
-    window.teamyra.jobs()
-  ]);
+  const providers = await window.teamyra.providers();
+  const jobs = await refreshJobs();
 
   renderProviders(providers);
-  renderJobs(jobs);
   if (selectedJob && !jobs.some(job => job.id === selectedJob)) {
     selectedJob = null;
     transcriptOffset = 0;
@@ -148,11 +165,10 @@ async function refresh() {
 
   document.querySelector('#mAgents').textContent = providers.filter(x => x.installed).length;
   document.querySelector('#mAccounts').textContent = providers.reduce((n, x) => n + x.profiles.filter(p => p.signedIn).length, 0);
-  document.querySelector('#mRunning').textContent = jobs.filter(x => x.state === 'running' || x.state === 'starting').length;
-  document.querySelector('#mJobs').textContent = jobs.length;
 }
 
 document.querySelector('#refresh').addEventListener('click', refresh);
+setInterval(() => refreshJobs().catch(() => {}), 3000);
 refresh().catch(err => {
   providersEl.innerHTML = '<div class="empty">Desktop core error: ' + escapeHtml(err) + '</div>';
 });
