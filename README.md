@@ -36,6 +36,7 @@ The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally
 Provider-specific Claude Code, Codex, and Antigravity setup is documented in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 The embedded normal ChatGPT web worker, workspace tool bridge, permissions, and security model are documented in [docs/CHATGPT_WEB_AGENT.md](docs/CHATGPT_WEB_AGENT.md).
 Windows packaging, installer/runtime layout, acceptance checks, and the release/update path are documented in [docs/WINDOWS_DISTRIBUTION.md](docs/WINDOWS_DISTRIBUTION.md).
+The desktop information architecture and visual rules are documented in [docs/UI_DESIGN.md](docs/UI_DESIGN.md). Third-party visual attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 The desktop information architecture and visual rules are documented in [docs/UI_DESIGN.md](docs/UI_DESIGN.md). Nami visual-design attribution is retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Windows distribution
