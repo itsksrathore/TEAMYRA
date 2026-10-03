@@ -25,6 +25,10 @@ import project_memory
 import workspace_tools
 
 
+def _bridge_token(payload):
+    return os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN") or payload.get("bridge_token")
+
+
 def handle(action, payload):
     payload = payload if isinstance(payload, dict) else {}
 
@@ -105,18 +109,18 @@ def handle(action, payload):
         return service.configure(
             payload.get("workspace"),
             payload.get("permissions"),
-            token=payload.get("bridge_token"),
+            token=_bridge_token(payload),
             actor="chatgpt-normal",
         )
     if action == "chatgpt.workspace.status":
         return workspace_tools.WorkspaceToolService(ROOT).status(
-            token=payload.get("bridge_token"),
+            token=_bridge_token(payload),
         )
     if action == "chatgpt.tool.execute":
         return workspace_tools.WorkspaceToolService(ROOT).execute(
             payload.get("tool"),
             payload.get("args"),
-            token=payload.get("bridge_token"),
+            token=_bridge_token(payload),
             actor="chatgpt-normal",
             confirm=payload.get("confirm") is True,
         )
