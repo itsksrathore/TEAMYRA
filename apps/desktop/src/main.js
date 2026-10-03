@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary } = require('./provider-registry');
+const { callCore } = require('./core-api');
 
 let pty = null;
 try { pty = require('@lydell/node-pty'); } catch {}
@@ -108,6 +109,33 @@ function createWindow() {
 ipcMain.handle('teamyra:providers', () => detectProviders());
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
+
+ipcMain.handle('teamyra:worktrees', () => callCore('worktree.list'));
+ipcMain.handle('teamyra:worktree-status', (_event, worktreeId) =>
+  callCore('worktree.status', { worktree_id: worktreeId })
+);
+ipcMain.handle('teamyra:worktree-diff', (_event, worktreeId, maxChars = 80000) =>
+  callCore('worktree.diff', { worktree_id: worktreeId, max_chars: maxChars }, { maxBuffer: 12 * 1024 * 1024 })
+);
+ipcMain.handle('teamyra:worktree-create', (_event, options = {}) =>
+  callCore('worktree.create', {
+    project_path: String(options.projectPath || ''),
+    label: String(options.label || 'task'),
+    base_ref: String(options.baseRef || 'HEAD')
+  })
+);
+ipcMain.handle('teamyra:worktree-merge', (_event, worktreeId, confirm = false) => {
+  if (confirm !== true) throw new Error('Merge requires explicit confirmation');
+  return callCore('worktree.merge', { worktree_id: worktreeId, confirm: true }, { timeout: 120000 });
+});
+ipcMain.handle('teamyra:worktree-discard', (_event, worktreeId, options = {}) => {
+  if (options.confirm !== true) throw new Error('Discard requires explicit confirmation');
+  return callCore('worktree.discard', {
+    worktree_id: worktreeId,
+    confirm: true,
+    force: options.force === true
+  }, { timeout: 120000 });
+});
 
 ipcMain.handle('teamyra:terminal-open', async (event, options = {}) => {
   if (!pty) return { ok: false, reason: 'pty-unavailable' };
