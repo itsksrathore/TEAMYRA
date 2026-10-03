@@ -6,6 +6,8 @@ import time
 import uuid
 from pathlib import Path
 
+import test_policy
+
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
@@ -54,6 +56,7 @@ def _validate_nodes(nodes):
         timeout = max(1, min(int(raw.get("timeout_minutes") or 90), 360))
         requires_approval = raw.get("requires_approval", False) is True
         approval_reason = str(raw.get("approval_reason") or "").strip()[:500] or None
+        tests = test_policy.normalize_steps(raw.get("tests") or [])
         normalized.append({
             "id": node_id,
             "label": str(raw.get("label") or node_id).strip()[:120] or node_id,
@@ -73,6 +76,10 @@ def _validate_nodes(nodes):
             "started_at": None,
             "ended_at": None,
             "error": None,
+            "tests": tests,
+            "test_status": "pending" if tests else "not_required",
+            "test_error": None,
+            "test_results": [],
             "worktree_id": None,
             "worktree_path": None,
             "worktree_branch": None,
@@ -274,6 +281,19 @@ def graph_summary(graph):
                 "snapshot_commit": node.get("snapshot_commit"),
                 "merged_commit": node.get("merged_commit"),
                 "merge_state": node.get("merge_state", "not_required"),
+                "tests": node.get("tests", []),
+                "test_status": node.get("test_status", "not_required"),
+                "test_error": node.get("test_error"),
+                "test_results": [
+                    {
+                        "name": item.get("name"),
+                        "ok": item.get("ok"),
+                        "exit_code": item.get("exit_code"),
+                        "timed_out": item.get("timed_out"),
+                        "elapsed_s": item.get("elapsed_s"),
+                    }
+                    for item in node.get("test_results", [])
+                ],
                 "error": node.get("error"),
             }
             for node in graph.get("nodes", [])
