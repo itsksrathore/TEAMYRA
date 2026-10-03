@@ -82,3 +82,20 @@ This checklist is updated as implementation lands.
 - [x] Auto-update — electron-updater GitHub release channel wired with update status/check/install IPC plus tag-based release workflow metadata publishing.
 - [x] Docs/examples — Windows distribution architecture, build/release flow, and packaged runtime behavior documented.
 - [x] Open-source hardening — MIT license, contribution/security policy, provider capability boundaries, public release checklist, runtime dependency audit gate, and stable-tag signing/Authenticode enforcement.
+
+
+## Phase 8 — Normal ChatGPT Web Agent
+- [x] Inspect existing desktop/core/provider/MCP/orchestration architecture before changes.
+- [x] Add `ChatGPTWebProvider`, session manager, semantic automation adapter and workspace bridge.
+- [x] Embed normal ChatGPT in one lazy WebContentsView; no external Chrome/Edge window.
+- [x] Persist normal ChatGPT browser session in `persist:teamyra-chatgpt-profile`.
+- [x] Register `chatgpt-normal` in worker registry and queue desktop-backed jobs in the existing TEAMYRA job store.
+- [x] Reuse one normalized WorkspaceToolService for ChatGPT and MCP callers.
+- [x] Filesystem list/stat/read/search/create/write/patch/move/rename/delete.
+- [x] Terminal run + Git status/diff/log/add/commit/restore.
+- [x] Workspace sandbox, sensitive-root blocking, permission UI, auth token, audit log and bounded recovery backups.
+- [x] ChatGPT UI controls, workspace status, changed-files/diff view, guarded revert and file attachment.
+- [x] Dedicated worker conversation persistence and existing `job_message` session-resume path.
+- [x] First functional/security review and fixes.
+- [x] Second architecture/security review and fixes.
+- [ ] Live Windows ChatGPT account acceptance (requires an online desktop/user session; do not mark passed from CI alone).
