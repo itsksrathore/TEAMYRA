@@ -120,7 +120,10 @@ def cooldown_left(worker):
 # --- commands -------------------------------------------------------------------------------
 def codex_cmd(task, cwd, write, final_path, session_id=None):
     c = config().get("codex", {})
-    base = [str(NODE), str(CODEX_JS),
+    launch = codex_launch()
+    if not launch:
+        raise RuntimeError("Codex CLI not found. Install Codex or set TEAMYRA_CODEX / TEAMYRA_CODEX_JS.")
+    base = [*launch,
             "-c", f'model="{c.get("model", "gpt-6.1-sol")}"',
             "-c", f'model_reasoning_effort="{c.get("effort", "high")}"']
     if session_id:  # resume has no --approve-for-me / -C: pass the same settings as config
