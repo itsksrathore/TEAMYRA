@@ -30,6 +30,7 @@ class ChatGPTWebProvider {
     this.runtimeRoot = runtimeRoot;
     this.stateRoot = path.join(runtimeRoot, 'chatgpt');
     this.statusFile = path.join(this.stateRoot, 'status.json');
+    this.workerConversationFile = path.join(this.stateRoot, 'worker-conversation.json');
     this.sessionManager = new ChatGPTSessionManager();
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
@@ -216,6 +217,26 @@ class ChatGPTWebProvider {
     return this.automation.getCurrentConversation();
   }
 
+  loadWorkerConversation() {
+    try {
+      const data = JSON.parse(fs.readFileSync(this.workerConversationFile, 'utf8'));
+      return data && typeof data === 'object' ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  saveWorkerConversation(conversation) {
+    if (!conversation?.conversationId || !conversation?.url) return;
+    const temp = this.workerConversationFile + '.tmp-' + process.pid;
+    fs.writeFileSync(temp, JSON.stringify({
+      conversationId: conversation.conversationId,
+      url: conversation.url,
+      updatedAt: new Date().toISOString()
+    }, null, 2), 'utf8');
+    fs.renameSync(temp, this.workerConversationFile);
+  }
+
   async createConversation() {
     this.ensureView();
     await this.automation.newChat();
@@ -322,6 +343,15 @@ class ChatGPTWebProvider {
       const spec = JSON.parse(fs.readFileSync(path.join(jobDir, 'spec.json'), 'utf8'));
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
       await this.workspaceBridge.configure(spec.cwd, undefined);
+
+      const requestedConversation = spec.session_id
+        ? { conversationId: spec.session_id }
+        : this.loadWorkerConversation();
+      if (requestedConversation?.conversationId || requestedConversation?.url) {
+        await this.openConversation(requestedConversation.url || requestedConversation.conversationId);
+      } else {
+        await this.createConversation();
+      }
       this.writeJobMeta(jobDir, { state: 'running', started: Date.now() / 1000, runner_pid: null });
       this.appendJobEvent(jobDir, 'info', 'embedded ChatGPT worker started');
 
@@ -364,6 +394,7 @@ class ChatGPTWebProvider {
         const request = this.automation.parseToolRequest(reply.text);
         if (!request) {
           const conversation = await this.getCurrentConversation();
+          this.saveWorkerConversation(conversation);
           fs.writeFileSync(path.join(jobDir, 'final.txt'), reply.text || '', 'utf8');
           this.appendJobEvent(jobDir, 'message', reply.text || '');
           this.writeJobMeta(jobDir, {
