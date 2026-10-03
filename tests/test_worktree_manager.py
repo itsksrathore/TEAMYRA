@@ -351,5 +351,37 @@ class WorktreeManagerTests(unittest.TestCase):
             worktree_manager.discard(storage, created["id"], force=True)
 
 
+    def test_snapshot_commits_dirty_worktree_for_safe_integration(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "snapshot")
+            wt = Path(created["path"])
+            (wt / "app.txt").write_text("base\nagent change\n", encoding="utf-8")
+            (wt / "new.txt").write_text("new\n", encoding="utf-8")
+
+            result = worktree_manager.snapshot(storage, created["id"], "TEAMYRA graph snapshot")
+            self.assertTrue(result["committed"])
+            self.assertEqual(git(wt, "status", "--porcelain"), "")
+            self.assertEqual(git(wt, "log", "-1", "--pretty=%s"), "TEAMYRA graph snapshot")
+            self.assertEqual(len(worktree_manager.status(storage, created["id"])["commits"]), 1)
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+    def test_snapshot_is_noop_for_clean_worktree(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "snapshot-clean")
+
+            result = worktree_manager.snapshot(storage, created["id"])
+            self.assertFalse(result["committed"])
+            self.assertEqual(result["head"], created["head"])
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+
 if __name__ == "__main__":
     unittest.main()
