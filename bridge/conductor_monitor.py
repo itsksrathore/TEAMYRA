@@ -15,6 +15,7 @@ sys.path.insert(0, str(BRIDGE))
 
 import server
 import task_graph
+import test_policy
 
 
 TERMINAL_NODE_STATES = {"done", "failed", "cancelled", "blocked"}
@@ -70,6 +71,37 @@ def _cancel_active_jobs(graph):
         (server.JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
         cancelled += 1
     return cancelled
+
+
+def _run_node_tests(graph, node):
+    steps = node.get("tests") or []
+    if not steps:
+        node["test_status"] = "not_required"
+        node["test_error"] = None
+        node["test_results"] = []
+        return True
+
+    cwd = node.get("worktree_path") or graph["project_path"]
+    node["test_status"] = "running"
+    node["test_error"] = None
+    try:
+        result = test_policy.run_steps(steps, cwd)
+    except Exception as exc:
+        node["test_status"] = "failed"
+        node["test_error"] = f"test policy error: {exc}"
+        node["test_results"] = []
+        return False
+
+    node["test_results"] = result.get("steps") or []
+    if result.get("ok"):
+        node["test_status"] = "passed"
+        node["test_error"] = None
+        return True
+
+    node["test_status"] = "failed"
+    failed_step = result.get("failed_step") or "unknown"
+    node["test_error"] = f"test policy failed at {failed_step}"
+    return False
 
 
 def _integrate_worktree(graph, node):
@@ -140,14 +172,18 @@ def _resolve_active_nodes(graph):
         node["ended_at"] = time.time()
 
         if terminal_state == "done":
-            try:
-                _integrate_worktree(graph, node)
-                node["status"] = "done"
-                node["error"] = None
-            except Exception as exc:
+            if not _run_node_tests(graph, node):
                 node["status"] = "failed"
-                node["merge_state"] = "failed"
-                node["error"] = f"worktree integration failed: {exc}"
+                node["error"] = node.get("test_error") or "test policy failed"
+            else:
+                try:
+                    _integrate_worktree(graph, node)
+                    node["status"] = "done"
+                    node["error"] = None
+                except Exception as exc:
+                    node["status"] = "failed"
+                    node["merge_state"] = "failed"
+                    node["error"] = f"worktree integration failed: {exc}"
         elif terminal_state == "cancelled":
             node["status"] = "cancelled"
             node["error"] = result.get("reason")
