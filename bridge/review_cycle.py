@@ -33,12 +33,13 @@ def parse_decision(text):
     return matches[-1].group(1).upper() if matches else None
 
 
-def create(root, source_job_id, reviewer_worker="auto", max_rounds=2):
+def create(root, source_job_id, reviewer_worker="auto", max_rounds=2, allow_self_review=False):
     review_id = "review-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     state = {
         "id": review_id,
         "source_job_id": str(source_job_id),
         "reviewer_worker": str(reviewer_worker or "auto"),
+        "allow_self_review": bool(allow_self_review),
         "max_rounds": max(1, min(int(max_rounds), 5)),
         "round": 0,
         "state": "draft",
@@ -75,6 +76,7 @@ def summary(state):
         "source_job_id": state.get("source_job_id"),
         "implementation_job_id": state.get("implementation_job_id"),
         "reviewer_worker": state.get("reviewer_worker"),
+        "allow_self_review": state.get("allow_self_review", False),
         "max_rounds": state.get("max_rounds"),
         "round": state.get("round"),
         "state": state.get("state"),
