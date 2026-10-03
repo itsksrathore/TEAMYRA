@@ -8,7 +8,7 @@ reads compact results, sends follow-up messages and cancels them.
 import json, os, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from worker_registry import build_worker_registry
-from runtime_paths import codex_launch, agy_launch
+from runtime_paths import codex_launch, agy_launch, claude_launch
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -134,6 +134,26 @@ def codex_cmd(task, cwd, write, final_path, session_id=None):
     return base + ["exec", "--json", *mode, "-C", str(cwd), "-o", str(final_path), task]
 
 
+def claude_cmd(task, cwd, write, session_id=None):
+    c = config().get("claude", {})
+    launch = claude_launch()
+    if not launch:
+        raise RuntimeError("Claude Code CLI not found. Install Claude Code or set TEAMYRA_CLAUDE.")
+    permission_mode = c.get("permission_mode", "auto") if write else "plan"
+    cmd = [*launch, "-p", "--output-format", "stream-json", "--verbose",
+           "--permission-mode", permission_mode]
+    model = c.get("model")
+    effort = c.get("effort")
+    if model:
+        cmd += ["--model", str(model)]
+    if effort:
+        cmd += ["--effort", str(effort)]
+    if session_id:
+        cmd += ["--resume", session_id]
+    cmd.append(task)
+    return cmd
+
+
 def agy_cmd(task, cwd, write, timeout, session_id=None):
     a = config().get("antigravity", {})
     launch = agy_launch()
@@ -189,6 +209,12 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
         cmd = codex_cmd(task, cwd, write, final_path, session_id)
         env = {"CODEX_HOME": str(worker_info["home"])}
         resume_cmd = codex_cmd(RESUME_MESSAGE, cwd, write, final_path, "{SESSION}")
+    elif provider == "claude":
+        cmd = claude_cmd(task, cwd, write, session_id)
+        env = {}
+        if not worker_info.get("native"):
+            env["CLAUDE_CONFIG_DIR"] = str(worker_info["home"])
+        resume_cmd = claude_cmd(RESUME_MESSAGE, cwd, write, "{SESSION}")
     elif provider == "antigravity":
         cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
         resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
@@ -304,6 +330,16 @@ def worker_status():
                                env={"CODEX_HOME": str(info["home"])}, timeout=20)
                 text = (o + e).strip()
                 ready = rc == 0 and "not logged in" not in text.lower()
+            elif provider == "claude":
+                launch = claude_launch()
+                if not launch:
+                    raise RuntimeError("Claude Code CLI not found")
+                env = {}
+                if not info.get("native"):
+                    env["CLAUDE_CONFIG_DIR"] = str(info["home"])
+                rc, o, e = run([*launch, "auth", "status", "--json"], env=env, timeout=20)
+                text = (o + e).strip()
+                ready = rc == 0
             elif provider == "antigravity":
                 launch = agy_launch()
                 if not launch:
