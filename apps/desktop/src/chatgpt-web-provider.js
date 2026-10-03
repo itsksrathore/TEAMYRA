@@ -191,8 +191,10 @@ class ChatGPTWebProvider {
       url: status.url,
       detail: status.challenged
         ? 'ChatGPT requires user verification in the embedded view.'
-        : status.automationReady
-          ? 'Embedded ChatGPT session is active.'
+        : status.automationReady && !status.workspace?.available
+          ? 'Embedded ChatGPT session is active; select a workspace to enable worker routing.'
+          : status.automationReady
+            ? 'Embedded ChatGPT session is active.'
           : status.loginVisible
             ? 'ChatGPT sign-in is required in the embedded view.'
             : status.connected
@@ -350,8 +352,12 @@ class ChatGPTWebProvider {
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
       const workspaceState = await this.workspaceBridge.status();
       if (!workspaceState?.available) throw new Error('ChatGPT worker has no selected workspace');
-      const selected = path.resolve(workspaceState.workspace || '');
-      const requested = path.resolve(spec.cwd || '');
+      const canonical = value => {
+        const resolved = path.resolve(value || '');
+        return fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved);
+      };
+      const selected = canonical(workspaceState.workspace || '');
+      const requested = canonical(spec.cwd || '');
       const sameWorkspace = process.platform === 'win32'
         ? selected.toLowerCase() === requested.toLowerCase()
         : selected === requested;
