@@ -1,7 +1,9 @@
 /*
  * TEAMYRA glass desk.
- * Visual language intentionally follows the Nami Glass workbench (Apache-2.0)
- * while keeping TEAMYRA's own information architecture and implementation.
+ * Portions of this visual language are adapted from Nami
+ * Copyright 2026 Dainami Pte Ltd, licensed under Apache-2.0.
+ * See THIRD_PARTY_NOTICES.md and third_party/nami/LICENSE.
+ * TEAMYRA keeps its own information architecture and implementation.
  */
 
 :root {
