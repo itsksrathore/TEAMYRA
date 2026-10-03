@@ -109,7 +109,7 @@ Persisted per selected ChatGPT workspace:
 
 Terminal access is also off by default. Enabling destructive-without-confirmation requires an explicit typed UI acknowledgement. The automation tool loop always submits `confirm=false`.
 
-`git.restore` and filesystem deletion are confirmation-gated unless the user explicitly opted into the destructive policy. Shell/eval/destructive terminal commands always require per-command confirmation and therefore cannot be silently executed by the automated ChatGPT loop. Mutating Git commands are rejected through `terminal.run` and must use TEAMYRA's normalized Git tools. Drive formatting/system-management executables are blocked, and TEAMYRA-created commits use `--no-verify` so repository hooks are not executed implicitly.
+`git.restore` and filesystem deletion are confirmation-gated unless the user explicitly opted into the destructive policy. The automated ChatGPT terminal path is intentionally limited to version checks (for example `node --version`) and read-only Git inspection. Other terminal commands, including interpreters, build/package scripts, shells, eval and destructive commands, require explicit per-command confirmation and therefore cannot be silently executed by the automated ChatGPT loop. Mutating Git commands are rejected through `terminal.run` and must use TEAMYRA's normalized Git tools. Drive formatting/system-management executables are blocked, and TEAMYRA-created commits use `--no-verify` so repository hooks are not executed implicitly.
 
 ## Recoverability and audit
 
