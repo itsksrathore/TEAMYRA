@@ -128,6 +128,7 @@ class WorktreeManagerTests(unittest.TestCase):
             "worktree_list",
             "worktree_status",
             "worktree_diff",
+            "worktree_rebase",
             "worktree_merge",
             "worktree_discard",
         ):
@@ -282,6 +283,24 @@ class WorktreeManagerTests(unittest.TestCase):
             self.assertEqual(git(wt, "status", "--porcelain"), "")
             self.assertNotEqual(feature_head, original_head)
             worktree_manager.discard(storage, created["id"], force=True)
+
+
+    def test_rebase_requires_explicit_confirmation_across_surfaces(self):
+        with patch.object(server.worktree_manager, "rebase") as rebase:
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.tool_call("worktree_rebase", {
+                    "worktree_id": "wt-test",
+                    "confirm": False,
+                })
+            rebase.assert_not_called()
+
+        with patch.object(desktop_api.worktree_manager, "rebase") as rebase:
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                desktop_api.handle("worktree.rebase", {
+                    "worktree_id": "wt-test",
+                    "confirm": False,
+                })
+            rebase.assert_not_called()
 
 
 if __name__ == "__main__":
