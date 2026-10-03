@@ -121,6 +121,11 @@ class WorkspaceToolService:
         path = Path(str(workspace or "")).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             raise WorkspaceToolError("workspace must be an existing directory")
+        if path == Path(path.anchor).resolve() or path == Path.home().resolve():
+            raise PermissionError("workspace is too broad; select a project directory")
+        for blocked in self._sensitive_roots():
+            if path == blocked or _is_relative_to(path, blocked):
+                raise PermissionError("system or credential directories cannot be selected as workspaces")
         current = self._load()
         merged = dict(current["permissions"])
         if isinstance(permissions, dict):
@@ -154,7 +159,11 @@ class WorkspaceToolService:
     def _sensitive_roots(self):
         roots = []
         home = Path.home().resolve()
-        roots.extend([home / ".ssh", home / ".gnupg"])
+        roots.extend([
+            home / ".ssh", home / ".gnupg", home / ".aws", home / ".azure",
+            home / ".kube", home / ".docker", home / ".codex", home / ".claude",
+            home / ".gemini", home / ".config" / "gcloud",
+        ])
         for env_name in ("WINDIR", "SystemRoot"):
             value = os.environ.get(env_name)
             if value:
@@ -165,6 +174,7 @@ class WorkspaceToolService:
             roots.extend([
                 Path(appdata) / "Microsoft" / "Credentials",
                 Path(appdata) / "Microsoft" / "Protect",
+                Path(appdata) / "Mozilla" / "Firefox" / "Profiles",
             ])
         if local:
             roots.extend([
@@ -218,6 +228,23 @@ class WorkspaceToolService:
             record["error"] = str(error)[:1000]
         with self.audit_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _backup_file(self, path: Path, workspace: Path):
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+        if size > 10 * 1024 * 1024:
+            return None
+        relative = path.relative_to(workspace) if _is_relative_to(path, workspace) else Path(path.name)
+        safe = "__".join(relative.parts)
+        backup_root = self.root / "backups" / "workspace-tools"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        destination = backup_root / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}-{safe}"
+        shutil.copy2(path, destination)
+        return str(destination)
 
     def _atomic_text(self, path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,8 +394,9 @@ class WorkspaceToolService:
             content = str(args.get("content") or "")
             if len(content.encode("utf-8")) > 2 * 1024 * 1024:
                 raise WorkspaceToolError("write exceeds 2 MiB")
+            backup = self._backup_file(path, workspace)
             self._atomic_text(path, content)
-            return {"path": str(path), "bytes": len(content.encode("utf-8"))}
+            return {"path": str(path), "bytes": len(content.encode("utf-8")), "backup": backup}
 
         if tool == "filesystem.patch":
             path = self._path(args.get("path"), workspace, permissions, must_exist=True)
@@ -396,8 +424,9 @@ class WorkspaceToolService:
                     raise WorkspaceToolError("patch find text was not found")
                 count = item.get("count")
                 text = text.replace(old, new, int(count)) if count is not None else text.replace(old, new)
+            backup = self._backup_file(path, workspace)
             self._atomic_text(path, text)
-            return {"path": str(path), "bytes": len(text.encode("utf-8"))}
+            return {"path": str(path), "bytes": len(text.encode("utf-8")), "backup": backup}
 
         if tool in {"filesystem.move", "filesystem.rename"}:
             src = self._path(args.get("path"), workspace, permissions, must_exist=True)
@@ -416,13 +445,14 @@ class WorkspaceToolService:
             path = self._path(args.get("path"), workspace, permissions, must_exist=True)
             if path == workspace:
                 raise PermissionError("deleting the workspace root is blocked")
+            backup = self._backup_file(path, workspace)
             if path.is_dir():
                 if not args.get("recursive"):
                     raise WorkspaceToolError("directory deletion requires recursive=true")
                 shutil.rmtree(path)
             else:
                 path.unlink()
-            return {"deleted": str(path)}
+            return {"deleted": str(path), "backup": backup}
 
         if tool == "terminal.run":
             argv = args.get("argv")
