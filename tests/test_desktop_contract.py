@@ -34,6 +34,7 @@ class DesktopContractTests(unittest.TestCase):
             "chatgptStatus": "teamyra:chatgpt-status",
             "openChatgpt": "teamyra:chatgpt-open",
             "reloadChatgpt": "teamyra:chatgpt-reload",
+            "reconnectChatgpt": "teamyra:chatgpt-reconnect",
             "newChatgptChat": "teamyra:chatgpt-new-chat",
             "stopChatgpt": "teamyra:chatgpt-stop",
             "setChatgptBounds": "teamyra:chatgpt-bounds",
