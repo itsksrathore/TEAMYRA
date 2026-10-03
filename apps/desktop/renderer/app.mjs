@@ -65,9 +65,13 @@ function renderProviders(providers) {
       for (const profile of provider.profiles) {
         const row = document.createElement('div');
         row.className = 'account' + (profile.signedIn ? ' on' : '');
-        row.innerHTML = '<span class="dot"></span><b></b><span></span>';
+        row.innerHTML = '<span class="dot"></span><b></b><span class="account-kind"></span><button class="account-open">Open</button>';
         row.querySelector('b').textContent = profile.name;
-        row.querySelector('span').textContent = profile.kind;
+        row.querySelector('.account-kind').textContent = profile.kind;
+        row.querySelector('.account-open').addEventListener('click', () => {
+          openTerminal({ providerId: provider.id, profileId: profile.id, label: provider.name + ' · ' + profile.name })
+            .catch(error => alert('Terminal error: ' + String(error)));
+        });
         accounts.appendChild(row);
       }
     }
@@ -224,7 +228,7 @@ function ensureTerminalView() {
   terminalResizeObserver.observe(host);
 }
 
-async function openTerminal() {
+async function openTerminal(options = {}) {
   const panel = document.querySelector('#terminalPanel');
   panel.hidden = false;
   ensureTerminalView();
@@ -237,7 +241,11 @@ async function openTerminal() {
   const job = selectedJobData();
   terminal.clear();
   terminal.write('\x1b[90mStarting TEAMYRA terminal…\x1b[0m\r\n');
-  const result = await window.teamyra.openTerminal({ cwd: job?.cwd || '' });
+  const result = await window.teamyra.openTerminal({
+    cwd: job?.cwd || '',
+    providerId: options.providerId || '',
+    profileId: options.profileId || 'native'
+  });
   if (!result.ok) {
     terminal.write('\x1b[31mPTY unavailable. Install desktop dependencies and restart TEAMYRA.\x1b[0m\r\n');
     return;
@@ -245,7 +253,7 @@ async function openTerminal() {
 
   terminalSessionId = result.id;
   document.querySelector('#terminalLabel').textContent =
-    'Terminal · ' + (job?.label || 'TEAMYRA') + ' · ' + result.cwd;
+    (options.label || ('Terminal · ' + (job?.label || 'TEAMYRA'))) + ' · ' + result.cwd;
   try {
     fitAddon.fit();
     window.teamyra.resizeTerminal(terminalSessionId, terminal.cols, terminal.rows);
@@ -273,6 +281,6 @@ window.teamyra.onTerminalExit(({ id, exitCode }) => {
 });
 
 document.querySelector('#openTerminal').addEventListener('click', () => {
-  openTerminal().catch(error => alert('Terminal error: ' + String(error)));
+  openTerminal({}).catch(error => alert('Terminal error: ' + String(error)));
 });
 document.querySelector('#closeTerminal').addEventListener('click', closeTerminal);
