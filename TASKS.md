@@ -11,13 +11,13 @@ This checklist is updated as implementation lands.
 - [x] Execution board committed.
 
 ## Phase 1 — Desktop Control Desk
-- [ ] Desktop app shell.
-- [ ] Provider adapter registry.
-- [ ] Installed CLI detection.
-- [ ] Existing local login detection.
-- [ ] Agent/account cards.
+- [x] Desktop app shell.
+- [x] Provider adapter registry.
+- [x] Installed CLI detection.
+- [x] Existing local login detection.
+- [x] Agent/account cards.
 - [ ] Add Account flow.
-- [ ] Live jobs/events.
+- [x] Live jobs list/status.\n- [ ] Live job event/transcript streaming.
 - [ ] Embedded terminals.
 
 ## Phase 2 — Multi-account Engine
