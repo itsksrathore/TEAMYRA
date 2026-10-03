@@ -152,6 +152,45 @@ class WorkspaceToolTests(unittest.TestCase):
             log = service.execute("git.log", {"limit": 2}, token=token)
             self.assertIn("update", log["stdout"])
 
+    def test_git_diff_and_commit_do_not_expose_staged_sensitive_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+            (workspace / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (workspace / ".env").write_text("TOP_SECRET=value\n", encoding="utf-8")
+            subprocess.run(["git", "add", "safe.txt", ".env"], cwd=workspace, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True)
+            (workspace / "safe.txt").write_text("safe changed\n", encoding="utf-8")
+            (workspace / ".env").write_text("TOP_SECRET=changed-secret\n", encoding="utf-8")
+
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+            diff = service.execute("git.diff", {}, token=token)
+            self.assertIn("safe changed", diff["stdout"])
+            self.assertNotIn("changed-secret", diff["stdout"])
+            self.assertIn(".env", diff["blocked_paths"])
+
+            subprocess.run(["git", "add", ".env"], cwd=workspace, check=True)
+            with self.assertRaises(PermissionError):
+                service.execute("git.commit", {"message": "should block"}, token=token)
+
+    def test_terminal_git_bypass_commands_are_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            service = self.make_service(root, workspace)
+            service.configure(workspace, {"terminal": True}, token="x" * 64)
+            with self.assertRaises(PermissionError):
+                service.execute(
+                    "terminal.run", {"argv": ["git", "log", "-p"]}, token="x" * 64
+                )
+
     def test_shell_wrappers_require_explicit_confirmation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
@@ -375,6 +414,33 @@ class WorkspaceToolTests(unittest.TestCase):
             result = service.execute("filesystem.search", {"query": "TOP-SECRET-SEARCH-TOKEN"}, token="x" * 64)
             self.assertEqual(result["results"], [])
 
+    def test_teamyra_desktop_user_data_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "runtime"
+            workspace = base / "project"
+            user_data = base / "desktop-user-data"
+            workspace.mkdir()
+            user_data.mkdir()
+            (user_data / "Cookies").write_text("session", encoding="utf-8")
+            old = os.environ.get("TEAMYRA_DESKTOP_USER_DATA")
+            os.environ["TEAMYRA_DESKTOP_USER_DATA"] = str(user_data)
+            try:
+                service = self.make_service(root, workspace)
+                with self.assertRaises(PermissionError):
+                    service.execute(
+                        "filesystem.read",
+                        {"path": str(user_data / "Cookies")},
+                        token="x" * 64,
+                    )
+                with self.assertRaises(PermissionError):
+                    service.configure(user_data, token="x" * 64)
+            finally:
+                if old is None:
+                    os.environ.pop("TEAMYRA_DESKTOP_USER_DATA", None)
+                else:
+                    os.environ["TEAMYRA_DESKTOP_USER_DATA"] = old
+
     def test_git_internal_files_are_hidden_from_filesystem_tools(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
@@ -421,6 +487,20 @@ class WorkspaceToolTests(unittest.TestCase):
 
             added = service.execute("git.add", {"paths": ["safe.txt"]}, token=token)
             self.assertEqual(added["exit_code"], 0)
+
+    def test_git_add_blocks_repository_clean_filters(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            (workspace / ".gitattributes").write_text("filtered.txt filter=unsafe\n", encoding="utf-8")
+            (workspace / "filtered.txt").write_text("payload\n", encoding="utf-8")
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+
+            with self.assertRaisesRegex(PermissionError, "clean filters"):
+                service.execute("git.add", {"paths": ["filtered.txt"]}, token=token)
 
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:

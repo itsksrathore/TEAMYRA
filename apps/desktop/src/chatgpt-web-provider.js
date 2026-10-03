@@ -29,6 +29,10 @@ function safeHttps(url) {
   }
 }
 
+function safePopupUrl(url) {
+  return url === 'about:blank' || safeHttps(url);
+}
+
 class ChatGPTWebProvider {
   constructor({ window, runtimeRoot }) {
     this.window = window;
@@ -39,6 +43,7 @@ class ChatGPTWebProvider {
     this.sessionManager = new ChatGPTSessionManager();
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
+    this.popupView = null;
     this.automation = null;
     this.interactionCssKey = null;
     this.activeJobDir = null;
@@ -85,10 +90,11 @@ class ChatGPTWebProvider {
     this.automation = new ChatGPTAutomationAdapter(this.view.webContents);
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
-      if (safeHttps(url)) {
-        setImmediate(() => this.view?.webContents.loadURL(url).catch(() => {}));
-      }
-      return { action: 'deny' };
+      if (!safePopupUrl(url)) return { action: 'deny' };
+      return {
+        action: 'allow',
+        createWindow: options => this.createEmbeddedPopup(options)
+      };
     });
     const guardTopLevelNavigation = event => {
       if (!safeHttps(event.url)) event.preventDefault();
@@ -113,6 +119,60 @@ class ChatGPTWebProvider {
     return this.view;
   }
 
+  createEmbeddedPopup(options = {}) {
+    this.closeEmbeddedPopup();
+    const ses = this.sessionManager.getSession();
+    const popup = new WebContentsView({
+      webPreferences: {
+        ...(options.webPreferences || {}),
+        session: ses,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        devTools: true
+      }
+    });
+    this.popupView = popup;
+    popup.setBackgroundColor('#0b0e14');
+    popup.setBounds(this.bounds);
+    popup.setVisible(this.visible);
+    this.window.contentView.addChildView(popup);
+
+    const guardTopLevelNavigation = event => {
+      if (!safeHttps(event.url)) event.preventDefault();
+    };
+    popup.webContents.on('will-navigate', guardTopLevelNavigation);
+    popup.webContents.on('will-redirect', guardTopLevelNavigation);
+    popup.webContents.setWindowOpenHandler(({ url }) => {
+      if (safePopupUrl(url)) {
+        setImmediate(() => {
+          if (this.popupView === popup && !popup.webContents.isDestroyed()) {
+            popup.webContents.loadURL(url).catch(() => {});
+          }
+        });
+      }
+      return { action: 'deny' };
+    });
+    popup.webContents.on('destroyed', () => {
+      if (this.popupView === popup) this.popupView = null;
+      this.refreshStatus().catch(() => {});
+    });
+    popup.webContents.on('render-process-gone', () => {
+      if (this.popupView === popup) this.closeEmbeddedPopup();
+    });
+    return popup.webContents;
+  }
+
+  closeEmbeddedPopup() {
+    const popup = this.popupView;
+    this.popupView = null;
+    if (!popup) return;
+    try { this.window.contentView.removeChildView(popup); } catch {}
+    try {
+      if (!popup.webContents.isDestroyed()) popup.webContents.close();
+    } catch {}
+  }
+
   async open() {
     const view = this.ensureView();
     this.visible = true;
@@ -129,6 +189,7 @@ class ChatGPTWebProvider {
   close() {
     this.visible = false;
     if (this.view && !this.view.webContents.isDestroyed()) this.view.setVisible(false);
+    if (this.popupView && !this.popupView.webContents.isDestroyed()) this.popupView.setVisible(false);
     return this.getStatus();
   }
 
@@ -176,6 +237,10 @@ class ChatGPTWebProvider {
       this.view.setVisible(this.visible);
       if (this.visible) this.view.setBounds(this.bounds);
     }
+    if (this.popupView && !this.popupView.webContents.isDestroyed()) {
+      this.popupView.setVisible(this.visible);
+      if (this.visible) this.popupView.setBounds(this.bounds);
+    }
   }
 
   setBounds(bounds = {}) {
@@ -187,6 +252,7 @@ class ChatGPTWebProvider {
     };
     this.bounds = next;
     if (this.view && !this.view.webContents.isDestroyed() && this.visible) this.view.setBounds(next);
+    if (this.popupView && !this.popupView.webContents.isDestroyed() && this.visible) this.popupView.setBounds(next);
     return next;
   }
 
@@ -538,6 +604,7 @@ class ChatGPTWebProvider {
     clearInterval(this.heartbeatTimer);
     this.jobTimer = null;
     this.heartbeatTimer = null;
+    this.closeEmbeddedPopup();
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.window.contentView.removeChildView(this.view);
       this.view.webContents.close();

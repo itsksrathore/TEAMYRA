@@ -6,8 +6,10 @@ const { callCore } = require('./core-api');
 
 class WorkspaceBridge {
   constructor() {
-    this.root = path.join(app.getPath('userData'), 'security');
+    this.userData = app.getPath('userData');
+    this.root = path.join(this.userData, 'security');
     this.tokenFile = path.join(this.root, 'local-agent.token');
+    process.env.TEAMYRA_DESKTOP_USER_DATA = this.userData;
     process.env.TEAMYRA_LOCAL_AGENT_TOKEN_FILE = this.tokenFile;
     this.token = this.ensureToken();
   }

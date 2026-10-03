@@ -201,6 +201,9 @@ class WorkspaceToolService:
         token_file = os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN_FILE")
         if token_file:
             roots.append(Path(token_file).expanduser().resolve().parent)
+        desktop_user_data = os.environ.get("TEAMYRA_DESKTOP_USER_DATA")
+        if desktop_user_data:
+            roots.append(Path(desktop_user_data).expanduser().resolve())
         return [p.resolve() for p in roots]
 
     def _sensitive_name(self, path: Path):
@@ -286,6 +289,21 @@ class WorkspaceToolService:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(destination))
         return str(destination)
+
+    def _scrubbed_env(self):
+        secret_markers = (
+            "TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY",
+            "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL", "AUTH", "COOKIE", "SESSION",
+        )
+        blocked_exact = {
+            "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_ASKPASS", "SSH_ASKPASS",
+            "GIT_SSH_COMMAND", "TEAMYRA_LOCAL_AGENT_TOKEN_FILE",
+        }
+        return {
+            key: value for key, value in os.environ.items()
+            if key not in blocked_exact
+            and not any(marker in key.upper() for marker in secret_markers)
+        }
 
     def _atomic_text(self, path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -543,17 +561,25 @@ class WorkspaceToolService:
                 or ("branch" in git_args and "-d" in git_args)
                 or ("branch" in git_args and "-D" in argv[1:])
             )
+            safe_terminal_git = False
             if exe in {"git", "git.exe"}:
                 subcommand = argv[1].lower() if len(argv) > 1 else ""
-                if subcommand not in {"status", "diff", "log", "show", "rev-parse"}:
-                    raise PermissionError("mutating Git commands must use TEAMYRA git tools")
+                tail = argv[2:]
+                if subcommand == "status":
+                    allowed_status = {
+                        "--short", "-s", "--branch", "-b", "--porcelain",
+                        "--porcelain=v1", "--untracked-files=no", "--untracked-files=normal",
+                    }
+                    safe_terminal_git = all(item.lower() in allowed_status for item in tail)
+                elif subcommand == "rev-parse":
+                    safe_terminal_git = tail in (["HEAD"], ["--show-toplevel"], ["--abbrev-ref", "HEAD"])
+                if not safe_terminal_git:
+                    raise PermissionError("terminal Git inspection is limited to status/rev-parse; use TEAMYRA git tools")
             version_only = (
                 (exe in {"node", "node.exe", "npm", "npm.cmd"} and argv[1:] in (["--version"], ["-v"]))
                 or (exe in {"python", "python.exe", "python3"} and argv[1:] in (["--version"], ["-V"]))
             )
-            read_only_git = exe in {"git", "git.exe"} and bool(argv[1:]) and argv[1].lower() in {
-                "status", "diff", "log", "show", "rev-parse"
-            }
+            read_only_git = exe in {"git", "git.exe"} and safe_terminal_git
             sensitive_command = (
                 exe in SHELL_EXECUTABLES
                 or exe in DESTRUCTIVE_EXECUTABLES
@@ -578,11 +604,7 @@ class WorkspaceToolService:
                 if maybe.is_absolute():
                     self._path(str(maybe), workspace, permissions, must_exist=False)
             timeout = max(1, min(int(args.get("timeout_seconds", 60)), 120))
-            terminal_env = {
-                key: value for key, value in os.environ.items()
-                if key != "TEAMYRA_LOCAL_AGENT_TOKEN_FILE"
-                and not any(marker in key.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
-            }
+            terminal_env = self._scrubbed_env()
             cp = subprocess.run(
                 argv,
                 cwd=str(cwd),
@@ -610,36 +632,114 @@ class WorkspaceToolService:
         raise WorkspaceToolError(f"unsupported workspace tool: {tool}")
 
     def _git(self, tool, args, workspace, permissions, confirm):
-        base = ["git", "-C", str(workspace)]
+        hooks_dir = self.root / "backups" / "git-empty-hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        base = [
+            "git",
+            "-c", "core.fsmonitor=false",
+            "-c", "commit.gpgSign=false",
+            "-c", f"core.hooksPath={hooks_dir}",
+            "-C", str(workspace),
+        ]
+        git_env = self._scrubbed_env()
+
+        def run_git(argv, timeout=60):
+            return subprocess.run(
+                argv,
+                cwd=str(workspace),
+                env=git_env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+
+        def changed_paths(staged=False):
+            argv = [*base, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv"]
+            if staged:
+                argv.append("--cached")
+            argv.append("--")
+            cp = run_git(argv)
+            if cp.returncode != 0:
+                raise WorkspaceToolError((cp.stderr or cp.stdout or "git diff name scan failed").strip())
+            names = [item for item in cp.stdout.split("\x00") if item]
+            safe, blocked = [], []
+            for raw in names:
+                try:
+                    path = self._path(raw, workspace, permissions, must_exist=False)
+                    safe.append(os.path.relpath(path, workspace))
+                except PermissionError:
+                    blocked.append(raw)
+            return safe, blocked
+
         if tool == "git.status":
             argv = [*base, "status", "--porcelain=v1", "--branch"]
+            blocked_paths = []
         elif tool == "git.diff":
-            argv = [*base, "diff"]
-            if args.get("staged"):
+            blocked_paths = []
+            argv = [*base, "diff", "--no-ext-diff", "--no-textconv"]
+            staged = bool(args.get("staged"))
+            if staged:
                 argv.append("--cached")
             if args.get("path"):
                 path = self._path(args["path"], workspace, permissions, must_exist=False)
-                argv.extend(["--", os.path.relpath(path, workspace)])
+                safe_paths = [os.path.relpath(path, workspace)]
+            else:
+                safe_paths, blocked_paths = changed_paths(staged)
+            if not safe_paths:
+                return {
+                    "argv": argv[len(base):],
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "blocked_paths": blocked_paths,
+                }
+            argv.extend(["--", *safe_paths])
         elif tool == "git.log":
+            blocked_paths = []
             limit = max(1, min(int(args.get("limit", 20)), 100))
             argv = [*base, "log", f"-{limit}", "--date=iso-strict", "--pretty=format:%h%x09%ad%x09%an%x09%s"]
         elif tool == "git.add":
-            paths = args.get("paths") or ["."]
-            if not isinstance(paths, list) or len(paths) > 200:
-                raise WorkspaceToolError("paths must be a list")
+            blocked_paths = []
+            paths = args.get("paths")
+            if not isinstance(paths, list) or not paths or len(paths) > 200:
+                raise WorkspaceToolError("git.add requires a non-empty explicit file path list")
             rel = []
             for raw in paths:
                 path = self._path(raw, workspace, permissions, must_exist=False)
                 if path.exists() and path.is_dir():
                     raise PermissionError("git.add requires explicit file paths; directory-wide staging is blocked")
                 rel.append(os.path.relpath(path, workspace))
+            attr = run_git([*base, "check-attr", "-z", "filter", "--", *rel])
+            if attr.returncode != 0:
+                raise WorkspaceToolError((attr.stderr or attr.stdout or "git attribute check failed").strip())
+            fields = attr.stdout.split("\x00")
+            for index in range(0, max(0, len(fields) - 2), 3):
+                file_name, attribute, value = fields[index:index + 3]
+                if attribute == "filter" and value not in {"", "unspecified", "unset"}:
+                    raise PermissionError(
+                        f"git.add blocked for {file_name}: repository clean filters are not executed by TEAMYRA"
+                    )
             argv = [*base, "add", "--", *rel]
         elif tool == "git.commit":
+            blocked_paths = []
             message = str(args.get("message") or "").strip()
             if not message or len(message) > 500:
                 raise WorkspaceToolError("commit message is required and must be <= 500 characters")
+            staged_paths, blocked_paths = changed_paths(True)
+            if blocked_paths:
+                raise PermissionError(
+                    "commit includes credential-like or blocked staged paths; unstage them before TEAMYRA commit"
+                )
+            if not staged_paths:
+                raise WorkspaceToolError("no safe staged changes to commit")
             argv = [*base, "commit", "--no-verify", "-m", message]
         elif tool == "git.restore":
+            blocked_paths = []
             paths = args.get("paths") or ["."]
             if not isinstance(paths, list) or len(paths) > 200:
                 raise WorkspaceToolError("paths must be a list")
@@ -656,21 +756,12 @@ class WorkspaceToolService:
         else:
             raise WorkspaceToolError(f"unsupported git tool: {tool}")
 
-        cp = subprocess.run(
-            argv,
-            cwd=str(workspace),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            shell=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        cp = run_git(argv)
         return {
-            "argv": argv[2:],
+            "argv": argv[len(base):],
             "exit_code": cp.returncode,
             "stdout": (cp.stdout or "")[:500000],
             "stderr": (cp.stderr or "")[:200000],
+            "blocked_paths": blocked_paths,
         }
+
