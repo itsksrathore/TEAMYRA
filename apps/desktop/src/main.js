@@ -420,10 +420,14 @@ ipcMain.handle('teamyra:chatgpt-workspace-configure', (_event, workspace, permis
 });
 ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow() || undefined, {
+  const dialogOptions = {
     title: 'Select ChatGPT workspace',
     properties: ['openDirectory', 'createDirectory']
-  });
+  };
+  const focused = BrowserWindow.getFocusedWindow();
+  const result = focused
+    ? await dialog.showOpenDialog(focused, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
   if (result.canceled || !result.filePaths[0]) return { cancelled: true };
   let current = {};
   try { current = await chatgptProvider.workspaceBridge.status(); } catch {}
