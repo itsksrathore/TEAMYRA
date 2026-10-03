@@ -17,7 +17,10 @@ class WorkerRegistryTests(unittest.TestCase):
             workers = build_worker_registry(root, home=root / "home")
             self.assertIn("antigravity", workers)
             self.assertIn("codex1", workers)
+            self.assertIn("chatgpt-normal", workers)
             self.assertEqual(workers["codex1"]["provider"], "codex")
+            self.assertEqual(workers["chatgpt-normal"]["provider"], "chatgpt-web")
+            self.assertEqual(workers["chatgpt-normal"]["execution"], "desktop-web")
 
     def test_legacy_codex2_is_discovered(self):
         with tempfile.TemporaryDirectory() as td:
