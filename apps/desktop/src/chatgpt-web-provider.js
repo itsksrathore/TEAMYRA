@@ -29,6 +29,10 @@ function safeHttps(url) {
   }
 }
 
+function safePopupUrl(url) {
+  return url === 'about:blank' || safeHttps(url);
+}
+
 class ChatGPTWebProvider {
   constructor({ window, runtimeRoot }) {
     this.window = window;
@@ -86,7 +90,7 @@ class ChatGPTWebProvider {
     this.automation = new ChatGPTAutomationAdapter(this.view.webContents);
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
-      if (!safeHttps(url)) return { action: 'deny' };
+      if (!safePopupUrl(url)) return { action: 'deny' };
       return {
         action: 'allow',
         createWindow: options => this.createEmbeddedPopup(options)
@@ -140,7 +144,7 @@ class ChatGPTWebProvider {
     popup.webContents.on('will-navigate', guardTopLevelNavigation);
     popup.webContents.on('will-redirect', guardTopLevelNavigation);
     popup.webContents.setWindowOpenHandler(({ url }) => {
-      if (safeHttps(url)) {
+      if (safePopupUrl(url)) {
         setImmediate(() => {
           if (this.popupView === popup && !popup.webContents.isDestroyed()) {
             popup.webContents.loadURL(url).catch(() => {});
