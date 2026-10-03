@@ -1,3 +1,8 @@
+let selectedJob = null;
+let transcriptOffset = 0;
+let transcriptTimer = null;
+let currentJobs = [];
+
 const providersEl = document.querySelector('#providers');
 const jobsEl = document.querySelector('#jobs');
 const providerTpl = document.querySelector('#providerTpl');
@@ -68,18 +73,59 @@ function renderProviders(providers) {
 }
 
 function renderJobs(jobs) {
+  currentJobs = jobs;
   if (!jobs.length) {
     jobsEl.innerHTML = '<div class="empty">No TEAMYRA jobs found on this machine yet.</div>';
     return;
   }
   jobsEl.innerHTML = jobs.map(job => `
-    <div class="job-row">
+    <div class="job-row ${selectedJob === job.id ? 'selected' : ''}" data-job-id="${escapeHtml(job.id)}">
       <div><b>${escapeHtml(job.label)}</b><br><small>${escapeHtml(job.cwd)}</small></div>
       <span>${escapeHtml(job.worker)}</span>
       <span class="state ${escapeHtml(job.state)}">${escapeHtml(job.state)}</span>
       <small>${escapeHtml(job.lastEvent || job.reason || job.branch || '')}</small>
     </div>
   `).join('');
+
+  jobsEl.querySelectorAll('.job-row').forEach(row => {
+    row.addEventListener('click', () => selectJob(row.dataset.jobId));
+  });
+}
+
+async function pumpTranscript(reset = false) {
+  if (!selectedJob) return;
+  const pre = document.querySelector('#transcript');
+  if (reset) {
+    transcriptOffset = 0;
+    pre.textContent = '';
+  }
+  const result = await window.teamyra.transcript(selectedJob, transcriptOffset);
+  if (result.text) {
+    const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 32;
+    pre.textContent += result.text;
+    transcriptOffset = result.next;
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function selectJob(jobId) {
+  selectedJob = jobId;
+  transcriptOffset = 0;
+  const job = currentJobs.find(item => item.id === jobId);
+  if (!job) return;
+
+  document.querySelector('#detailTitle').textContent = job.label;
+  const state = document.querySelector('#detailState');
+  state.textContent = job.state;
+  state.className = 'detail-state ' + job.state;
+  document.querySelector('#detailMeta').textContent =
+    [job.worker, job.branch || 'no branch', job.cwd].filter(Boolean).join(' · ');
+
+  renderJobs(currentJobs);
+  await pumpTranscript(true);
+
+  clearInterval(transcriptTimer);
+  transcriptTimer = setInterval(() => pumpTranscript(false).catch(() => {}), 1500);
 }
 
 async function refresh() {
@@ -90,6 +136,15 @@ async function refresh() {
 
   renderProviders(providers);
   renderJobs(jobs);
+  if (selectedJob && !jobs.some(job => job.id === selectedJob)) {
+    selectedJob = null;
+    transcriptOffset = 0;
+    clearInterval(transcriptTimer);
+    document.querySelector('#detailTitle').textContent = 'Select a task';
+    document.querySelector('#detailState').textContent = '—';
+    document.querySelector('#detailMeta').textContent = 'Click a task to inspect its live transcript.';
+    document.querySelector('#transcript').textContent = 'No task selected.';
+  }
 
   document.querySelector('#mAgents').textContent = providers.filter(x => x.installed).length;
   document.querySelector('#mAccounts').textContent = providers.reduce((n, x) => n + x.profiles.filter(p => p.signedIn).length, 0);
