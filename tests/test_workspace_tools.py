@@ -107,6 +107,7 @@ class WorkspaceToolTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True)
             service = self.make_service(root, workspace)
             token = "x" * 64
+            service.configure(workspace, {"terminal": True}, token=token)
 
             terminal = service.execute("terminal.run", {"argv": ["git", "status", "--short"]}, token=token)
             self.assertEqual(terminal["exit_code"], 0)
@@ -134,6 +135,7 @@ class WorkspaceToolTests(unittest.TestCase):
             workspace = Path(td) / "project"
             workspace.mkdir()
             service = self.make_service(root, workspace)
+            service.configure(workspace, {"terminal": True}, token="x" * 64)
             shell = "cmd.exe" if os.name == "nt" else "sh"
             argv = [shell, "/c", "echo ok"] if os.name == "nt" else [shell, "-c", "echo ok"]
             with self.assertRaises(PermissionError):
@@ -204,6 +206,70 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertEqual(result["exit_code"], 0)
             self.assertNotIn("do-not-leak", result["stdout"])
             self.assertNotIn("security", result["stdout"])
+
+    def test_explicit_workspace_execution_does_not_change_chatgpt_selection(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            runtime = base / "runtime"
+            selected = base / "selected"
+            other = base / "other"
+            selected.mkdir()
+            other.mkdir()
+            service = self.make_service(runtime, selected)
+
+            result = service.execute_in_workspace(
+                other, "filesystem.create", {"path": "shared.txt", "content": "ok"}, trusted=True,
+                actor="teamyra-mcp:test",
+            )
+            self.assertTrue(Path(result["path"]).exists())
+            status = service.status(token="x" * 64)
+            self.assertEqual(Path(status["workspace"]), selected.resolve())
+
+    def test_outside_workspace_flag_cannot_disable_sandbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "runtime"
+            workspace = base / "project"
+            outside = base / "outside.txt"
+            workspace.mkdir()
+            outside.write_text("secret", encoding="utf-8")
+            service = self.make_service(root, workspace)
+            service.configure(workspace, {"outside_workspace": True}, token="x" * 64)
+            with self.assertRaises(PermissionError):
+                service.execute("filesystem.read", {"path": str(outside)}, token="x" * 64)
+
+    def test_patch_preserves_crlf_bytes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            target = workspace / "crlf.txt"
+            target.write_bytes(b"one\r\ntwo\r\n")
+            service = self.make_service(root, workspace)
+            service.execute("filesystem.patch", {
+                "path": "crlf.txt",
+                "replacements": [{"find": "two", "replace": "three", "expected": 1}],
+            }, token="x" * 64)
+            self.assertEqual(target.read_bytes(), b"one\r\nthree\r\n")
+
+    def test_search_does_not_follow_symlink_outside_workspace(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink unsupported")
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "runtime"
+            workspace = base / "project"
+            workspace.mkdir()
+            outside = base / "outside.txt"
+            outside.write_text("TOP-SECRET-SEARCH-TOKEN", encoding="utf-8")
+            link = workspace / "linked.txt"
+            try:
+                os.symlink(outside, link)
+            except OSError:
+                self.skipTest("symlink creation not permitted")
+            service = self.make_service(root, workspace)
+            result = service.execute("filesystem.search", {"query": "TOP-SECRET-SEARCH-TOKEN"}, token="x" * 64)
+            self.assertEqual(result["results"], [])
 
     def test_authentication_and_audit_log(self):
         with tempfile.TemporaryDirectory() as td:
