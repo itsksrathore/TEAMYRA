@@ -583,7 +583,9 @@ TOOLS = [
          "worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
          "label": {"type": "string", "description": "short name shown in lists and the dashboard"},
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
-         "write": {"type": "boolean", "default": True}},
+         "write": {"type": "boolean", "default": True},
+         "auto_failover": {"type": "boolean", "description": "Automatically reassign eligible provider/worker failures. Defaults on when worker=auto."},
+         "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5}},
          "required": ["project_path", "task"], "additionalProperties": False}},
     {"name": "job_status", "description": "Compact status of one job, or of the 15 most recent jobs when job_id is omitted.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "additionalProperties": False}},
@@ -591,7 +593,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"},
                      "since": {"type": "integer", "default": 0}, "limit": {"type": "integer", "default": 40}},
                      "required": ["job_id"], "additionalProperties": False}},
-    {"name": "job_result", "description": "Final message (<=6000 chars), commits since the job started, git status and diffstat of the job's folder, denied actions and stderr tail on failure.",
+    {"name": "job_result", "description": "Final result of the terminal job in a failover chain, with chain lineage when reassignment occurred.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
+    {"name": "job_chain", "description": "Inspect root/child lineage for automatic failover and the current terminal job.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
     {"name": "job_wait", "description": "Block until all (or any) of the jobs end, or timeout_seconds pass (max 3000; progress is reported every minute).",
      "inputSchema": {"type": "object", "properties": {"job_ids": {"type": "array", "items": {"type": "string"}},
@@ -611,23 +615,32 @@ TOOLS = [
     {"name": "run_ai_worker", "description": "Compatibility: start_task, then wait up to timeout_seconds. If the job is still running, returns its job_id instead of stopping it.",
      "inputSchema": {"type": "object", "properties": {"worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
-                     "write": {"type": "boolean", "default": True}},
+                     "write": {"type": "boolean", "default": True},
+                     "auto_failover": {"type": "boolean", "description": "Defaults on when worker=auto."},
+                     "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5}},
                      "required": ["task", "project_path"], "additionalProperties": False}},
     {"name": "run_ai_parallel", "description": "Start up to three independent tasks, each in a new git worktree and branch under D:/AI-Orchestrator/worktrees, and return their job_ids (non-blocking).",
      "inputSchema": {"type": "object", "properties": {"project_path": {"type": "string"},
                      "tasks": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "properties": {
                          "task": {"type": "string"}, "worker": W_ENUM, "label": {"type": "string"}},
                          "required": ["task"], "additionalProperties": False}},
-                     "timeout_minutes": {"type": "integer", "default": 90}, "write": {"type": "boolean", "default": True}},
+                     "timeout_minutes": {"type": "integer", "default": 90}, "write": {"type": "boolean", "default": True},
+                     "auto_failover": {"type": "boolean", "default": True},
+                     "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5}},
                      "required": ["tasks", "project_path"], "additionalProperties": False}},
 ]
 
 
 def tool_call(name, a):
     if name == "start_task":
-        job_id, worker = start_job(a.get("worker", "auto"), a["task"], a["project_path"], a.get("label"),
-                                   a.get("timeout_minutes", 90), a.get("write", True))
-        return {"job_id": job_id, "worker": worker, **follow_info(job_id)}
+        requested_worker = a.get("worker", "auto")
+        auto_failover = a.get("auto_failover", requested_worker == "auto")
+        job_id, worker = start_job(
+            requested_worker, a["task"], a["project_path"], a.get("label"),
+            a.get("timeout_minutes", 90), a.get("write", True),
+            auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
+        )
+        return {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
     if name == "job_status":
         if a.get("job_id"):
             return summary(read_meta(a["job_id"]))
@@ -636,10 +649,13 @@ def tool_call(name, a):
         return job_events(a["job_id"], a.get("since", 0), a.get("limit", 40))
     if name == "job_result":
         return job_result(a["job_id"])
+    if name == "job_chain":
+        return chain_summary(a["job_id"])
     if name == "job_wait":
         return job_wait(a["job_ids"], a.get("mode", "all"), a.get("timeout_seconds", 1500))
     if name == "job_message":
-        m = read_meta(a["job_id"])
+        terminal_id = failover_terminal_job_id(a["job_id"])
+        m = read_meta(terminal_id)
         if not is_done(m["id"]):
             raise ValueError("job is still running; wait for it or cancel it first")
         if not m.get("session_id"):
@@ -648,9 +664,11 @@ def tool_call(name, a):
                                    a.get("timeout_minutes", 60), m.get("write", True), m["session_id"], m["id"])
         return {"job_id": job_id, "worker": worker, **follow_info(job_id)}
     if name == "job_cancel":
-        read_meta(a["job_id"])
-        (JOBS / a["job_id"] / "CANCEL").write_text("cancel", encoding="utf-8")
-        return {"ok": True, "job_id": a["job_id"], "note": "the runner stops the worker within a few seconds"}
+        terminal_id = failover_terminal_job_id(a["job_id"])
+        read_meta(terminal_id)
+        (JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
+        return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
+                "note": "the active terminal worker stops within a few seconds"}
     if name == "worker_status":
         return worker_status()
     if name == "clear_worker_cooldown":
@@ -663,19 +681,27 @@ def tool_call(name, a):
         COOLDOWN_FILE.write_text(json.dumps(data), encoding="utf-8")
         return {"ok": True, "worker": a.get("worker") or "all"}
     if name == "run_ai_worker":
-        job_id, worker = start_job(a.get("worker", "auto"), a["task"], a["project_path"], None,
-                                   # The job's own limit is independent of how long this call waits.
-                                   int(config().get("job_timeout_minutes", 180)), a.get("write", True))
-        job_wait([job_id], "all", a.get("timeout_seconds", 1800))
-        res = job_result(job_id) if is_done(job_id) else {**summary(read_meta(job_id)), "still_running": True}
+        requested_worker = a.get("worker", "auto")
+        auto_failover = a.get("auto_failover", requested_worker == "auto")
+        job_id, worker = start_job(
+            requested_worker, a["task"], a["project_path"], None,
+            int(config().get("job_timeout_minutes", 180)), a.get("write", True),
+            auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
+        )
+        waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
+        res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}
         return {**res, **follow_info(job_id)}
     if name == "run_ai_parallel":
         started = []
         for i, t in enumerate(a["tasks"], 1):
             worker = pick_worker(t.get("worker", "auto"))
             path, branch = create_worktree(a["project_path"], worker, i)
-            job_id, worker = start_job(worker, t["task"], path, t.get("label"), a.get("timeout_minutes", 90), a.get("write", True))
-            started.append({"job_id": job_id, "worker": worker, "worktree": path, "branch": branch, **follow_info(job_id)})
+            job_id, worker = start_job(
+                worker, t["task"], path, t.get("label"), a.get("timeout_minutes", 90), a.get("write", True),
+                auto_failover=a.get("auto_failover", True), max_failovers=a.get("max_failovers"),
+            )
+            started.append({"job_id": job_id, "worker": worker, "worktree": path, "branch": branch,
+                            "auto_failover": a.get("auto_failover", True), **follow_info(job_id)})
         return started
     raise ValueError("Unknown tool: " + name)
 
