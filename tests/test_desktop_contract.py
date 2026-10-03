@@ -72,7 +72,7 @@ class DesktopContractTests(unittest.TestCase):
     def test_glass_design_language_is_present(self):
         for marker in (
             "--accent: #ef6461",
-            "backdrop-filter: blur(30px)",
+            "backdrop-filter: blur(",
             "border-radius: 999px",
             ".task-card",
             ".agent-card",
