@@ -213,6 +213,45 @@ def diff(storage_root, worktree_id, max_chars=50000):
     }
 
 
+def snapshot(storage_root, worktree_id, message=None):
+    meta = load(storage_root, worktree_id)
+    path = Path(meta["path"])
+    if not path.exists():
+        raise ValueError("worktree path no longer exists")
+
+    changes = _changes(path)
+    head_before = _git(path, "rev-parse", "HEAD")[1]
+    if not changes:
+        return {
+            "ok": True,
+            "id": worktree_id,
+            "committed": False,
+            "head": head_before,
+        }
+
+    _git(path, "add", "-A")
+    commit_message = str(message or f"TEAMYRA snapshot {worktree_id}").strip()[:200]
+    rc, out, err = _git(
+        path,
+        "-c", "user.name=TEAMYRA",
+        "-c", "user.email=teamyra@local",
+        "commit", "-m", commit_message,
+        check=False,
+    )
+    if rc != 0:
+        raise RuntimeError((err or out or "snapshot commit failed").strip())
+
+    head = _git(path, "rev-parse", "HEAD")[1]
+    return {
+        "ok": True,
+        "id": worktree_id,
+        "committed": True,
+        "head": head,
+        "previous_head": head_before,
+        "message": commit_message,
+    }
+
+
 def rebase(storage_root, worktree_id):
     meta = load(storage_root, worktree_id)
     root = Path(meta["repo_root"])
