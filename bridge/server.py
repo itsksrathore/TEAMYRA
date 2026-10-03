@@ -331,19 +331,42 @@ def pick_worker(worker, exclude=None):
     raise ValueError("no authenticated worker is currently ready")
 
 
+def _chatgpt_workspace_matches(project_path):
+    status_file = ROOT / "chatgpt" / "status.json"
+    try:
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+        selected = Path(status.get("workspace") or "").resolve()
+    except Exception:
+        return False
+    requested = Path(project_path).resolve()
+    return os.path.normcase(str(selected)) == os.path.normcase(str(requested))
+
+
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
+    requested_worker = worker
     worker = pick_worker(worker)
     registry = worker_registry()
     if worker not in registry:
         raise ValueError(f"unknown worker: {worker}")
     worker_info = registry[worker]
-    # enabled controls automatic routing only; explicit/manual worker selection remains allowed.
     provider = worker_info["provider"]
+    if provider == "chatgpt-web" and not _chatgpt_workspace_matches(cwd):
+        if requested_worker == "auto":
+            worker = pick_worker("auto", exclude=[worker])
+            registry = worker_registry()
+            worker_info = registry[worker]
+            provider = worker_info["provider"]
+        else:
+            raise ValueError(
+                "chatgpt-normal workspace does not match project_path; "
+                "select this project in the TEAMYRA ChatGPT panel first"
+            )
+    # enabled controls automatic routing only; explicit/manual worker selection remains allowed.
     ready, auth_detail = worker_auth_status(worker_info)
     if not ready:
         raise ValueError(f"{worker} is not authenticated/ready: {clip(auth_detail, 300)}")
