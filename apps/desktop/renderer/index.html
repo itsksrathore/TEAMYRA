@@ -56,7 +56,22 @@
       <div><p class="eyebrow">EXECUTION</p><h3>Recent tasks</h3></div>
       <span>Read directly from the existing TEAMYRA job store.</span>
     </section>
-    <section id="jobs" class="jobs-panel"></section>
+    <section class="execution-grid">
+      <div>
+        <section id="jobs" class="jobs-panel"></section>
+      </div>
+      <aside class="detail-panel">
+        <div class="detail-head">
+          <div>
+            <p class="eyebrow">TASK DETAIL</p>
+            <h3 id="detailTitle">Select a task</h3>
+          </div>
+          <span id="detailState" class="detail-state">—</span>
+        </div>
+        <div id="detailMeta" class="detail-meta">Click a task to inspect its live transcript.</div>
+        <pre id="transcript" class="transcript">No task selected.</pre>
+      </aside>
+    </section>
   </main>
 
   <template id="providerTpl">
