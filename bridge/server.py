@@ -579,35 +579,46 @@ def create_worktree(project_path, worker, idx):
 
 def start_conductor(graph_id):
     graph = task_graph.load_graph(ROOT, graph_id)
-    if graph.get("state") == "running":
+    if graph.get("state") in {"starting", "running", "awaiting_approval"}:
         return task_graph.graph_summary(graph)
     if graph.get("state") not in {"draft"}:
         raise ValueError(f"graph cannot be started from state {graph.get('state')}")
+
+    graph["state"] = "starting"
+    graph["error"] = None
+    task_graph.save_graph(ROOT, graph)
 
     log_path = ROOT / "tasks" / f"{graph_id}.conductor.log"
     log = open(log_path, "a", encoding="utf-8")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     cmd = [str(PYTHON), str(BRIDGE / "conductor_monitor.py"), graph_id]
     try:
-        subprocess.Popen(
-            cmd,
-            cwd=str(ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            close_fds=True,
-            creationflags=flags | 0x01000000,
-        )
-    except OSError:
-        subprocess.Popen(
-            cmd,
-            cwd=str(ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            close_fds=True,
-            creationflags=flags,
-        )
+        try:
+            subprocess.Popen(
+                cmd,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                close_fds=True,
+                creationflags=flags | 0x01000000,
+            )
+        except OSError:
+            subprocess.Popen(
+                cmd,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                close_fds=True,
+                creationflags=flags,
+            )
+    except Exception as exc:
+        graph = task_graph.load_graph(ROOT, graph_id)
+        graph["state"] = "draft"
+        graph["error"] = f"conductor start failed: {exc}"
+        task_graph.save_graph(ROOT, graph)
+        raise
     return task_graph.graph_summary(task_graph.load_graph(ROOT, graph_id))
 
 
@@ -618,6 +629,7 @@ TOOLS = [
     {"name": "graph_create", "description": "Create a persistent dependency task graph. Phase 3 executes graph nodes sequentially until Phase 4 worktree merge semantics are available.",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string"},
+         "objective": {"type": "string"},
          "project_path": {"type": "string"},
          "nodes": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object", "properties": {
              "id": {"type": "string"}, "label": {"type": "string"}, "task": {"type": "string"},
@@ -636,6 +648,10 @@ TOOLS = [
     {"name": "graph_cancel", "description": "Request cancellation of a graph and its active child job.",
      "inputSchema": {"type": "object", "properties": {"graph_id": {"type": "string"}},
                      "required": ["graph_id"], "additionalProperties": False}},
+    {"name": "graph_approve", "description": "Approve one dependency-ready graph node that was created with requires_approval=true.",
+     "inputSchema": {"type": "object", "properties": {
+         "graph_id": {"type": "string"}, "node_id": {"type": "string"}, "note": {"type": "string"}},
+         "required": ["graph_id", "node_id"], "additionalProperties": False}},
     {"name": "graph_approve", "description": "Approve or deny the currently gated graph node before the Conductor starts it.",
      "inputSchema": {"type": "object", "properties": {
          "graph_id": {"type": "string"}, "node_id": {"type": "string"},
@@ -704,7 +720,7 @@ def tool_call(name, a):
         project_path = Path(a["project_path"]).resolve()
         if not project_path.exists():
             raise ValueError(f"project_path not found: {project_path}")
-        graph = task_graph.create_graph(ROOT, a.get("title"), project_path, a["nodes"])
+        graph = task_graph.create_graph(ROOT, a.get("title"), project_path, a["nodes"], a.get("objective"))
         return task_graph.graph_summary(graph)
     if name == "graph_start":
         return start_conductor(a["graph_id"])
