@@ -93,9 +93,14 @@ function managedProfiles(provider) {
           : provider.id === 'claude'
             ? fileExists(path.join(dir, '.credentials.json'))
             : false;
+        let displayName = entry.name;
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(dir, 'teamyra-profile.json'), 'utf8'));
+          if (meta && typeof meta.name === 'string' && meta.name.trim()) displayName = meta.name.trim();
+        } catch {}
         profiles.push({
           id: entry.name,
-          name: entry.name,
+          name: displayName,
           kind: 'managed',
           path: dir,
           signedIn
