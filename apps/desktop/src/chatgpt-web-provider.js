@@ -6,6 +6,7 @@ const { ChatGPTAutomationAdapter } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
+const MAX_TOOL_RESULT_CHARS = 120000;
 const READ_ONLY_BLOCKED_TOOLS = new Set([
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
   'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore'
@@ -382,6 +383,7 @@ class ChatGPTWebProvider {
         'When you need a local tool, reply with exactly one line and nothing else:',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
+        'filesystem.read is paged: use offset and max_bytes for large files, then next_offset when clipped.',
         'Destructive operations may be denied pending explicit user confirmation. Never try to bypass that denial.',
         'When the task is complete, reply normally with the final result and do not emit a tool request.',
         '',
@@ -440,9 +442,17 @@ class ChatGPTWebProvider {
         } catch (error) {
           toolResult = { ok: false, error: String(error?.message || error) };
         }
-        this.appendJobEvent(jobDir, 'result', JSON.stringify(toolResult).slice(0, 3000));
+        const rawToolResult = JSON.stringify(toolResult);
+        const boundedToolResult = rawToolResult.length <= MAX_TOOL_RESULT_CHARS
+          ? toolResult
+          : {
+              clipped: true,
+              preview: rawToolResult.slice(0, MAX_TOOL_RESULT_CHARS),
+              note: 'TEAMYRA clipped this tool result. Request a narrower path/query/range or use filesystem.read offset/next_offset.'
+            };
+        this.appendJobEvent(jobDir, 'result', rawToolResult.slice(0, 3000));
         snap = await this.automation.assistantSnapshot();
-        await this.sendTask('TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: toolResult }) + '\nContinue the task.');
+        await this.sendTask('TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
         reply = await this.automation.waitForAssistantReply(waitOptions(snap.count));
       }
       throw new Error('ChatGPT exceeded the maximum TEAMYRA tool-call loop');
