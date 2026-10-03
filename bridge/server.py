@@ -622,7 +622,9 @@ TOOLS = [
          "nodes": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object", "properties": {
              "id": {"type": "string"}, "label": {"type": "string"}, "task": {"type": "string"},
              "worker": W_ENUM, "depends_on": {"type": "array", "items": {"type": "string"}},
-             "write": {"type": "boolean", "default": True}},
+             "write": {"type": "boolean", "default": True},
+             "requires_approval": {"type": "boolean", "default": False},
+             "approval_reason": {"type": "string"}},
              "required": ["id", "task"], "additionalProperties": False}}},
          "required": ["project_path", "nodes"], "additionalProperties": False}},
     {"name": "graph_start", "description": "Start the detached TEAMYRA Conductor for a draft task graph.",
@@ -634,6 +636,12 @@ TOOLS = [
     {"name": "graph_cancel", "description": "Request cancellation of a graph and its active child job.",
      "inputSchema": {"type": "object", "properties": {"graph_id": {"type": "string"}},
                      "required": ["graph_id"], "additionalProperties": False}},
+    {"name": "graph_approve", "description": "Approve or deny the currently gated graph node before the Conductor starts it.",
+     "inputSchema": {"type": "object", "properties": {
+         "graph_id": {"type": "string"}, "node_id": {"type": "string"},
+         "decision": {"type": "string", "enum": ["approve", "deny"]},
+         "note": {"type": "string"}},
+         "required": ["graph_id", "node_id", "decision"], "additionalProperties": False}},
     {"name": "start_task", "description": (
         "Start a worker job and return at once with its job_id (non-blocking). The worker runs in its own "
         "process with a live transcript. Follow it with job_wait, job_status/job_events, or run the returned "
@@ -705,6 +713,25 @@ def tool_call(name, a):
     if name == "graph_cancel":
         graph = task_graph.load_graph(ROOT, a["graph_id"])
         graph["cancel_requested"] = True
+        task_graph.save_graph(ROOT, graph)
+        return task_graph.graph_summary(graph)
+    if name == "graph_approve":
+        graph = task_graph.load_graph(ROOT, a["graph_id"])
+        nodes = task_graph.node_map(graph)
+        node = nodes.get(a["node_id"])
+        if not node:
+            raise ValueError(f"no such graph node: {a['node_id']}")
+        if not node.get("requires_approval"):
+            raise ValueError("that node does not require approval")
+        if node.get("status") != "pending":
+            raise ValueError(f"node cannot be approved from status {node.get('status')}")
+        decision = a["decision"]
+        node["approval_status"] = "approved" if decision == "approve" else "denied"
+        node["approval_note"] = str(a.get("note") or "").strip()[:500] or None
+        node["approved_at"] = time.time() if decision == "approve" else None
+        if graph.get("approval_pending_node_id") == node["id"] and decision == "approve":
+            graph["state"] = "running"
+            graph["approval_pending_node_id"] = None
         task_graph.save_graph(ROOT, graph)
         return task_graph.graph_summary(graph)
     if name == "start_task":
