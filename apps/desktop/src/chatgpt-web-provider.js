@@ -40,11 +40,13 @@ class ChatGPTWebProvider {
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
     this.automation = null;
+    this.interactionCssKey = null;
     this.bounds = { x: 220, y: 96, width: 1000, height: 700 };
     this.visible = false;
     this.loaded = false;
     this.busy = false;
     this.lastProbe = null;
+    this.interactionCssKey = null;
     this.jobTimer = null;
     this.heartbeatTimer = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
@@ -104,6 +106,9 @@ class ChatGPTWebProvider {
       this.loaded = false;
       this.writeStatus({ detail: 'ChatGPT renderer stopped: ' + (details?.reason || 'unknown') });
     });
+    this.view.webContents.on('before-input-event', event => {
+      if (this.busy) event.preventDefault();
+    });
     return this.view;
   }
 
@@ -131,6 +136,33 @@ class ChatGPTWebProvider {
     if (!view.webContents.getURL()) await view.webContents.loadURL(CHATGPT_HOME);
     else view.webContents.reload();
     return { ok: true };
+  }
+
+  async reconnect() {
+    const view = this.ensureView();
+    this.loaded = false;
+    this.lastProbe = null;
+    const current = view.webContents.getURL();
+    const target = safeHttps(current) ? current : CHATGPT_HOME;
+    await view.webContents.loadURL(target);
+    return this.refreshStatus();
+  }
+
+  async setInteractionLocked(locked) {
+    const view = this.ensureView();
+    if (locked) {
+      if (!this.interactionCssKey) {
+        this.interactionCssKey = await view.webContents.insertCSS(
+          'html { pointer-events: none !important; }'
+        );
+      }
+      return;
+    }
+    if (this.interactionCssKey) {
+      const key = this.interactionCssKey;
+      this.interactionCssKey = null;
+      await view.webContents.removeInsertedCSS(key).catch(() => {});
+    }
   }
 
   setVisible(value) {
@@ -378,6 +410,7 @@ class ChatGPTWebProvider {
       } else {
         await this.createConversation();
       }
+      await this.setInteractionLocked(true);
       this.writeJobMeta(jobDir, { state: 'running', started: Date.now() / 1000, runner_pid: null });
       this.appendJobEvent(jobDir, 'info', 'embedded ChatGPT worker started');
 
@@ -472,6 +505,7 @@ class ChatGPTWebProvider {
       });
       fs.writeFileSync(path.join(jobDir, 'DONE'), state, 'utf8');
     } finally {
+      await this.setInteractionLocked(false).catch(() => {});
       this.busy = false;
       await this.refreshStatus().catch(() => {});
     }
