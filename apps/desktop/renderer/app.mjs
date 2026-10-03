@@ -13,6 +13,10 @@ let transcriptOffset = 0;
 let transcriptTimer = null;
 let currentJobs = [];
 
+let activeView = 'command';
+let currentWorktrees = [];
+let selectedWorktreeId = null;
+
 const providersEl = document.querySelector('#providers');
 const jobsEl = document.querySelector('#jobs');
 const providerTpl = document.querySelector('#providerTpl');
@@ -259,8 +263,14 @@ async function refresh() {
   document.querySelector('#mAccounts').textContent = providers.reduce((n, x) => n + x.profiles.filter(p => p.signedIn).length, 0);
 }
 
-document.querySelector('#refresh').addEventListener('click', refresh);
+document.querySelector('#refresh').addEventListener('click', () => {
+  const action = activeView === 'worktrees' ? refreshWorktrees() : refresh();
+  action.catch(error => alert('Refresh failed: ' + String(error?.message || error)));
+});
 setInterval(() => refreshJobs().catch(() => {}), 3000);
+setInterval(() => {
+  if (activeView === 'worktrees') refreshWorktrees({ preserveSelection: true }).catch(() => {});
+}, 5000);
 refresh().catch(err => {
   providersEl.innerHTML = '<div class="empty">Desktop core error: ' + escapeHtml(err) + '</div>';
 });
@@ -310,9 +320,10 @@ async function openTerminal(options = {}) {
   panel.hidden = false;
   ensureTerminalView();
 
+  const requestedCwd = options.cwd || selectedJobData()?.cwd || '';
   const requestedKey = options.providerId
     ? options.providerId + ':' + (options.profileId || 'native') + (options.login ? ':login' : ':session')
-    : 'shell';
+    : 'shell:' + requestedCwd;
 
   if (terminalSessionId && terminalContextKey === requestedKey) {
     terminal.focus();
@@ -328,7 +339,7 @@ async function openTerminal(options = {}) {
   terminal.clear();
   terminal.write('\x1b[90mStarting TEAMYRA terminal…\x1b[0m\r\n');
   const result = await window.teamyra.openTerminal({
-    cwd: job?.cwd || '',
+    cwd: requestedCwd,
     providerId: options.providerId || '',
     profileId: options.profileId || 'native',
     login: options.login === true
@@ -375,3 +386,251 @@ document.querySelector('#openTerminal').addEventListener('click', () => {
   openTerminal({}).catch(error => alert('Terminal error: ' + String(error)));
 });
 document.querySelector('#closeTerminal').addEventListener('click', closeTerminal);
+
+
+const commandView = document.querySelector('#commandView');
+const worktreesView = document.querySelector('#worktreesView');
+const navCommand = document.querySelector('#navCommand');
+const navWorktrees = document.querySelector('#navWorktrees');
+const worktreeListEl = document.querySelector('#worktreeList');
+const wtDiffEl = document.querySelector('#wtDiff');
+const wtSummaryEl = document.querySelector('#wtSummary');
+const wtTitleEl = document.querySelector('#wtTitle');
+const wtStateEl = document.querySelector('#wtState');
+const wtMetaEl = document.querySelector('#wtMeta');
+const wtMergeButton = document.querySelector('#wtMerge');
+const wtDiscardButton = document.querySelector('#wtDiscard');
+const wtForceDiscardButton = document.querySelector('#wtForceDiscard');
+const wtOpenTerminalButton = document.querySelector('#wtOpenTerminal');
+
+function setView(view) {
+  activeView = view === 'worktrees' ? 'worktrees' : 'command';
+  const isWorktrees = activeView === 'worktrees';
+  commandView.hidden = isWorktrees;
+  worktreesView.hidden = !isWorktrees;
+  navCommand.classList.toggle('active', !isWorktrees);
+  navWorktrees.classList.toggle('active', isWorktrees);
+  document.querySelector('#pageEyebrow').textContent =
+    isWorktrees ? 'ISOLATED GIT WORKSPACES' : 'MULTI-AGENT CONTROL PLANE';
+  document.querySelector('#pageTitle').textContent = isWorktrees ? 'Worktrees' : 'Command Desk';
+  document.querySelector('#openTerminal').hidden = isWorktrees;
+  if (isWorktrees) refreshWorktrees({ preserveSelection: true }).catch(error => {
+    worktreeListEl.innerHTML = '<div class="empty">Could not load worktrees: ' + escapeHtml(error?.message || error) + '</div>';
+  });
+}
+
+function worktreeState(item) {
+  if (!item.exists) return 'missing';
+  if (item.conflicts?.length) return 'conflict';
+  if (item.dirty) return 'dirty';
+  if (item.merged_at) return 'merged';
+  return 'clean';
+}
+
+function renderWorktreeList(items) {
+  worktreeListEl.innerHTML = '';
+  if (!items.length) {
+    worktreeListEl.innerHTML = '<div class="empty">No TEAMYRA-managed worktrees yet.</div>';
+    return;
+  }
+
+  for (const item of items) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'worktree-card' + (selectedWorktreeId === item.id ? ' selected' : '');
+    card.dataset.worktreeId = item.id;
+
+    const top = document.createElement('div');
+    top.className = 'worktree-card-top';
+    const title = document.createElement('b');
+    title.textContent = item.label || item.id;
+    const state = document.createElement('span');
+    state.className = 'worktree-badge ' + worktreeState(item);
+    state.textContent = worktreeState(item);
+    top.append(title, state);
+
+    const branch = document.createElement('code');
+    branch.textContent = item.branch || 'no branch';
+
+    const meta = document.createElement('small');
+    const bits = [];
+    bits.push((item.commits?.length || 0) + ' commits');
+    if (item.changes?.length) bits.push(item.changes.length + ' changes');
+    if (item.conflicts?.length) bits.push(item.conflicts.length + ' conflicts');
+    meta.textContent = bits.join(' · ');
+
+    card.append(top, branch, meta);
+    card.addEventListener('click', () => selectWorktree(item.id));
+    worktreeListEl.appendChild(card);
+  }
+}
+
+function updateWorktreeMetrics(items) {
+  document.querySelector('#wtManaged').textContent = items.length;
+  document.querySelector('#wtDirty').textContent = items.filter(item => item.dirty).length;
+  document.querySelector('#wtConflicts').textContent = items.filter(item => item.conflicts?.length).length;
+}
+
+function setWorktreeActionsEnabled(enabled) {
+  wtMergeButton.disabled = !enabled;
+  wtDiscardButton.disabled = !enabled;
+  wtForceDiscardButton.disabled = !enabled;
+  wtOpenTerminalButton.disabled = !enabled;
+}
+
+function renderWorktreeSummary(item) {
+  wtSummaryEl.innerHTML = '';
+  const rows = [
+    ['Target', item.target_branch || '—'],
+    ['Branch', item.branch || '—'],
+    ['Base', item.base_commit ? item.base_commit.slice(0, 12) : '—'],
+    ['HEAD', item.head ? item.head.slice(0, 12) : '—'],
+    ['Path', item.path || '—'],
+    ['Commits', String(item.commits?.length || 0)],
+    ['Changes', String(item.changes?.length || 0)],
+    ['Conflicts', String(item.conflicts?.length || 0)]
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement('div');
+    const key = document.createElement('span');
+    const val = document.createElement('code');
+    key.textContent = label;
+    val.textContent = value;
+    row.append(key, val);
+    wtSummaryEl.appendChild(row);
+  }
+}
+
+async function selectWorktree(worktreeId) {
+  selectedWorktreeId = worktreeId;
+  renderWorktreeList(currentWorktrees);
+  wtDiffEl.textContent = 'Loading diff…';
+  setWorktreeActionsEnabled(false);
+
+  const [item, diff] = await Promise.all([
+    window.teamyra.worktreeStatus(worktreeId),
+    window.teamyra.worktreeDiff(worktreeId, 80000)
+  ]);
+
+  const index = currentWorktrees.findIndex(row => row.id === worktreeId);
+  if (index >= 0) currentWorktrees[index] = item;
+
+  wtTitleEl.textContent = item.label || item.id;
+  const state = worktreeState(item);
+  wtStateEl.textContent = state;
+  wtStateEl.className = 'detail-state ' + state;
+  wtMetaEl.textContent = [item.id, item.branch, '→ ' + (item.target_branch || 'target')].filter(Boolean).join(' · ');
+  renderWorktreeSummary(item);
+  wtDiffEl.textContent = diff.diff || 'No tracked diff against the base commit.';
+  if (diff.clipped) {
+    wtDiffEl.textContent += '\n\n[Diff clipped at ' + diff.total_chars + ' characters]';
+  }
+  setWorktreeActionsEnabled(item.exists);
+  renderWorktreeList(currentWorktrees);
+}
+
+async function refreshWorktrees(options = {}) {
+  const preserveSelection = options.preserveSelection === true;
+  const items = await window.teamyra.worktrees();
+  currentWorktrees = Array.isArray(items) ? items : [];
+  updateWorktreeMetrics(currentWorktrees);
+
+  if (!preserveSelection || !currentWorktrees.some(item => item.id === selectedWorktreeId)) {
+    selectedWorktreeId = currentWorktrees[0]?.id || null;
+  }
+  renderWorktreeList(currentWorktrees);
+
+  if (selectedWorktreeId) {
+    await selectWorktree(selectedWorktreeId);
+  } else {
+    wtTitleEl.textContent = 'Select a worktree';
+    wtStateEl.textContent = '—';
+    wtStateEl.className = 'detail-state';
+    wtMetaEl.textContent = 'Choose a managed worktree to inspect its branch and diff.';
+    wtSummaryEl.innerHTML = '';
+    wtDiffEl.textContent = 'No worktree selected.';
+    setWorktreeActionsEnabled(false);
+  }
+  return currentWorktrees;
+}
+
+function selectedWorktreeData() {
+  return currentWorktrees.find(item => item.id === selectedWorktreeId) || null;
+}
+
+navCommand.addEventListener('click', () => setView('command'));
+navWorktrees.addEventListener('click', () => setView('worktrees'));
+document.querySelector('#refreshWorktrees').addEventListener('click', () => {
+  refreshWorktrees({ preserveSelection: true }).catch(error => alert('Worktree refresh failed: ' + String(error?.message || error)));
+});
+
+document.querySelector('#createWorktree').addEventListener('click', async () => {
+  const projectPath = prompt('Repository path for the new worktree:');
+  if (!projectPath) return;
+  const label = prompt('Worktree label:', 'task');
+  if (label === null) return;
+  const baseRef = prompt('Base ref:', 'HEAD');
+  if (baseRef === null) return;
+  try {
+    const created = await window.teamyra.createWorktree({
+      projectPath,
+      label: label || 'task',
+      baseRef: baseRef || 'HEAD'
+    });
+    selectedWorktreeId = created.id;
+    await refreshWorktrees({ preserveSelection: true });
+  } catch (error) {
+    alert('Could not create worktree: ' + String(error?.message || error));
+  }
+});
+
+wtOpenTerminalButton.addEventListener('click', () => {
+  const item = selectedWorktreeData();
+  if (!item?.exists) return;
+  openTerminal({ cwd: item.path, label: 'Worktree · ' + (item.label || item.id) })
+    .catch(error => alert('Terminal error: ' + String(error?.message || error)));
+});
+
+wtMergeButton.addEventListener('click', async () => {
+  const item = selectedWorktreeData();
+  if (!item) return;
+  const message = 'Merge branch "' + item.branch + '" into "' + item.target_branch + '"?\n\nTEAMYRA will refuse dirty worktrees, dirty targets, or unresolved conflicts.';
+  if (!confirm(message)) return;
+  try {
+    await window.teamyra.mergeWorktree(item.id, true);
+    await refreshWorktrees({ preserveSelection: true });
+    alert('Worktree merged successfully.');
+  } catch (error) {
+    alert('Merge blocked: ' + String(error?.message || error));
+  }
+});
+
+wtDiscardButton.addEventListener('click', async () => {
+  const item = selectedWorktreeData();
+  if (!item) return;
+  if (!confirm('Remove this worktree after verifying its branch is already merged?\n\n' + item.branch)) return;
+  try {
+    await window.teamyra.discardWorktree(item.id, { confirm: true, force: false });
+    selectedWorktreeId = null;
+    await refreshWorktrees();
+  } catch (error) {
+    alert('Discard blocked: ' + String(error?.message || error));
+  }
+});
+
+wtForceDiscardButton.addEventListener('click', async () => {
+  const item = selectedWorktreeData();
+  if (!item) return;
+  const phrase = prompt(
+    'Force discard can permanently delete unmerged/uncommitted work in this worktree.\nType DISCARD to continue:'
+  );
+  if (phrase !== 'DISCARD') return;
+  if (!confirm('Final confirmation: permanently force-discard ' + item.branch + '?')) return;
+  try {
+    await window.teamyra.discardWorktree(item.id, { confirm: true, force: true });
+    selectedWorktreeId = null;
+    await refreshWorktrees();
+  } catch (error) {
+    alert('Force discard failed: ' + String(error?.message || error));
+  }
+});
