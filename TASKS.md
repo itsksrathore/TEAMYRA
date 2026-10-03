@@ -18,7 +18,7 @@ This checklist is updated as implementation lands.
 - [x] Agent/account cards.
 - [x] Codex Add Account flow (isolated CODEX_HOME profile + provider login launch).
 - [x] Claude Add Account flow using documented CLAUDE_CONFIG_DIR isolation.
-- [ ] Antigravity Add Account flow after profile-isolation verification.
+- [x] Antigravity Add Account safety decision — managed Add Account remains intentionally disabled because the verified `agy` CLI exposes no safe isolated account/profile mechanism.
 - [x] Live jobs list/status.
 - [x] Live job transcript streaming.
 - [x] Embedded terminals — Windows verified: PTY spawn/input/output/resize/exit + xterm UI + IPC.
@@ -29,7 +29,7 @@ This checklist is updated as implementation lands.
 - [x] N Codex profiles plus legacy Codex 2 compatibility.
 - [x] Verified Claude profile isolation with CLAUDE_CONFIG_DIR on Windows.
 - [x] Claude profiles available as independent bridge workers.
-- [ ] Verified Antigravity profile isolation.
+- [x] Antigravity profile-isolation verification — unsupported by the current verified CLI surface; TEAMYRA safely exposes only the native session until upstream isolation exists.
 - [x] Initial account-aware routing/cooldowns across discovered workers.
 - [x] Bounded automatic reassignment/failover for eligible worker/provider failures, with lineage tracking.
 - [x] Per-account model/effort UI and persisted settings, with enabled/priority routing controls.
@@ -69,7 +69,7 @@ This checklist is updated as implementation lands.
 ## Phase 6 — Observability / Memory
 - [x] Unified timeline across jobs, graphs, reviews, and managed worktrees — MCP/CLI/Desktop + Windows runtime verified.
 - [x] Usage/quota dashboard — real persisted token usage + live readiness/cooldowns; unavailable provider quota percentages are not guessed.
-- [ ] Context-window visibility when providers expose reliable context telemetry.
+- [x] Context-window capability handling — current verified provider CLIs do not expose reliable live context telemetry, so TEAMYRA shows unavailable rather than guessed values.
 - [x] Searchable logs — bounded job events/transcripts/stderr/runner/task search via MCP/CLI/Desktop.
 - [x] Project memory — local per-project structured decisions/facts/notes/handoffs/TODOs with MCP/CLI/Desktop CRUD, ranked search, archive lifecycle, and bounded agent context packs; Windows runtime verified.
 - [x] MCP pooling - shared lazy external stdio MCP processes behind the long-lived TEAMYRA HTTP gateway, with runtime-only config, reuse/restart, redacted status, MCP tools, CLI admin surface, and Windows HTTP runtime verification.
@@ -81,3 +81,4 @@ This checklist is updated as implementation lands.
 - [x] Windows installer — PyInstaller bundled core + Electron/NSIS installer; fresh build, install, packaged UI/core, provider detection, runtime location, and uninstall preservation verified on Windows.
 - [x] Auto-update — electron-updater GitHub release channel wired with update status/check/install IPC plus tag-based release workflow metadata publishing.
 - [x] Docs/examples — Windows distribution architecture, build/release flow, and packaged runtime behavior documented.
+- [x] Open-source hardening — MIT license, contribution/security policy, provider capability boundaries, public release checklist, runtime dependency audit gate, and stable-tag signing/Authenticode enforcement.

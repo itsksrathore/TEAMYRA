@@ -39,7 +39,7 @@ npm run core:build
 npm run desktop:dist:win
 ```
 
-The packaged desktop embeds `teamyra-core.exe`, so end users do not need a separate Python installation. Runtime jobs, logs, worktrees, memory, and managed profiles live under Electron user data rather than the installation directory. Tagged `v*` pushes run the Windows release workflow and publish NSIS/update metadata to GitHub Releases; production signing remains a release-hardening requirement.
+The packaged desktop embeds `teamyra-core.exe`, so end users do not need a separate Python installation. Runtime jobs, logs, worktrees, memory, and managed profiles live under Electron user data rather than the installation directory. Tagged `v*` pushes run the Windows release workflow. Stable tags require Windows signing credentials, verify Authenticode signatures before publication, and upload the verified NSIS installer plus update metadata to GitHub Releases.
 
 ## Target capabilities
 - Nami-style desktop UI.
@@ -56,6 +56,9 @@ The packaged desktop embeds `teamyra-core.exe`, so end users do not need a separ
 
 ## Project plan
 See [ROADMAP.md](ROADMAP.md). Completed work is checked off there phase by phase.
+
+## Contributing and security
+TEAMYRA is MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes and [SECURITY.md](SECURITY.md) for private vulnerability reporting and credential-handling guidance. Provider capability boundaries are documented in [docs/PROVIDER_CAPABILITIES.md](docs/PROVIDER_CAPABILITIES.md), and public releases follow [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Existing bridge layout
 - `bridge/server.py` — MCP bridge and worker orchestration.

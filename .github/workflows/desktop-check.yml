@@ -33,6 +33,8 @@ jobs:
         run: npm ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Desktop JavaScript syntax
         run: npm run desktop:check
       - name: Build desktop renderer
