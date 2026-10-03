@@ -1,0 +1,20 @@
+{
+  "name": "teamyra-local",
+  "interface": {
+    "displayName": "TEAMYRA Local"
+  },
+  "plugins": [
+    {
+      "name": "teamyra",
+      "source": {
+        "source": "local",
+        "path": "./plugins/teamyra"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

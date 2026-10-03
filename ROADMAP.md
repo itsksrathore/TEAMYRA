@@ -53,8 +53,8 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Support local stdio MCP.
 - [x] Add localhost Streamable HTTP MCP JSON-response transport.
 - [x] Build and Windows-verify TEAMYRA CLI.
-- [ ] Build ecosystem plugins/skills where supported.
-- [ ] Add project bootstrap files for agent interoperability.
+- [x] Build local Codex and Antigravity plugin/skill integrations.
+- [x] Add Claude/Codex/Antigravity project bootstrap files for agent interoperability.
 
 ## Phase 6 — Observability and Memory
 - [ ] Unified task timeline.

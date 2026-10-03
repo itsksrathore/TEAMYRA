@@ -1,0 +1,30 @@
+{
+  "name": "teamyra",
+  "version": "0.2.0",
+  "description": "Orchestrate local Claude Code, Codex, Antigravity, task graphs, reviews, tests, and Git worktrees through TEAMYRA.",
+  "author": {
+    "name": "KS Rathore"
+  },
+  "repository": "https://github.com/itsksrathore/TEAMYRA",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "mcp",
+    "coding-agents"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TEAMYRA",
+    "shortDescription": "Orchestrate local AI coding agents",
+    "longDescription": "Delegate and supervise coding tasks across local Claude Code, Codex, and Antigravity workers with routing, failover, review loops, deterministic tests, and isolated Git worktrees.",
+    "developerName": "KS Rathore",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Delegate coding tasks",
+      "Run multi-agent task graphs",
+      "Review and test changes",
+      "Manage isolated Git worktrees"
+    ]
+  }
+}

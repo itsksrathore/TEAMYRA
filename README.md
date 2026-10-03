@@ -29,6 +29,8 @@ npm run mcp:http -- --port 8787
 
 The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally localhost-only in this build.
 
+Provider-specific Claude Code, Codex, and Antigravity setup is documented in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+
 ## Target capabilities
 - Nami-style desktop UI.
 - automatic detection of installed agents and existing local logins.

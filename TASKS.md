@@ -62,9 +62,9 @@ This checklist is updated as implementation lands.
 - [x] Local stdio MCP runtime verified on Windows.
 - [x] Localhost Streamable HTTP MCP JSON-response transport verified on Windows.
 - [x] TEAMYRA CLI with doctor/workers/jobs/run/wait/result/test/graph/worktree/MCP commands.
-- [ ] Codex plugin.
-- [ ] Claude integration.
-- [ ] Antigravity integration.
+- [x] Codex local plugin + repository marketplace; isolated install/runtime discovery verified.
+- [x] Claude project MCP integration; repository discovery verified (first-use approval remains provider-controlled).
+- [x] Antigravity plugin + skill + MCP integration; live agent MCP tool call verified.
 
 ## Phase 6 — Observability / Memory
 - [ ] Unified timeline.

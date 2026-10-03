@@ -32,7 +32,15 @@ class HttpMcpTests(unittest.TestCase):
         if body is not None:
             request_headers.setdefault("Content-Type", "application/json")
             request_headers.setdefault("Accept", "application/json, text/event-stream")
-        conn.request(method, path, body=body, headers=request_headers)
+        # Use a single explicit Host header when a test supplies one. http.client.request()
+        # otherwise adds its own Host header, which can make malformed-host tests flaky on Windows.
+        explicit_host = "Host" in request_headers
+        conn.putrequest(method, path, skip_host=explicit_host, skip_accept_encoding=True)
+        if body is not None and "Content-Length" not in request_headers:
+            request_headers["Content-Length"] = str(len(body))
+        for key, value in request_headers.items():
+            conn.putheader(key, value)
+        conn.endheaders(body)
         response = conn.getresponse()
         raw = response.read()
         data = json.loads(raw.decode("utf-8")) if raw else None
