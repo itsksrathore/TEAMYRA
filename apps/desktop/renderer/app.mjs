@@ -568,8 +568,14 @@ async function showChatgptChanges(mode = 'status') {
   const result = await window.teamyra.chatgptChanges();
   chatgptChangesPanel.hidden = false;
   chatgptChangesTitle.textContent = mode === 'diff' ? 'Workspace diff' : 'Files changed';
+  const unstaged = result.diff?.stdout || result.diff?.stderr || '';
+  const staged = result.stagedDiff?.stdout || result.stagedDiff?.stderr || '';
+  const combinedDiff = [
+    staged ? '--- STAGED ---\n' + staged : '',
+    unstaged ? '--- UNSTAGED ---\n' + unstaged : ''
+  ].filter(Boolean).join('\n\n');
   chatgptChangesOutput.textContent = mode === 'diff'
-    ? (result.diff?.stdout || result.diff?.stderr || 'No tracked diff.')
+    ? (combinedDiff || 'No tracked diff.')
     : (result.status?.stdout || result.status?.stderr || 'Working tree clean.');
 }
 
@@ -1335,11 +1341,7 @@ document.querySelector('#chatgptSavePermissions').addEventListener('click', asyn
     alert('Select a workspace first.');
     return;
   }
-  if (chatgptPermissionEls.outside_workspace.checked) {
-    if (!confirm('Allow ChatGPT to access paths outside the selected workspace? System and credential stores remain blocked.')) {
-      chatgptPermissionEls.outside_workspace.checked = false;
-    }
-  }
+  chatgptPermissionEls.outside_workspace.checked = false;
   if (chatgptPermissionEls.destructive_without_confirmation.checked) {
     const phrase = prompt('This removes confirmation gates for destructive workspace tools. Type ALLOW to enable:');
     if (phrase !== 'ALLOW') chatgptPermissionEls.destructive_without_confirmation.checked = false;
