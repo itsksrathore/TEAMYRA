@@ -126,6 +126,25 @@ class DesktopContractTests(unittest.TestCase):
         self.assertNotIn("teamyra:memory-delete", self.main)
         self.assertNotIn("memoryDelete:", self.preload)
 
+    def test_auto_update_preload_and_main_contract(self):
+        contracts = {
+            "updateStatus": "teamyra:update-status",
+            "checkUpdates": "teamyra:update-check",
+            "installUpdate": "teamyra:update-install",
+            "onUpdateState": "teamyra:update-state",
+        }
+        for method, channel in contracts.items():
+            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
+            self.assertIn(channel, self.preload)
+            self.assertIn(channel, self.main)
+        self.assertIn("autoUpdater.autoDownload = true", self.main)
+        self.assertIn("autoUpdater.autoInstallOnAppQuit = true", self.main)
+        self.assertIn("setupAutoUpdates();", self.main)
+
+    def test_packaged_core_does_not_silently_fall_back_to_python(self):
+        self.assertIn("Bundled TEAMYRA Core is missing", self.core_api)
+        self.assertIn("process.env.TEAMYRA_CORE_EXE", self.core_api)
+
     def test_preload_worktree_api_matches_main_ipc_handlers(self):
         contracts = {
             "worktrees": "teamyra:worktrees",

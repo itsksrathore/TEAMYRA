@@ -3,8 +3,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 
-const ROOT = path.resolve(__dirname, '..', '..', '..');
-const DESKTOP_API = path.join(ROOT, 'bridge', 'desktop_api.py');
+const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
+const ROOT = path.resolve(process.env.TEAMYRA_ROOT || SOURCE_ROOT);
+const DESKTOP_API = path.join(SOURCE_ROOT, 'bridge', 'desktop_api.py');
+const PACKAGED_CORE = process.env.TEAMYRA_CORE_EXE ||
+  (process.resourcesPath ? path.join(process.resourcesPath, 'teamyra-core', 'teamyra-core.exe') : '');
 let cachedPython = null;
 
 function execFilePromise(file, args, options = {}) {
@@ -82,16 +85,37 @@ async function callCore(action, payload = {}, options = {}) {
   if (!/^[a-z0-9.-]+$/i.test(String(action || ''))) {
     throw new Error('Invalid core action');
   }
-  const python = await resolvePython();
-  const args = [
-    ...python.prefix,
-    DESKTOP_API,
-    action,
-    JSON.stringify(payload || {})
-  ];
-  const { stdout, stderr } = await execFilePromise(python.file, args, {
+
+  let file;
+  let args;
+  if (process.env.TEAMYRA_CORE_EXE) {
+    if (!PACKAGED_CORE || !fs.existsSync(PACKAGED_CORE)) {
+      throw new Error('Bundled TEAMYRA Core is missing: ' + String(PACKAGED_CORE || process.env.TEAMYRA_CORE_EXE));
+    }
+    file = PACKAGED_CORE;
+    args = ['__desktop-api', action, JSON.stringify(payload || {})];
+  } else if (PACKAGED_CORE && fs.existsSync(PACKAGED_CORE)) {
+    file = PACKAGED_CORE;
+    args = ['__desktop-api', action, JSON.stringify(payload || {})];
+  } else {
+    const python = await resolvePython();
+    file = python.file;
+    args = [
+      ...python.prefix,
+      DESKTOP_API,
+      action,
+      JSON.stringify(payload || {})
+    ];
+  }
+
+  const { stdout, stderr } = await execFilePromise(file, args, {
     timeout: options.timeout || 45000,
-    maxBuffer: options.maxBuffer || 8 * 1024 * 1024
+    maxBuffer: options.maxBuffer || 8 * 1024 * 1024,
+    env: {
+      ...process.env,
+      TEAMYRA_ROOT: ROOT,
+      ...(PACKAGED_CORE && fs.existsSync(PACKAGED_CORE) ? { TEAMYRA_CORE_EXE: PACKAGED_CORE } : {})
+    }
   });
 
   let response;
@@ -106,4 +130,4 @@ async function callCore(action, payload = {}, options = {}) {
   return response.result;
 }
 
-module.exports = { ROOT, callCore, resolvePython };
+module.exports = { ROOT, SOURCE_ROOT, PACKAGED_CORE, callCore, resolvePython };

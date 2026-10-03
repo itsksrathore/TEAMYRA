@@ -4,7 +4,8 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 const HOME = os.homedir();
-const ROOT = path.resolve(__dirname, '..', '..', '..');
+const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
+const ROOT = path.resolve(process.env.TEAMYRA_ROOT || SOURCE_ROOT);
 const PROFILES_ROOT = path.join(ROOT, 'profiles');
 
 const PROVIDERS = [

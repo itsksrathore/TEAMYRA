@@ -30,6 +30,16 @@ npm run mcp:http -- --port 8787
 The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally localhost-only in this build.
 
 Provider-specific Claude Code, Codex, and Antigravity setup is documented in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+Windows packaging, installer/runtime layout, acceptance checks, and the release/update path are documented in [docs/WINDOWS_DISTRIBUTION.md](docs/WINDOWS_DISTRIBUTION.md).
+
+## Windows distribution
+
+```powershell
+npm run core:build
+npm run desktop:dist:win
+```
+
+The packaged desktop embeds `teamyra-core.exe`, so end users do not need a separate Python installation. Runtime jobs, logs, worktrees, memory, and managed profiles live under Electron user data rather than the installation directory. Tagged `v*` pushes run the Windows release workflow and publish NSIS/update metadata to GitHub Releases; production signing remains a release-hardening requirement.
 
 ## Target capabilities
 - Nami-style desktop UI.

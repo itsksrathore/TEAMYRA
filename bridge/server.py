@@ -6,6 +6,7 @@ Claude starts jobs, follows them (follow.py as a background task, or the dashboa
 reads compact results, sends follow-up messages and cancels them.
 """
 import json, os, subprocess, sys, threading, time, uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from worker_registry import build_worker_registry
 from runtime_paths import codex_launch, agy_launch, claude_launch
@@ -24,7 +25,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 BRIDGE = Path(__file__).resolve().parent
-ROOT = BRIDGE.parent
+ROOT = Path(os.environ.get("TEAMYRA_ROOT") or BRIDGE.parent).resolve()
 JOBS = ROOT / "jobs"
 LOGS = ROOT / "logs"
 WORKTREES = ROOT / "worktrees"
@@ -65,6 +66,22 @@ def worker_ids():
     return tuple(worker_registry().keys())
 
 
+INTERNAL_PROCESS_MODES = {
+    "runner.py": "__runner",
+    "conductor_monitor.py": "__conductor-monitor",
+    "review_monitor.py": "__review-monitor",
+    "failover_monitor.py": "__failover-monitor",
+}
+
+
+def bridge_process_command(script_name, *args):
+    mode = INTERNAL_PROCESS_MODES.get(str(script_name))
+    frozen_exe = os.environ.get("TEAMYRA_CORE_EXE")
+    if mode and (frozen_exe or getattr(sys, "frozen", False)):
+        return [str(frozen_exe or sys.executable), mode, *map(str, args)]
+    return [str(PYTHON), str(BRIDGE / str(script_name)), *map(str, args)]
+
+
 def run(cmd, cwd=None, env=None, timeout=60):
     merged = os.environ.copy()
     merged.update(env or {})
@@ -94,7 +111,7 @@ def worker_auth_status(info, use_cache=True):
             if not launch:
                 raise RuntimeError("Codex CLI not found")
             rc, out, err = run([*launch, "login", "status"],
-                                env={"CODEX_HOME": str(info["home"])}, timeout=20)
+                                env={"CODEX_HOME": str(info["home"])}, timeout=8)
             detail = (out + err).strip()
             ready = rc == 0 and "not logged in" not in detail.lower()
         elif provider == "claude":
@@ -104,14 +121,14 @@ def worker_auth_status(info, use_cache=True):
             env = {}
             if not info.get("native"):
                 env["CLAUDE_CONFIG_DIR"] = str(info["home"])
-            rc, out, err = run([*launch, "auth", "status", "--json"], env=env, timeout=20)
+            rc, out, err = run([*launch, "auth", "status", "--json"], env=env, timeout=8)
             detail = (out + err).strip()
             ready = rc == 0
         elif provider == "antigravity":
             launch = agy_launch()
             if not launch:
                 raise RuntimeError("Antigravity CLI not found")
-            rc, out, err = run([*launch, "models"], timeout=30)
+            rc, out, err = run([*launch, "models"], timeout=8)
             detail = (out + err).strip()
             ready = rc == 0 and bool(out.strip())
         else:
@@ -368,11 +385,11 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     log = open(jdir / "runner.log", "w", encoding="utf-8")
     try:  # break away from the MCP server's job object so a bridge restart does not kill the job
         try:
-            runner_proc = subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
+            runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
                                            stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
                                            creationflags=flags | 0x01000000)
         except OSError:
-            runner_proc = subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
+            runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
                                            stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
                                            creationflags=flags)
         patch_job_meta(job_id, runner_pid=runner_proc.pid)
@@ -381,7 +398,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
 
     if auto_failover and start_monitor and max_failovers > 0:
         monitor_log = open(jdir / "failover-monitor.log", "a", encoding="utf-8")
-        monitor_cmd = [str(PYTHON), str(BRIDGE / "failover_monitor.py"), job_id, str(max_failovers)]
+        monitor_cmd = bridge_process_command("failover_monitor.py", job_id, max_failovers)
         try:
             try:
                 failover_proc = subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
@@ -552,11 +569,29 @@ def job_wait(job_ids, mode="all", timeout_seconds=1500):
     }
 
 def worker_status():
-    out = []
     registry = worker_registry()
-    for w, info in registry.items():
+    auth = {}
+
+    def probe(item):
+        worker, info = item
+        ready, detail = worker_auth_status(info, use_cache=True)
+        return worker, ready, detail
+
+    items = list(registry.items())
+    if items:
+        with ThreadPoolExecutor(max_workers=min(8, len(items))) as pool:
+            futures = [pool.submit(probe, item) for item in items]
+            for future in as_completed(futures):
+                try:
+                    worker, ready, detail = future.result()
+                    auth[worker] = (ready, detail)
+                except Exception as exc:
+                    auth[getattr(exc, "worker", "unknown")] = (False, str(exc))
+
+    out = []
+    for w, info in items:
         provider = info["provider"]
-        ready, text = worker_auth_status(info, use_cache=False)
+        ready, text = auth.get(w, (False, "auth probe failed"))
         settings = worker_settings(info)
         out.append({
             "worker": w,
@@ -603,7 +638,7 @@ def start_conductor(graph_id):
     log_path = ROOT / "tasks" / f"{graph_id}.conductor.log"
     log = open(log_path, "a", encoding="utf-8")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    cmd = [str(PYTHON), str(BRIDGE / "conductor_monitor.py"), graph_id]
+    cmd = bridge_process_command("conductor_monitor.py", graph_id)
     try:
         try:
             try:
@@ -658,7 +693,7 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allo
     log_path = ROOT / "tasks" / "reviews" / f"{state['id']}.monitor.log"
     log = open(log_path, "a", encoding="utf-8")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    cmd = [str(PYTHON), str(BRIDGE / "review_monitor.py"), state["id"]]
+    cmd = bridge_process_command("review_monitor.py", state["id"])
     try:
         try:
             review_proc = subprocess.Popen(

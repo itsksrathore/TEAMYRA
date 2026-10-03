@@ -1,11 +1,12 @@
 """TEAMYRA local command-line interface."""
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 BRIDGE = Path(__file__).resolve().parent
-ROOT = BRIDGE.parent
+ROOT = Path(os.environ.get("TEAMYRA_ROOT") or BRIDGE.parent).resolve()
 sys.path.insert(0, str(BRIDGE))
 
 import server
