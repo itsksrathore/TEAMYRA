@@ -9,6 +9,7 @@ import json, os, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from worker_registry import build_worker_registry
 from runtime_paths import codex_launch, agy_launch, claude_launch
+import task_graph
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -576,10 +577,63 @@ def create_worktree(project_path, worker, idx):
     return str(path), branch
 
 
+def start_conductor(graph_id):
+    graph = task_graph.load_graph(ROOT, graph_id)
+    if graph.get("state") == "running":
+        return task_graph.graph_summary(graph)
+    if graph.get("state") not in {"draft"}:
+        raise ValueError(f"graph cannot be started from state {graph.get('state')}")
+
+    log_path = ROOT / "tasks" / f"{graph_id}.conductor.log"
+    log = open(log_path, "a", encoding="utf-8")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    cmd = [str(PYTHON), str(BRIDGE / "conductor_monitor.py"), graph_id]
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            close_fds=True,
+            creationflags=flags | 0x01000000,
+        )
+    except OSError:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            close_fds=True,
+            creationflags=flags,
+        )
+    return task_graph.graph_summary(task_graph.load_graph(ROOT, graph_id))
+
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic Codex profiles are discovered at runtime."}
 TOOLS = [
+    {"name": "graph_create", "description": "Create a persistent dependency task graph. Phase 3 executes graph nodes sequentially until Phase 4 worktree merge semantics are available.",
+     "inputSchema": {"type": "object", "properties": {
+         "title": {"type": "string"},
+         "project_path": {"type": "string"},
+         "nodes": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object", "properties": {
+             "id": {"type": "string"}, "label": {"type": "string"}, "task": {"type": "string"},
+             "worker": W_ENUM, "depends_on": {"type": "array", "items": {"type": "string"}},
+             "write": {"type": "boolean", "default": True}},
+             "required": ["id", "task"], "additionalProperties": False}}},
+         "required": ["project_path", "nodes"], "additionalProperties": False}},
+    {"name": "graph_start", "description": "Start the detached TEAMYRA Conductor for a draft task graph.",
+     "inputSchema": {"type": "object", "properties": {"graph_id": {"type": "string"}},
+                     "required": ["graph_id"], "additionalProperties": False}},
+    {"name": "graph_status", "description": "Read graph state, dependency nodes, workers, child job ids and errors.",
+     "inputSchema": {"type": "object", "properties": {"graph_id": {"type": "string"}},
+                     "required": ["graph_id"], "additionalProperties": False}},
+    {"name": "graph_cancel", "description": "Request cancellation of a graph and its active child job.",
+     "inputSchema": {"type": "object", "properties": {"graph_id": {"type": "string"}},
+                     "required": ["graph_id"], "additionalProperties": False}},
     {"name": "start_task", "description": (
         "Start a worker job and return at once with its job_id (non-blocking). The worker runs in its own "
         "process with a live transcript. Follow it with job_wait, job_status/job_events, or run the returned "
@@ -638,6 +692,21 @@ TOOLS = [
 
 
 def tool_call(name, a):
+    if name == "graph_create":
+        project_path = Path(a["project_path"]).resolve()
+        if not project_path.exists():
+            raise ValueError(f"project_path not found: {project_path}")
+        graph = task_graph.create_graph(ROOT, a.get("title"), project_path, a["nodes"])
+        return task_graph.graph_summary(graph)
+    if name == "graph_start":
+        return start_conductor(a["graph_id"])
+    if name == "graph_status":
+        return task_graph.graph_summary(task_graph.load_graph(ROOT, a["graph_id"]))
+    if name == "graph_cancel":
+        graph = task_graph.load_graph(ROOT, a["graph_id"])
+        graph["cancel_requested"] = True
+        task_graph.save_graph(ROOT, graph)
+        return task_graph.graph_summary(graph)
     if name == "start_task":
         requested_worker = a.get("worker", "auto")
         auto_failover = a.get("auto_failover", requested_worker == "auto")
