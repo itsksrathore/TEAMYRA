@@ -23,6 +23,7 @@ CONFIG = BRIDGE / "config.json"
 COOLDOWN_FILE = JOBS / "_cooldown_cleared.json"
 PYTHON = Path(sys.executable)
 COOLDOWN_SECONDS = 1800
+FAILOVER_REASONS = {"usage_or_rate_limit", "worker_error", "runner_crash", "worker_reported_error"}
 # Sent when runner.py auto-resumes a worker session that died mid-run.
 RESUME_MESSAGE = ("Your previous run on this task was interrupted: the worker process exited unexpectedly. "
                   "Check git status, git log and your last steps, then continue the same task from where you "
@@ -135,6 +136,50 @@ def read_meta(job_id):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def patch_job_meta(job_id, **changes):
+    path = JOBS / job_id / "meta.json"
+    meta = read_meta(job_id)
+    meta.update(changes)
+    meta["updated"] = time.time()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+    return meta
+
+
+def failover_eligible(meta):
+    return meta.get("state") == "failed" and meta.get("reason") in FAILOVER_REASONS
+
+
+def failover_chain(job_id):
+    first = read_meta(job_id)
+    root = first.get("failover_root") or first["id"]
+    chain = []
+    current = root
+    seen = set()
+    while current and current not in seen:
+        seen.add(current)
+        meta = read_meta(current)
+        chain.append(meta)
+        current = meta.get("failover_job_id")
+    return chain
+
+
+def failover_terminal_job_id(job_id):
+    return failover_chain(job_id)[-1]["id"]
+
+
+def chain_is_complete(job_id):
+    chain = failover_chain(job_id)
+    terminal = chain[-1]
+    root = chain[0]
+    if not is_done(terminal["id"]):
+        return False
+    if root.get("auto_failover_enabled") and not root.get("failover_complete"):
+        return False
+    return True
+
+
 def all_jobs():
     out = []
     for d in JOBS.iterdir():
@@ -222,15 +267,16 @@ def agy_cmd(task, cwd, write, timeout, session_id=None):
     return cmd
 
 
-def pick_worker(worker):
+def pick_worker(worker, exclude=None):
     registry = worker_registry()
+    exclude = set(exclude or [])
     if worker != "auto":
         return worker
 
     configured = [w for w in config().get("auto_order", [])
-                  if w in registry and registry[w].get("enabled", True)]
+                  if w in registry and w not in exclude and registry[w].get("enabled", True)]
     discovered = sorted(
-        (w for w in registry if w not in configured and registry[w].get("enabled", True)),
+        (w for w in registry if w not in configured and w not in exclude and registry[w].get("enabled", True)),
         key=lambda w: (registry[w].get("priority", 100), w),
     )
     order = configured + discovered
@@ -248,7 +294,8 @@ def pick_worker(worker):
 
 
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
-              session_id=None, parent=None):
+              session_id=None, parent=None, auto_failover=False, max_failovers=None,
+              failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
@@ -288,11 +335,17 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     else:
         raise ValueError(f"unsupported worker provider: {provider}")
     head = git(cwd, "rev-parse", "HEAD")
+    root_id = failover_root or job_id
+    max_failovers = int(config().get("max_failovers", 2) if max_failovers is None else max_failovers)
+    max_failovers = max(0, min(max_failovers, 5))
     meta = {"id": job_id, "label": label or clip(task.splitlines()[0] if task else job_id, 80),
             "worker": worker, "provider": provider, "worker_label": worker_info.get("label"),
             "profile_id": worker_info.get("profile_id"), "state": "starting", "cwd": str(cwd), "write": write,
             "created": time.time(), "head_start": head, "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
-            "parent": parent, "resumed_session": session_id, "timeout_s": timeout}
+            "parent": parent, "resumed_session": session_id, "timeout_s": timeout,
+            "failover_root": root_id, "failover_attempt": int(failover_attempt),
+            "previous_workers": list(previous_workers or []),
+            "auto_failover_enabled": bool(auto_failover), "max_failovers": max_failovers}
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "task.txt").write_text(task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
@@ -312,6 +365,18 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
         subprocess.Popen([str(PYTHON), str(BRIDGE / "runner.py"), str(jdir)], cwd=str(cwd),
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
                          creationflags=flags)
+
+    if auto_failover and start_monitor and max_failovers > 0:
+        monitor_log = open(jdir / "failover-monitor.log", "a", encoding="utf-8")
+        monitor_cmd = [str(PYTHON), str(BRIDGE / "failover_monitor.py"), job_id, str(max_failovers)]
+        try:
+            subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                             stdout=monitor_log, stderr=monitor_log, close_fds=True,
+                             creationflags=flags | 0x01000000)
+        except OSError:
+            subprocess.Popen(monitor_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                             stdout=monitor_log, stderr=monitor_log, close_fds=True,
+                             creationflags=flags)
     return job_id, worker
 
 
