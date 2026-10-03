@@ -16,6 +16,7 @@ let currentJobs = [];
 let activeView = 'command';
 let currentWorktrees = [];
 let selectedWorktreeId = null;
+let selectedConflictPath = null;
 let currentUsage = null;
 let currentTimeline = [];
 let observabilityTimelineRequestId = 0;
@@ -424,6 +425,17 @@ const wtMergeButton = document.querySelector('#wtMerge');
 const wtDiscardButton = document.querySelector('#wtDiscard');
 const wtForceDiscardButton = document.querySelector('#wtForceDiscard');
 const wtOpenTerminalButton = document.querySelector('#wtOpenTerminal');
+const wtConflictPanel = document.querySelector('#wtConflictPanel');
+const wtConflictFiles = document.querySelector('#wtConflictFiles');
+const wtConflictCount = document.querySelector('#wtConflictCount');
+const wtConflictPath = document.querySelector('#wtConflictPath');
+const wtConflictEditor = document.querySelector('#wtConflictEditor');
+const wtConflictHint = document.querySelector('#wtConflictHint');
+const wtUseTargetButton = document.querySelector('#wtUseTarget');
+const wtUseWorktreeButton = document.querySelector('#wtUseWorktree');
+const wtSaveConflictButton = document.querySelector('#wtSaveConflict');
+const wtContinueConflictButton = document.querySelector('#wtContinueConflict');
+const wtAbortConflictButton = document.querySelector('#wtAbortConflict');
 
 const usageCardsEl = document.querySelector('#usageCards');
 const timelineListEl = document.querySelector('#timelineList');
@@ -582,6 +594,80 @@ function renderWorktreeSummary(item) {
   }
 }
 
+function resetConflictEditor(message = 'Start an interactive update to preserve conflicts for review.') {
+  selectedConflictPath = null;
+  wtConflictPath.textContent = 'Select a conflicted file.';
+  wtConflictEditor.value = '';
+  wtConflictEditor.disabled = true;
+  wtUseTargetButton.disabled = true;
+  wtUseWorktreeButton.disabled = true;
+  wtSaveConflictButton.disabled = true;
+  wtConflictHint.textContent = message;
+}
+
+async function loadConflictFile(item, conflictPath) {
+  if (!item?.rebase_in_progress || !conflictPath) return;
+  const detail = await window.teamyra.conflictDetail(item.id, conflictPath);
+  selectedConflictPath = conflictPath;
+  wtConflictPath.textContent = conflictPath;
+  wtConflictEditor.value = detail.content || '';
+  const manualBlocked = detail.binary === true || detail.clipped === true;
+  wtConflictEditor.disabled = manualBlocked;
+  wtSaveConflictButton.disabled = manualBlocked;
+  wtUseTargetButton.disabled = false;
+  wtUseWorktreeButton.disabled = false;
+  wtConflictHint.textContent = detail.binary
+    ? 'Binary conflict: choose the target or worktree version.'
+    : detail.clipped
+      ? 'Conflict content is too large for safe manual editing here. Choose the complete target or worktree version.'
+      : 'Edit the conflict markers manually, or choose one complete side. “Target” is the branch being updated onto; “worktree” is this agent branch.';
+  for (const button of wtConflictFiles.querySelectorAll('.conflict-file')) {
+    button.classList.toggle('active', button.dataset.path === conflictPath);
+  }
+}
+
+async function renderConflictPanel(item) {
+  const active = item?.exists && item.rebase_in_progress === true;
+  wtConflictPanel.hidden = !active;
+  if (!active) {
+    wtConflictFiles.innerHTML = '';
+    wtConflictCount.textContent = '0 unresolved';
+    wtAbortConflictButton.disabled = true;
+    wtContinueConflictButton.disabled = true;
+    resetConflictEditor();
+    return;
+  }
+
+  const conflicts = Array.isArray(item.conflicts) ? item.conflicts : [];
+  wtConflictCount.textContent = conflicts.length + ' unresolved';
+  wtAbortConflictButton.disabled = false;
+  wtContinueConflictButton.disabled = conflicts.length > 0;
+  wtConflictFiles.innerHTML = '';
+
+  for (const conflictPath of conflicts) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'conflict-file';
+    button.dataset.path = conflictPath;
+    button.textContent = conflictPath;
+    button.addEventListener('click', () => {
+      loadConflictFile(item, conflictPath).catch(error => {
+        wtConflictHint.textContent = 'Could not load conflict: ' + String(error?.message || error);
+      });
+    });
+    wtConflictFiles.appendChild(button);
+  }
+
+  if (!conflicts.length) {
+    resetConflictEditor('All conflict files are staged. Continue the rebase to finish, or abort to restore the branch.');
+    wtContinueConflictButton.disabled = false;
+    return;
+  }
+
+  const nextPath = conflicts.includes(selectedConflictPath) ? selectedConflictPath : conflicts[0];
+  await loadConflictFile(item, nextPath);
+}
+
 async function selectWorktree(worktreeId) {
   selectedWorktreeId = worktreeId;
   renderWorktreeList(currentWorktrees);
@@ -602,11 +688,18 @@ async function selectWorktree(worktreeId) {
   wtStateEl.className = 'detail-state ' + state;
   wtMetaEl.textContent = [item.id, item.branch, '→ ' + (item.target_branch || 'target')].filter(Boolean).join(' · ');
   renderWorktreeSummary(item);
+  await renderConflictPanel(item);
   wtDiffEl.textContent = diff.diff || 'No tracked diff against the base commit.';
   if (diff.clipped) {
     wtDiffEl.textContent += '\n\n[Diff clipped at ' + diff.total_chars + ' characters]';
   }
   setWorktreeActionsEnabled(item.exists);
+  if (item.rebase_in_progress) {
+    wtRebaseButton.disabled = true;
+    wtMergeButton.disabled = true;
+    wtDiscardButton.disabled = true;
+    wtForceDiscardButton.disabled = true;
+  }
   renderWorktreeList(currentWorktrees);
 }
 
@@ -629,6 +722,8 @@ async function refreshWorktrees(options = {}) {
     wtStateEl.className = 'detail-state';
     wtMetaEl.textContent = 'Choose a managed worktree to inspect its branch and diff.';
     wtSummaryEl.innerHTML = '';
+    wtConflictPanel.hidden = true;
+    resetConflictEditor();
     wtDiffEl.textContent = 'No worktree selected.';
     setWorktreeActionsEnabled(false);
   }
@@ -1208,14 +1303,59 @@ wtOpenTerminalButton.addEventListener('click', () => {
 wtRebaseButton.addEventListener('click', async () => {
   const item = selectedWorktreeData();
   if (!item) return;
-  const message = 'Update branch "' + item.branch + '" onto the latest "' + item.target_branch + '"?\n\nTEAMYRA requires a clean worktree and automatically aborts the rebase if conflicts occur.';
+  const message = 'Update branch "' + item.branch + '" onto the latest "' + item.target_branch + '"?\n\nIf Git finds conflicts, TEAMYRA will pause the rebase and open the interactive resolver instead of aborting it.';
   if (!confirm(message)) return;
   try {
-    await window.teamyra.rebaseWorktree(item.id, true);
+    const result = await window.teamyra.beginConflictResolution(item.id, true);
     await refreshWorktrees({ preserveSelection: true });
-    alert('Worktree branch updated successfully.');
+    if (!result.paused) alert('Worktree branch updated successfully.');
   } catch (error) {
     alert('Update branch blocked: ' + String(error?.message || error));
+  }
+});
+
+async function resolveSelectedConflict(strategy) {
+  const item = selectedWorktreeData();
+  if (!item?.rebase_in_progress || !selectedConflictPath) return;
+  const options = { strategy, confirm: true };
+  if (strategy === 'manual') options.content = wtConflictEditor.value;
+  try {
+    await window.teamyra.resolveConflict(item.id, selectedConflictPath, options);
+    selectedConflictPath = null;
+    await refreshWorktrees({ preserveSelection: true });
+  } catch (error) {
+    wtConflictHint.textContent = 'Resolution failed: ' + String(error?.message || error);
+  }
+}
+
+wtUseTargetButton.addEventListener('click', () => resolveSelectedConflict('target'));
+wtUseWorktreeButton.addEventListener('click', () => resolveSelectedConflict('worktree'));
+wtSaveConflictButton.addEventListener('click', () => resolveSelectedConflict('manual'));
+
+wtContinueConflictButton.addEventListener('click', async () => {
+  const item = selectedWorktreeData();
+  if (!item?.rebase_in_progress) return;
+  if (!confirm('Continue the paused rebase with all staged resolutions?')) return;
+  try {
+    const result = await window.teamyra.continueConflictResolution(item.id, true);
+    selectedConflictPath = null;
+    await refreshWorktrees({ preserveSelection: true });
+    if (!result.paused) alert('Rebase completed successfully.');
+  } catch (error) {
+    wtConflictHint.textContent = 'Could not continue rebase: ' + String(error?.message || error);
+  }
+});
+
+wtAbortConflictButton.addEventListener('click', async () => {
+  const item = selectedWorktreeData();
+  if (!item?.rebase_in_progress) return;
+  if (!confirm('Abort this rebase and restore the worktree branch to its pre-rebase state?')) return;
+  try {
+    await window.teamyra.abortConflictResolution(item.id, true);
+    selectedConflictPath = null;
+    await refreshWorktrees({ preserveSelection: true });
+  } catch (error) {
+    wtConflictHint.textContent = 'Could not abort rebase: ' + String(error?.message || error);
   }
 });
 

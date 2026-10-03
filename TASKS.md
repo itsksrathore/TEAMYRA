@@ -55,7 +55,7 @@ This checklist is updated as implementation lands.
 - [x] Rebase/update-branch workflow with automatic abort on conflict.
 - [x] Bounded untracked text previews; binary/large untracked content is not dumped.
 - [x] Windows runtime verification: create/diff/rebase/merge/discard lifecycle validated end-to-end.
-- [ ] Interactive conflict-resolution UI.
+- [x] Interactive conflict-resolution UI — paused rebase state, per-file target/worktree/manual resolution, continue/abort controls, and real Git tests.
 
 ## Phase 5 — MCP / CLI / Plugins
 - [x] Canonical TEAMYRA MCP namespace with legacy aliases.

@@ -121,6 +121,30 @@
             <button class="secondary danger" id="wtForceDiscard" disabled>Force discard</button>
           </div>
           <div id="wtSummary" class="worktree-summary"></div>
+          <section id="wtConflictPanel" class="conflict-panel" hidden>
+            <div class="conflict-head">
+              <div>
+                <p class="eyebrow">INTERACTIVE RESOLUTION</p>
+                <h4 id="wtConflictTitle">Resolve rebase conflicts</h4>
+              </div>
+              <span id="wtConflictCount" class="conflict-count">0 unresolved</span>
+            </div>
+            <div id="wtConflictFiles" class="conflict-files"></div>
+            <div class="conflict-editor">
+              <div class="conflict-path" id="wtConflictPath">Select a conflicted file.</div>
+              <div class="conflict-choices">
+                <button class="secondary" id="wtUseTarget" disabled>Use target</button>
+                <button class="secondary" id="wtUseWorktree" disabled>Use worktree</button>
+              </div>
+              <textarea id="wtConflictEditor" spellcheck="false" disabled placeholder="Conflict content will appear here."></textarea>
+              <div id="wtConflictHint" class="conflict-hint">Start an interactive update to preserve conflicts for review.</div>
+              <div class="conflict-actions">
+                <button class="secondary" id="wtAbortConflict" disabled>Abort rebase</button>
+                <button class="secondary" id="wtSaveConflict" disabled>Save manual resolution</button>
+                <button class="primary" id="wtContinueConflict" disabled>Continue rebase</button>
+              </div>
+            </div>
+          </section>
           <pre id="wtDiff" class="diff-viewer">No worktree selected.</pre>
         </aside>
       </section>
