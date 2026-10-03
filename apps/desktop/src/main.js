@@ -445,7 +445,8 @@ ipcMain.handle('teamyra:chatgpt-revert', (_event, paths = ['.'], confirm = false
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
   if (confirm !== true) throw new Error('Revert requires explicit confirmation');
   return chatgptProvider.workspaceBridge.execute('git.restore', {
-    paths: Array.isArray(paths) ? paths : ['.']
+    paths: Array.isArray(paths) ? paths : ['.'],
+    staged: true
   }, true);
 });
 ipcMain.handle('teamyra:chatgpt-attach-file', (_event, filePath) => {
