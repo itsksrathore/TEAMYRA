@@ -71,7 +71,7 @@ This checklist is updated as implementation lands.
 - [x] Usage/quota dashboard — real persisted token usage + live readiness/cooldowns; unavailable provider quota percentages are not guessed.
 - [ ] Context-window visibility when providers expose reliable context telemetry.
 - [x] Searchable logs — bounded job events/transcripts/stderr/runner/task search via MCP/CLI/Desktop.
-- [ ] Project memory.
+- [x] Project memory — local per-project structured decisions/facts/notes/handoffs/TODOs with MCP/CLI/Desktop CRUD, ranked search, archive lifecycle, and bounded agent context packs; Windows runtime verified.
 - [ ] MCP pooling.
 - [ ] Crash recovery.
 

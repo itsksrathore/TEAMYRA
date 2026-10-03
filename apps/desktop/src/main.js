@@ -194,6 +194,69 @@ ipcMain.handle('teamyra:usage', async (_event, options = {}) => {
   return mergeUsageProviderState(snapshot, providers);
 });
 
+ipcMain.handle('teamyra:memory-list', (_event, options = {}) =>
+  callCore('memory.list', {
+    project_path: String(options.projectPath || ''),
+    kind: String(options.kind || ''),
+    status: String(options.status || 'active'),
+    tag: String(options.tag || ''),
+    limit: Number(options.limit) || 100
+  })
+);
+ipcMain.handle('teamyra:memory-search', (_event, options = {}) =>
+  callCore('memory.search', {
+    project_path: String(options.projectPath || ''),
+    query: String(options.query || ''),
+    kinds: Array.isArray(options.kinds) ? options.kinds : [],
+    tags: Array.isArray(options.tags) ? options.tags : [],
+    status: String(options.status || 'active'),
+    limit: Number(options.limit) || 50
+  })
+);
+ipcMain.handle('teamyra:memory-get', (_event, projectPath, memoryId) =>
+  callCore('memory.get', { project_path: String(projectPath || ''), memory_id: String(memoryId || '') })
+);
+ipcMain.handle('teamyra:memory-add', (_event, options = {}) =>
+  callCore('memory.add', {
+    project_path: String(options.projectPath || ''),
+    kind: String(options.kind || 'note'),
+    title: String(options.title || ''),
+    content: String(options.content || ''),
+    tags: Array.isArray(options.tags) ? options.tags : [],
+    importance: String(options.importance || 'normal'),
+    source_job_id: String(options.sourceJobId || ''),
+    source_graph_id: String(options.sourceGraphId || '')
+  })
+);
+ipcMain.handle('teamyra:memory-update', (_event, options = {}) => {
+  const payload = {
+    project_path: String(options.projectPath || ''),
+    memory_id: String(options.memoryId || '')
+  };
+  for (const key of ['title', 'content', 'importance', 'kind']) {
+    if (Object.prototype.hasOwnProperty.call(options, key)) payload[key] = options[key];
+  }
+  if (Array.isArray(options.tags)) payload.tags = options.tags;
+  return callCore('memory.update', payload);
+});
+ipcMain.handle('teamyra:memory-archive', (_event, projectPath, memoryId, reason = '') =>
+  callCore('memory.archive', {
+    project_path: String(projectPath || ''),
+    memory_id: String(memoryId || ''),
+    reason: String(reason || '')
+  })
+);
+ipcMain.handle('teamyra:memory-context', (_event, options = {}) =>
+  callCore('memory.context', {
+    project_path: String(options.projectPath || ''),
+    query: String(options.query || ''),
+    kinds: Array.isArray(options.kinds) ? options.kinds : [],
+    tags: Array.isArray(options.tags) ? options.tags : [],
+    max_chars: Number(options.maxChars) || 8000,
+    limit: Number(options.limit) || 40
+  }, { maxBuffer: 12 * 1024 * 1024 })
+);
+
 ipcMain.handle('teamyra:worktrees', () => callCore('worktree.list'));
 ipcMain.handle('teamyra:worktree-status', (_event, worktreeId) =>
   callCore('worktree.status', { worktree_id: worktreeId })

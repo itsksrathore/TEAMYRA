@@ -114,6 +114,49 @@ def cmd_usage(args):
     return 0
 
 
+def cmd_memory(args):
+    action = args.memory_action
+    base = {"project_path": args.project}
+    if action == "add":
+        result = call("memory_add", {
+            **base, "kind": args.kind, "title": args.title, "content": args.content,
+            "tags": args.tag or [], "importance": args.importance,
+            "source_job_id": args.source_job_id, "source_graph_id": args.source_graph_id,
+        })
+    elif action == "list":
+        result = call("memory_list", {
+            **base, "kind": args.kind, "status": args.status, "tag": args.tag,
+            "limit": args.limit,
+        })
+    elif action == "search":
+        result = call("memory_search", {
+            **base, "query": args.query, "kinds": args.kind or [], "tags": args.tag or [],
+            "status": args.status, "limit": args.limit,
+        })
+    elif action == "get":
+        result = call("memory_get", {**base, "memory_id": args.memory_id})
+    elif action == "update":
+        payload = {**base, "memory_id": args.memory_id}
+        for key in ("title", "content", "importance", "kind"):
+            value = getattr(args, key)
+            if value is not None:
+                payload[key] = value
+        if args.tag is not None:
+            payload["tags"] = args.tag
+        result = call("memory_update", payload)
+    elif action == "archive":
+        result = call("memory_archive", {**base, "memory_id": args.memory_id, "reason": args.reason})
+    elif action == "context":
+        result = call("memory_context", {
+            **base, "query": args.query, "kinds": args.kind or [], "tags": args.tag or [],
+            "max_chars": args.max_chars, "limit": args.limit,
+        })
+    else:
+        raise ValueError("unsupported memory action")
+    emit(result)
+    return 0
+
+
 def cmd_test(args):
     argv = list(args.command or [])
     if argv and argv[0] == "--":
@@ -255,6 +298,67 @@ def parser():
     usage = sub.add_parser("usage", help="Show real token usage plus live readiness/cooldown telemetry")
     usage.add_argument("--project")
     usage.set_defaults(func=cmd_usage)
+
+    memory = sub.add_parser("memory", help="Manage local structured project memory")
+    mem = memory.add_subparsers(dest="memory_action", required=True)
+
+    mem_add = mem.add_parser("add")
+    mem_add.add_argument("--project", required=True)
+    mem_add.add_argument("--kind", required=True, choices=["decision","architecture","fact","note","handoff","todo"])
+    mem_add.add_argument("--title", required=True)
+    mem_add.add_argument("--content", required=True)
+    mem_add.add_argument("--tag", action="append")
+    mem_add.add_argument("--importance", choices=["low","normal","high","critical"], default="normal")
+    mem_add.add_argument("--source-job-id")
+    mem_add.add_argument("--source-graph-id")
+    mem_add.set_defaults(func=cmd_memory)
+
+    mem_list = mem.add_parser("list")
+    mem_list.add_argument("--project", required=True)
+    mem_list.add_argument("--kind", choices=["decision","architecture","fact","note","handoff","todo"])
+    mem_list.add_argument("--status", choices=["active","archived","all"], default="active")
+    mem_list.add_argument("--tag")
+    mem_list.add_argument("--limit", type=int, default=100)
+    mem_list.set_defaults(func=cmd_memory)
+
+    mem_search = mem.add_parser("search")
+    mem_search.add_argument("--project", required=True)
+    mem_search.add_argument("query")
+    mem_search.add_argument("--kind", action="append", choices=["decision","architecture","fact","note","handoff","todo"])
+    mem_search.add_argument("--tag", action="append")
+    mem_search.add_argument("--status", choices=["active","archived","all"], default="active")
+    mem_search.add_argument("--limit", type=int, default=50)
+    mem_search.set_defaults(func=cmd_memory)
+
+    mem_get = mem.add_parser("get")
+    mem_get.add_argument("--project", required=True)
+    mem_get.add_argument("memory_id")
+    mem_get.set_defaults(func=cmd_memory)
+
+    mem_update = mem.add_parser("update")
+    mem_update.add_argument("--project", required=True)
+    mem_update.add_argument("memory_id")
+    mem_update.add_argument("--title")
+    mem_update.add_argument("--content")
+    mem_update.add_argument("--tag", action="append")
+    mem_update.add_argument("--importance", choices=["low","normal","high","critical"])
+    mem_update.add_argument("--kind", choices=["decision","architecture","fact","note","handoff","todo"])
+    mem_update.set_defaults(func=cmd_memory)
+
+    mem_archive = mem.add_parser("archive")
+    mem_archive.add_argument("--project", required=True)
+    mem_archive.add_argument("memory_id")
+    mem_archive.add_argument("--reason")
+    mem_archive.set_defaults(func=cmd_memory)
+
+    mem_context = mem.add_parser("context")
+    mem_context.add_argument("--project", required=True)
+    mem_context.add_argument("--query")
+    mem_context.add_argument("--kind", action="append", choices=["decision","architecture","fact","note","handoff","todo"])
+    mem_context.add_argument("--tag", action="append")
+    mem_context.add_argument("--max-chars", type=int, default=8000)
+    mem_context.add_argument("--limit", type=int, default=40)
+    mem_context.set_defaults(func=cmd_memory)
 
     test = sub.add_parser("test", help="Run one deterministic no-shell test command")
     test.add_argument("--project", required=True)

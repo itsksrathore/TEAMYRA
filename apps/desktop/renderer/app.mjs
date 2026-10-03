@@ -18,6 +18,8 @@ let currentWorktrees = [];
 let selectedWorktreeId = null;
 let currentUsage = null;
 let currentTimeline = [];
+let currentMemoryItems = [];
+let selectedMemoryId = null;
 
 const providersEl = document.querySelector('#providers');
 const jobsEl = document.querySelector('#jobs');
@@ -275,7 +277,9 @@ document.querySelector('#refresh').addEventListener('click', () => {
     ? refreshWorktrees()
     : activeView === 'observability'
       ? refreshObservability()
-      : refresh();
+      : activeView === 'memory'
+        ? refreshMemory({ preserveSelection: true })
+        : refresh();
   action.catch(error => alert('Refresh failed: ' + String(error?.message || error)));
 });
 setInterval(() => refreshJobs().catch(() => {}), 3000);
@@ -403,9 +407,11 @@ document.querySelector('#closeTerminal').addEventListener('click', closeTerminal
 const commandView = document.querySelector('#commandView');
 const worktreesView = document.querySelector('#worktreesView');
 const observabilityView = document.querySelector('#observabilityView');
+const memoryView = document.querySelector('#memoryView');
 const navCommand = document.querySelector('#navCommand');
 const navWorktrees = document.querySelector('#navWorktrees');
 const navObservability = document.querySelector('#navObservability');
+const navMemory = document.querySelector('#navMemory');
 const worktreeListEl = document.querySelector('#worktreeList');
 const wtDiffEl = document.querySelector('#wtDiff');
 const wtSummaryEl = document.querySelector('#wtSummary');
@@ -429,29 +435,53 @@ const logSearchQueryEl = document.querySelector('#logSearchQuery');
 const logSearchKindEl = document.querySelector('#logSearchKind');
 const logSearchResultsEl = document.querySelector('#logSearchResults');
 
+const memoryProjectEl = document.querySelector('#memoryProject');
+const memorySearchEl = document.querySelector('#memorySearch');
+const memoryKindFilterEl = document.querySelector('#memoryKindFilter');
+const memoryStatusFilterEl = document.querySelector('#memoryStatusFilter');
+const memoryListEl = document.querySelector('#memoryList');
+const memoryForm = document.querySelector('#memoryForm');
+const memoryKindEl = document.querySelector('#memoryKind');
+const memoryImportanceEl = document.querySelector('#memoryImportance');
+const memoryTitleEl = document.querySelector('#memoryTitle');
+const memoryTagsEl = document.querySelector('#memoryTags');
+const memoryContentEl = document.querySelector('#memoryContent');
+const memoryMetaEl = document.querySelector('#memoryMeta');
+const memoryArchiveButton = document.querySelector('#memoryArchive');
+const memoryContextPreviewEl = document.querySelector('#memoryContextPreview');
+const memoryEditorTitleEl = document.querySelector('#memoryEditorTitle');
+const memoryEditorStateEl = document.querySelector('#memoryEditorState');
+
 function setView(view) {
-  activeView = ['worktrees', 'observability'].includes(view) ? view : 'command';
+  activeView = ['worktrees', 'observability', 'memory'].includes(view) ? view : 'command';
   const isCommand = activeView === 'command';
   const isWorktrees = activeView === 'worktrees';
   const isObservability = activeView === 'observability';
+  const isMemory = activeView === 'memory';
 
   commandView.hidden = !isCommand;
   worktreesView.hidden = !isWorktrees;
   observabilityView.hidden = !isObservability;
+  memoryView.hidden = !isMemory;
   navCommand.classList.toggle('active', isCommand);
   navWorktrees.classList.toggle('active', isWorktrees);
   navObservability.classList.toggle('active', isObservability);
+  navMemory.classList.toggle('active', isMemory);
 
   document.querySelector('#pageEyebrow').textContent = isWorktrees
     ? 'ISOLATED GIT WORKSPACES'
     : isObservability
       ? 'RUNTIME TELEMETRY'
-      : 'MULTI-AGENT CONTROL PLANE';
+      : isMemory
+        ? 'LOCAL PROJECT CONTEXT'
+        : 'MULTI-AGENT CONTROL PLANE';
   document.querySelector('#pageTitle').textContent = isWorktrees
     ? 'Worktrees'
     : isObservability
       ? 'Observability'
-      : 'Command Desk';
+      : isMemory
+        ? 'Memory'
+        : 'Command Desk';
   document.querySelector('#openTerminal').hidden = !isCommand;
 
   if (isWorktrees) refreshWorktrees({ preserveSelection: true }).catch(error => {
@@ -461,6 +491,11 @@ function setView(view) {
     document.querySelector('#timelineList').innerHTML =
       '<div class="empty">Could not load observability: ' + escapeHtml(error?.message || error) + '</div>';
   });
+  if (isMemory && memoryProjectEl.value.trim()) {
+    refreshMemory({ preserveSelection: true }).catch(error => {
+      memoryListEl.innerHTML = '<div class="empty">Could not load memory: ' + escapeHtml(error?.message || error) + '</div>';
+    });
+  }
 }
 
 function worktreeState(item) {
@@ -894,9 +929,230 @@ function scheduleTimelineRefresh(full = false) {
 }
 
 
+
+function memoryTagsFromInput() {
+  return memoryTagsEl.value
+    .split(/[,\n]/)
+    .map(value => value.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function resetMemoryEditor() {
+  selectedMemoryId = null;
+  memoryForm.reset();
+  memoryKindEl.value = 'note';
+  memoryImportanceEl.value = 'normal';
+  memoryEditorTitleEl.textContent = 'New memory';
+  memoryEditorStateEl.textContent = 'LOCAL';
+  memoryEditorStateEl.className = 'detail-state';
+  memoryMetaEl.textContent = 'New local memory entry.';
+  memoryArchiveButton.disabled = true;
+  for (const control of [memoryKindEl, memoryImportanceEl, memoryTitleEl, memoryTagsEl, memoryContentEl, document.querySelector('#memorySave')]) {
+    control.disabled = false;
+  }
+  renderMemoryList(currentMemoryItems);
+}
+
+function renderMemoryList(items) {
+  memoryListEl.innerHTML = '';
+  if (!items.length) {
+    memoryListEl.innerHTML = '<div class="empty">No project memories match the current filters.</div>';
+    return;
+  }
+
+  for (const item of items) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'memory-card' + (selectedMemoryId === item.id ? ' selected' : '');
+    card.dataset.memoryId = item.id;
+
+    const top = document.createElement('div');
+    top.className = 'memory-card-top';
+    const title = document.createElement('b');
+    title.textContent = item.title || item.id;
+    const kind = document.createElement('span');
+    kind.className = 'memory-kind ' + (item.kind || 'note');
+    kind.textContent = item.kind || 'note';
+    top.append(title, kind);
+
+    const tags = document.createElement('div');
+    tags.className = 'memory-card-tags';
+    tags.textContent = (item.tags || []).map(tag => '#' + tag).join(' ') || 'no tags';
+
+    const meta = document.createElement('small');
+    meta.textContent = [
+      item.importance || 'normal',
+      item.status || 'active',
+      item.id
+    ].join(' · ');
+
+    card.append(top, tags, meta);
+    card.addEventListener('click', () => selectMemory(item.id));
+    memoryListEl.appendChild(card);
+  }
+}
+
+async function selectMemory(memoryId) {
+  const projectPath = memoryProjectEl.value.trim();
+  if (!projectPath) return;
+  const item = await window.teamyra.memoryGet(projectPath, memoryId);
+  selectedMemoryId = item.id;
+  memoryEditorTitleEl.textContent = item.title || item.id;
+  memoryEditorStateEl.textContent = String(item.status || 'active').toUpperCase();
+  memoryEditorStateEl.className = 'detail-state ' + (item.status || 'active');
+  memoryKindEl.value = item.kind || 'note';
+  memoryImportanceEl.value = item.importance || 'normal';
+  memoryTitleEl.value = item.title || '';
+  memoryTagsEl.value = (item.tags || []).join(', ');
+  memoryContentEl.value = item.content || '';
+  memoryMetaEl.textContent = [
+    item.id,
+    item.source_job_id ? 'job ' + item.source_job_id : '',
+    item.source_graph_id ? 'graph ' + item.source_graph_id : '',
+    item.updated_at ? 'updated ' + formatTimelineTime(item.updated_at) : ''
+  ].filter(Boolean).join(' · ');
+  const archived = item.status === 'archived';
+  memoryArchiveButton.disabled = archived;
+  for (const control of [memoryKindEl, memoryImportanceEl, memoryTitleEl, memoryTagsEl, memoryContentEl, document.querySelector('#memorySave')]) {
+    control.disabled = archived;
+  }
+  renderMemoryList(currentMemoryItems);
+}
+
+async function refreshMemory(options = {}) {
+  const projectPath = memoryProjectEl.value.trim();
+  if (!projectPath) {
+    currentMemoryItems = [];
+    selectedMemoryId = null;
+    memoryListEl.innerHTML = '<div class="empty">Choose a project path and load memory.</div>';
+    resetMemoryEditor();
+    return { items: [] };
+  }
+
+  const query = memorySearchEl.value.trim();
+  const kind = memoryKindFilterEl.value;
+  const status = memoryStatusFilterEl.value || 'active';
+  const result = query
+    ? await window.teamyra.memorySearch({
+        projectPath,
+        query,
+        kinds: kind ? [kind] : [],
+        status,
+        limit: 100
+      })
+    : await window.teamyra.memoryList({
+        projectPath,
+        kind,
+        status,
+        limit: 100
+      });
+
+  currentMemoryItems = Array.isArray(result.items) ? result.items : [];
+  if (!options.preserveSelection || !currentMemoryItems.some(item => item.id === selectedMemoryId)) {
+    selectedMemoryId = currentMemoryItems[0]?.id || null;
+  }
+  renderMemoryList(currentMemoryItems);
+
+  if (selectedMemoryId) {
+    await selectMemory(selectedMemoryId);
+  } else {
+    resetMemoryEditor();
+  }
+  return result;
+}
+
+let memorySearchTimer = null;
+function scheduleMemoryRefresh() {
+  clearTimeout(memorySearchTimer);
+  memorySearchTimer = setTimeout(() => {
+    refreshMemory({ preserveSelection: false }).catch(error => {
+      memoryListEl.innerHTML = '<div class="empty">Memory refresh failed: ' + escapeHtml(error?.message || error) + '</div>';
+    });
+  }, 250);
+}
+
+async function buildMemoryContext() {
+  const projectPath = memoryProjectEl.value.trim();
+  if (!projectPath) {
+    memoryContextPreviewEl.textContent = 'Choose a project path first.';
+    return;
+  }
+  memoryContextPreviewEl.textContent = 'Building bounded context pack…';
+  const kind = memoryKindFilterEl.value;
+  const result = await window.teamyra.memoryContext({
+    projectPath,
+    query: memorySearchEl.value.trim(),
+    kinds: kind ? [kind] : [],
+    maxChars: 10000,
+    limit: 50
+  });
+  memoryContextPreviewEl.textContent = result.text || 'No active project memory matched.';
+}
+
 navCommand.addEventListener('click', () => setView('command'));
 navWorktrees.addEventListener('click', () => setView('worktrees'));
 navObservability.addEventListener('click', () => setView('observability'));
+navMemory.addEventListener('click', () => setView('memory'));
+
+document.querySelector('#loadMemory').addEventListener('click', () => {
+  refreshMemory({ preserveSelection: false }).catch(error => {
+    memoryListEl.innerHTML = '<div class="empty">Could not load memory: ' + escapeHtml(error?.message || error) + '</div>';
+  });
+});
+document.querySelector('#memoryNew').addEventListener('click', resetMemoryEditor);
+document.querySelector('#memoryReset').addEventListener('click', resetMemoryEditor);
+document.querySelector('#memoryContext').addEventListener('click', () => {
+  buildMemoryContext().catch(error => {
+    memoryContextPreviewEl.textContent = 'Context build failed: ' + String(error?.message || error);
+  });
+});
+document.querySelector('#memoryContextClose').addEventListener('click', () => {
+  memoryContextPreviewEl.textContent = 'Build a context pack to preview bounded project memory for agents.';
+});
+memorySearchEl.addEventListener('input', scheduleMemoryRefresh);
+memoryKindFilterEl.addEventListener('change', scheduleMemoryRefresh);
+memoryStatusFilterEl.addEventListener('change', scheduleMemoryRefresh);
+
+memoryForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const projectPath = memoryProjectEl.value.trim();
+  if (!projectPath) {
+    alert('Choose a project path first.');
+    return;
+  }
+  const payload = {
+    projectPath,
+    kind: memoryKindEl.value,
+    importance: memoryImportanceEl.value,
+    title: memoryTitleEl.value.trim(),
+    content: memoryContentEl.value.trim(),
+    tags: memoryTagsFromInput()
+  };
+  try {
+    const result = selectedMemoryId
+      ? await window.teamyra.memoryUpdate({ ...payload, memoryId: selectedMemoryId })
+      : await window.teamyra.memoryAdd(payload);
+    selectedMemoryId = result.id;
+    await refreshMemory({ preserveSelection: true });
+  } catch (error) {
+    alert('Could not save memory: ' + String(error?.message || error));
+  }
+});
+
+memoryArchiveButton.addEventListener('click', async () => {
+  if (!selectedMemoryId) return;
+  const projectPath = memoryProjectEl.value.trim();
+  if (!projectPath) return;
+  if (!confirm('Archive this memory entry? It will remain preserved and searchable in archived/all views.')) return;
+  try {
+    await window.teamyra.memoryArchive(projectPath, selectedMemoryId, 'Archived from TEAMYRA Desktop');
+    selectedMemoryId = null;
+    await refreshMemory({ preserveSelection: false });
+  } catch (error) {
+    alert('Could not archive memory: ' + String(error?.message || error));
+  }
+});
 
 document.querySelector('#refreshObservability').addEventListener('click', () => {
   refreshObservability().catch(error => {

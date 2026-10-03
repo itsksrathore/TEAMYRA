@@ -67,6 +67,90 @@ class DesktopContractTests(unittest.TestCase):
         self.assertIn("'codex2'", self.main)
         self.assertIn("'antigravity'", self.main)
 
+    def test_memory_renderer_ids_exist_in_html(self):
+        ids = [
+            "navMemory", "memoryView", "memoryProject", "loadMemory",
+            "memorySearch", "memoryKindFilter", "memoryStatusFilter",
+            "memoryNew", "memoryContext", "memoryList", "memoryForm",
+            "memoryKind", "memoryImportance", "memoryTitle", "memoryTags",
+            "memoryContent", "memoryMeta", "memoryArchive", "memoryReset",
+            "memorySave", "memoryContextPreview", "memoryContextClose",
+        ]
+        for element_id in ids:
+            self.assertIn(f'id="{element_id}"', self.html, element_id)
+            self.assertIn(f"#{element_id}", self.renderer, element_id)
+
+    def test_memory_preload_api_matches_main_ipc_handlers(self):
+        contracts = {
+            "memoryList": "teamyra:memory-list",
+            "memorySearch": "teamyra:memory-search",
+            "memoryGet": "teamyra:memory-get",
+            "memoryAdd": "teamyra:memory-add",
+            "memoryUpdate": "teamyra:memory-update",
+            "memoryArchive": "teamyra:memory-archive",
+            "memoryContext": "teamyra:memory-context",
+        }
+        for method, channel in contracts.items():
+            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
+            self.assertIn(channel, self.preload)
+            self.assertIn(channel, self.main)
+
+        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
+        for action in (
+            "memory.list", "memory.search", "memory.get", "memory.add",
+            "memory.update", "memory.archive", "memory.context",
+        ):
+            self.assertIn(action, desktop_api)
+
+    def test_memory_renderer_uses_textcontent_for_dynamic_entry_fields(self):
+        self.assertIn("title.textContent = item.title", self.renderer)
+        self.assertIn("tags.textContent =", self.renderer)
+        self.assertIn("memoryContentEl.value = item.content", self.renderer)
+        self.assertNotIn("memoryListEl.innerHTML = items.map", self.renderer)
+
+    def test_memory_renderer_ids_exist_in_html(self):
+        ids = [
+            "navMemory", "memoryView", "memoryProject", "loadMemory",
+            "memorySearch", "memoryKindFilter", "memoryStatusFilter",
+            "memoryNew", "memoryContext", "memoryList", "memoryForm",
+            "memoryKind", "memoryImportance", "memoryTitle", "memoryTags",
+            "memoryContent", "memoryMeta", "memoryArchive", "memoryReset",
+            "memorySave", "memoryContextPreview", "memoryContextClose",
+            "memoryEditorTitle", "memoryEditorState",
+        ]
+        for element_id in ids:
+            self.assertIn(f'id="{element_id}"', self.html, element_id)
+            self.assertIn(f"#{element_id}", self.renderer, element_id)
+
+    def test_memory_preload_api_matches_main_ipc_handlers(self):
+        contracts = {
+            "memoryList": "teamyra:memory-list",
+            "memorySearch": "teamyra:memory-search",
+            "memoryGet": "teamyra:memory-get",
+            "memoryAdd": "teamyra:memory-add",
+            "memoryUpdate": "teamyra:memory-update",
+            "memoryArchive": "teamyra:memory-archive",
+            "memoryContext": "teamyra:memory-context",
+        }
+        for method, channel in contracts.items():
+            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
+            self.assertIn(channel, self.preload)
+            self.assertIn(channel, self.main)
+
+        desktop_api = (ROOT / "bridge" / "desktop_api.py").read_text(encoding="utf-8")
+        for action in (
+            "memory.list", "memory.search", "memory.get", "memory.add",
+            "memory.update", "memory.archive", "memory.context",
+        ):
+            self.assertIn(action, desktop_api)
+
+    def test_memory_is_runtime_only_and_archives_instead_of_deleting(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertRegex(gitignore, r"(?m)^memory/$")
+        self.assertIn("Archive this memory entry?", self.renderer)
+        self.assertNotIn("teamyra:memory-delete", self.main)
+        self.assertNotIn("memoryDelete:", self.preload)
+
     def test_preload_worktree_api_matches_main_ipc_handlers(self):
         contracts = {
             "worktrees": "teamyra:worktrees",

@@ -14,6 +14,7 @@ import test_policy
 import review_cycle
 import worktree_manager
 import observability
+import project_memory
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -742,6 +743,58 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"}},
          "additionalProperties": False}},
+    {"name": "memory_add", "description": "Add a structured local project memory entry. Runtime memory is stored under TEAMYRA memory/ and excluded from source control.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"},
+         "kind": {"type": "string", "enum": ["decision", "architecture", "fact", "note", "handoff", "todo"]},
+         "title": {"type": "string"},
+         "content": {"type": "string"},
+         "tags": {"type": "array", "items": {"type": "string"}},
+         "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"], "default": "normal"},
+         "source_job_id": {"type": "string"},
+         "source_graph_id": {"type": "string"}},
+         "required": ["project_path", "kind", "title", "content"], "additionalProperties": False}},
+    {"name": "memory_list", "description": "List structured project memories with optional kind/status/tag filters.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"},
+         "kind": {"type": "string", "enum": ["decision", "architecture", "fact", "note", "handoff", "todo"]},
+         "status": {"type": "string", "enum": ["active", "archived", "all"], "default": "active"},
+         "tag": {"type": "string"},
+         "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500}},
+         "required": ["project_path"], "additionalProperties": False}},
+    {"name": "memory_search", "description": "Search project memory by title, tags, and content with bounded ranked results.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"},
+         "query": {"type": "string"},
+         "kinds": {"type": "array", "items": {"type": "string", "enum": ["decision", "architecture", "fact", "note", "handoff", "todo"]}},
+         "tags": {"type": "array", "items": {"type": "string"}},
+         "status": {"type": "string", "enum": ["active", "archived", "all"], "default": "active"},
+         "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200}},
+         "required": ["project_path", "query"], "additionalProperties": False}},
+    {"name": "memory_get", "description": "Read one project memory entry by id.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"}, "memory_id": {"type": "string"}},
+         "required": ["project_path", "memory_id"], "additionalProperties": False}},
+    {"name": "memory_update", "description": "Update an active project memory entry.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"}, "memory_id": {"type": "string"},
+         "title": {"type": "string"}, "content": {"type": "string"},
+         "tags": {"type": "array", "items": {"type": "string"}},
+         "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"]},
+         "kind": {"type": "string", "enum": ["decision", "architecture", "fact", "note", "handoff", "todo"]}},
+         "required": ["project_path", "memory_id"], "additionalProperties": False}},
+    {"name": "memory_archive", "description": "Archive a project memory entry while preserving its history.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"}, "memory_id": {"type": "string"}, "reason": {"type": "string"}},
+         "required": ["project_path", "memory_id"], "additionalProperties": False}},
+    {"name": "memory_context", "description": "Build a bounded project-memory context pack for an agent without dumping the full memory store.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"}, "query": {"type": "string"},
+         "kinds": {"type": "array", "items": {"type": "string", "enum": ["decision", "architecture", "fact", "note", "handoff", "todo"]}},
+         "tags": {"type": "array", "items": {"type": "string"}},
+         "max_chars": {"type": "integer", "default": 8000, "minimum": 1000, "maximum": 24000},
+         "limit": {"type": "integer", "default": 40, "minimum": 1, "maximum": 100}},
+         "required": ["project_path"], "additionalProperties": False}},
     {"name": "test_run", "description": "Run deterministic no-shell test steps in a project directory. Commands are argv arrays, run sequentially, and stop on first failure or timeout.",
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string"},
@@ -903,6 +956,38 @@ def tool_call(name, a):
             ROOT,
             worker_status(),
             a.get("project_path"),
+        )
+    if name == "memory_add":
+        return project_memory.add(
+            ROOT, a["project_path"], a["kind"], a["title"], a["content"],
+            a.get("tags"), a.get("importance", "normal"),
+            a.get("source_job_id"), a.get("source_graph_id"),
+        )
+    if name == "memory_list":
+        return project_memory.list_entries(
+            ROOT, a["project_path"], a.get("kind"), a.get("status", "active"),
+            a.get("tag"), a.get("limit", 100),
+        )
+    if name == "memory_search":
+        return project_memory.search(
+            ROOT, a["project_path"], a["query"], a.get("kinds"), a.get("tags"),
+            a.get("status", "active"), a.get("limit", 50),
+        )
+    if name == "memory_get":
+        return project_memory.get(ROOT, a["project_path"], a["memory_id"])
+    if name == "memory_update":
+        patch = {
+            key: a[key]
+            for key in ("title", "content", "tags", "importance", "kind")
+            if key in a
+        }
+        return project_memory.update(ROOT, a["project_path"], a["memory_id"], **patch)
+    if name == "memory_archive":
+        return project_memory.archive(ROOT, a["project_path"], a["memory_id"], a.get("reason"))
+    if name == "memory_context":
+        return project_memory.context_pack(
+            ROOT, a["project_path"], a.get("query"), a.get("kinds"), a.get("tags"),
+            a.get("max_chars", 8000), a.get("limit", 40),
         )
     if name == "review_start":
         return start_review_cycle(

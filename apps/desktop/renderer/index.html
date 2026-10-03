@@ -15,7 +15,7 @@
       <button id="navWorktrees" data-view="worktrees">Worktrees</button>
       <button id="navObservability" data-view="observability">Observability</button>
       <button disabled>Connections</button>
-      <button disabled>Memory</button>
+      <button id="navMemory" data-view="memory">Memory</button>
       <button disabled>Settings</button>
     </nav>
     <div class="core-status"><span></span> Local core</div>
@@ -184,6 +184,84 @@
         <button class="primary" type="submit">Search</button>
       </form>
       <section id="logSearchResults" class="log-results"><div class="empty">Enter a query to search persisted TEAMYRA logs.</div></section>
+    </div>
+
+    <div id="memoryView" class="app-view" hidden>
+      <section class="memory-hero">
+        <div>
+          <span class="ready">● LOCAL PROJECT MEMORY</span>
+          <h2>Memory</h2>
+          <p>Store architecture decisions, facts, handoffs, notes, and TODOs per project. Runtime memory stays local and is excluded from source control.</p>
+        </div>
+        <div class="memory-project">
+          <label><span>Project / repository path</span><input id="memoryProject" placeholder="D:\\path\\to\\project" /></label>
+          <button class="primary" id="loadMemory">Load memory</button>
+        </div>
+      </section>
+
+      <section class="memory-toolbar">
+        <input id="memorySearch" placeholder="Search project memory…" />
+        <select id="memoryKindFilter">
+          <option value="">All kinds</option>
+          <option value="decision">Decision</option>
+          <option value="architecture">Architecture</option>
+          <option value="fact">Fact</option>
+          <option value="note">Note</option>
+          <option value="handoff">Handoff</option>
+          <option value="todo">Todo</option>
+        </select>
+        <select id="memoryStatusFilter">
+          <option value="active">Active</option>
+          <option value="archived">Archived</option>
+          <option value="all">All</option>
+        </select>
+        <button class="secondary" id="memoryNew">+ New memory</button>
+        <button class="secondary" id="memoryContext">Context pack</button>
+      </section>
+
+      <section class="memory-layout">
+        <div id="memoryList" class="memory-list"><div class="empty">Choose a project path and load memory.</div></div>
+        <aside class="memory-editor">
+          <div class="detail-head">
+            <div>
+              <p class="eyebrow">PROJECT MEMORY</p>
+              <h3 id="memoryEditorTitle">New memory</h3>
+            </div>
+            <span id="memoryEditorState" class="detail-state">LOCAL</span>
+          </div>
+          <form id="memoryForm" class="memory-form">
+            <div class="memory-form-grid">
+              <label><span>Kind</span><select id="memoryKind">
+                <option value="decision">Decision</option>
+                <option value="architecture">Architecture</option>
+                <option value="fact">Fact</option>
+                <option value="note" selected>Note</option>
+                <option value="handoff">Handoff</option>
+                <option value="todo">Todo</option>
+              </select></label>
+              <label><span>Importance</span><select id="memoryImportance">
+                <option value="low">Low</option>
+                <option value="normal" selected>Normal</option>
+                <option value="high">High</option>
+                <option value="critical">Critical</option>
+              </select></label>
+            </div>
+            <label><span>Title</span><input id="memoryTitle" maxlength="180" required /></label>
+            <label><span>Tags</span><input id="memoryTags" placeholder="architecture, routing, auth" /></label>
+            <label><span>Content</span><textarea id="memoryContent" rows="14" maxlength="24000" required></textarea></label>
+            <div id="memoryMeta" class="memory-meta">New local memory entry.</div>
+            <div class="memory-actions">
+              <button type="button" class="secondary danger-soft" id="memoryArchive" disabled>Archive</button>
+              <button type="button" class="secondary" id="memoryReset">Reset</button>
+              <button type="submit" class="primary" id="memorySave">Save memory</button>
+            </div>
+          </form>
+          <div class="memory-context-panel">
+            <div class="memory-context-head"><b>Agent context preview</b><button class="secondary" id="memoryContextClose">Clear</button></div>
+            <pre id="memoryContextPreview">Build a context pack to preview bounded project memory for agents.</pre>
+          </div>
+        </aside>
+      </section>
     </div>
 
     <section id="terminalPanel" class="terminal-panel" hidden>

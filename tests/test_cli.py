@@ -92,6 +92,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(name, "usage_snapshot")
         self.assertEqual(payload["project_path"], "P")
 
+    def test_memory_add_delegates_structured_payload(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"id": "mem-1"}) as call:
+            code, out, _ = self.run_cli([
+                "memory", "add", "--project", "P", "--kind", "decision",
+                "--title", "Architecture", "--content", "Use worktrees",
+                "--tag", "git", "--importance", "high",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["id"], "mem-1")
+        name, payload = call.call_args.args
+        self.assertEqual(name, "memory_add")
+        self.assertEqual(payload["project_path"], "P")
+        self.assertEqual(payload["tags"], ["git"])
+        self.assertEqual(payload["importance"], "high")
+
+    def test_memory_search_and_context_delegate(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"items": []}) as call:
+            code, _, _ = self.run_cli([
+                "memory", "search", "--project", "P", "routing",
+                "--kind", "decision", "--tag", "router",
+            ])
+        self.assertEqual(code, 0)
+        name, payload = call.call_args.args
+        self.assertEqual(name, "memory_search")
+        self.assertEqual(payload["query"], "routing")
+        self.assertEqual(payload["kinds"], ["decision"])
+        self.assertEqual(payload["tags"], ["router"])
+
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"text": "ctx"}) as call:
+            code, _, _ = self.run_cli([
+                "memory", "context", "--project", "P", "--query", "routing",
+                "--max-chars", "4000",
+            ])
+        self.assertEqual(code, 0)
+        name, payload = call.call_args.args
+        self.assertEqual(name, "memory_context")
+        self.assertEqual(payload["max_chars"], 4000)
+
     def test_worktree_merge_requires_yes(self):
         with patch.object(teamyra_cli.server, "tool_call") as call:
             code, _, err = self.run_cli(["worktree", "merge", "wt-test"])

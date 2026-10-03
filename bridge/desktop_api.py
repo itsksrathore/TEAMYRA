@@ -20,6 +20,7 @@ sys.path.insert(0, str(BRIDGE))
 
 import worktree_manager
 import observability
+import project_memory
 
 
 def handle(action, payload):
@@ -62,6 +63,40 @@ def handle(action, payload):
             ROOT,
             rows,
             payload.get("project_path"),
+        )
+    if action == "memory.list":
+        return project_memory.list_entries(
+            ROOT, payload["project_path"], payload.get("kind"), payload.get("status", "active"),
+            payload.get("tag"), payload.get("limit", 100),
+        )
+    if action == "memory.search":
+        return project_memory.search(
+            ROOT, payload["project_path"], payload["query"], payload.get("kinds"), payload.get("tags"),
+            payload.get("status", "active"), payload.get("limit", 50),
+        )
+    if action == "memory.get":
+        return project_memory.get(ROOT, payload["project_path"], payload["memory_id"])
+    if action == "memory.add":
+        return project_memory.add(
+            ROOT, payload["project_path"], payload["kind"], payload["title"], payload["content"],
+            payload.get("tags"), payload.get("importance", "normal"),
+            payload.get("source_job_id"), payload.get("source_graph_id"),
+        )
+    if action == "memory.update":
+        patch = {
+            key: payload[key]
+            for key in ("title", "content", "tags", "importance", "kind")
+            if key in payload
+        }
+        return project_memory.update(ROOT, payload["project_path"], payload["memory_id"], **patch)
+    if action == "memory.archive":
+        return project_memory.archive(
+            ROOT, payload["project_path"], payload["memory_id"], payload.get("reason"),
+        )
+    if action == "memory.context":
+        return project_memory.context_pack(
+            ROOT, payload["project_path"], payload.get("query"), payload.get("kinds"),
+            payload.get("tags"), payload.get("max_chars", 8000), payload.get("limit", 40),
         )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)
