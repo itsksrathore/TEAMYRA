@@ -192,4 +192,4 @@ function profileRoot(providerId) {
   return path.join(PROFILES_ROOT, providerId);
 }
 
-module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot };
+module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot, whereBinary };
