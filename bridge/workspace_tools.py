@@ -523,6 +523,13 @@ class WorkspaceToolService:
                 subcommand = argv[1].lower() if len(argv) > 1 else ""
                 if subcommand not in {"status", "diff", "log", "show", "rev-parse"}:
                     raise PermissionError("mutating Git commands must use TEAMYRA git tools")
+            version_only = (
+                (exe in {"node", "node.exe", "npm", "npm.cmd"} and argv[1:] in (["--version"], ["-v"]))
+                or (exe in {"python", "python.exe", "python3"} and argv[1:] in (["--version"], ["-V"]))
+            )
+            read_only_git = exe in {"git", "git.exe"} and bool(argv[1:]) and argv[1].lower() in {
+                "status", "diff", "log", "show", "rev-parse"
+            }
             sensitive_command = (
                 exe in SHELL_EXECUTABLES
                 or exe in DESTRUCTIVE_EXECUTABLES
@@ -532,6 +539,11 @@ class WorkspaceToolService:
                     and any(arg.lower() in INLINE_EVAL_FLAGS for arg in argv[1:3])
                 )
             )
+            if not confirm and not (version_only or read_only_git):
+                raise PermissionError(
+                    "terminal command requires explicit per-command confirmation; "
+                    "automated ChatGPT terminal access is limited to version checks and read-only Git inspection"
+                )
             if sensitive_command and not confirm:
                 raise PermissionError("destructive/shell/eval command requires explicit per-command confirmation")
             cwd = self._path(args.get("cwd", "."), workspace, permissions, must_exist=True)
