@@ -398,6 +398,7 @@ const wtSummaryEl = document.querySelector('#wtSummary');
 const wtTitleEl = document.querySelector('#wtTitle');
 const wtStateEl = document.querySelector('#wtState');
 const wtMetaEl = document.querySelector('#wtMeta');
+const wtRebaseButton = document.querySelector('#wtRebase');
 const wtMergeButton = document.querySelector('#wtMerge');
 const wtDiscardButton = document.querySelector('#wtDiscard');
 const wtForceDiscardButton = document.querySelector('#wtForceDiscard');
@@ -472,6 +473,7 @@ function updateWorktreeMetrics(items) {
 }
 
 function setWorktreeActionsEnabled(enabled) {
+  wtRebaseButton.disabled = !enabled;
   wtMergeButton.disabled = !enabled;
   wtDiscardButton.disabled = !enabled;
   wtForceDiscardButton.disabled = !enabled;
@@ -589,6 +591,20 @@ wtOpenTerminalButton.addEventListener('click', () => {
   if (!item?.exists) return;
   openTerminal({ cwd: item.path, label: 'Worktree · ' + (item.label || item.id) })
     .catch(error => alert('Terminal error: ' + String(error?.message || error)));
+});
+
+wtRebaseButton.addEventListener('click', async () => {
+  const item = selectedWorktreeData();
+  if (!item) return;
+  const message = 'Update branch "' + item.branch + '" onto the latest "' + item.target_branch + '"?\n\nTEAMYRA requires a clean worktree and automatically aborts the rebase if conflicts occur.';
+  if (!confirm(message)) return;
+  try {
+    await window.teamyra.rebaseWorktree(item.id, true);
+    await refreshWorktrees({ preserveSelection: true });
+    alert('Worktree branch updated successfully.');
+  } catch (error) {
+    alert('Update branch blocked: ' + String(error?.message || error));
+  }
 });
 
 wtMergeButton.addEventListener('click', async () => {
