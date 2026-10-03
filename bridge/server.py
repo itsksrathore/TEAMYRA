@@ -7,6 +7,7 @@ reads compact results, sends follow-up messages and cancels them.
 """
 import json, os, subprocess, sys, threading, time, uuid
 from pathlib import Path
+from worker_registry import build_worker_registry
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -23,8 +24,6 @@ CODEX_JS = Path(r"C:\Users\kiran\AppData\Roaming\npm\node_modules\@openai\codex\
 AGY = Path(r"C:\Users\kiran\AppData\Local\agy\bin\agy.exe")
 NODE = Path(r"C:\Program Files\nodejs\node.exe")
 PYTHON = Path(sys.executable)
-PROFILES = {"codex1": Path(r"C:\Users\kiran\.codex"), "codex2": ROOT / "profiles" / "codex2"}
-WORKERS = ("antigravity", "codex1", "codex2")
 COOLDOWN_SECONDS = 1800
 # Sent when runner.py auto-resumes a worker session that died mid-run.
 RESUME_MESSAGE = ("Your previous run on this task was interrupted: the worker process exited unexpectedly. "
@@ -46,6 +45,14 @@ def config():
 def clip(text, n):
     text = (text or "").strip()
     return text if len(text) <= n else text[: n - 15] + " ...[clipped]"
+
+
+def worker_registry():
+    return build_worker_registry(ROOT)
+
+
+def worker_ids():
+    return tuple(worker_registry().keys())
 
 
 def run(cmd, cwd=None, env=None, timeout=60):
@@ -141,9 +148,14 @@ def agy_cmd(task, cwd, write, timeout, session_id=None):
 
 
 def pick_worker(worker):
+    registry = worker_registry()
     if worker != "auto":
         return worker
-    order = [w for w in config().get("auto_order", list(WORKERS)) if w in WORKERS]
+    configured = [w for w in config().get("auto_order", []) if w in registry]
+    discovered = [w for w in registry if w not in configured]
+    order = configured + discovered
+    if not order:
+        raise ValueError("no workers are configured or discovered")
     free = [w for w in order if not cooldown_left(w)]
     idle = [w for w in free if not running_jobs(w)]
     return (idle or free or order)[0]
@@ -155,8 +167,11 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
     worker = pick_worker(worker)
-    if worker not in WORKERS:
+    registry = worker_registry()
+    if worker not in registry:
         raise ValueError(f"unknown worker: {worker}")
+    worker_info = registry[worker]
+    provider = worker_info["provider"]
     left = cooldown_left(worker)
     if left:
         raise ValueError(f"{worker} is cooling down after a usage limit ({left} s left); "
@@ -166,20 +181,24 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     jdir = JOBS / job_id
     jdir.mkdir()
     final_path = jdir / "final.txt"
-    if worker.startswith("codex"):
-        cmd, env = codex_cmd(task, cwd, write, final_path, session_id), {"CODEX_HOME": str(PROFILES[worker])}
+    if provider == "codex":
+        cmd = codex_cmd(task, cwd, write, final_path, session_id)
+        env = {"CODEX_HOME": str(worker_info["home"])}
         resume_cmd = codex_cmd(RESUME_MESSAGE, cwd, write, final_path, "{SESSION}")
-    else:
+    elif provider == "antigravity":
         cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
         resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
+    else:
+        raise ValueError(f"unsupported worker provider: {provider}")
     head = git(cwd, "rev-parse", "HEAD")
     meta = {"id": job_id, "label": label or clip(task.splitlines()[0] if task else job_id, 80),
-            "worker": worker, "state": "starting", "cwd": str(cwd), "write": write,
+            "worker": worker, "provider": provider, "worker_label": worker_info.get("label"),
+            "profile_id": worker_info.get("profile_id"), "state": "starting", "cwd": str(cwd), "write": write,
             "created": time.time(), "head_start": head, "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
             "parent": parent, "resumed_session": session_id, "timeout_s": timeout}
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "task.txt").write_text(task, encoding="utf-8")
-    (jdir / "spec.json").write_text(json.dumps({"worker": worker, "cmd": cmd, "cwd": str(cwd), "env": env,
+    (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
                                                  "timeout": timeout, "final_path": str(final_path),
                                                  "resume_cmd": resume_cmd,
                                                  "auto_resume": int(config().get("auto_resume", 2))},
@@ -269,25 +288,36 @@ def job_wait(job_ids, mode="all", timeout_seconds=1500):
 
 def worker_status():
     out = []
-    for w in ("codex1", "codex2"):
+    registry = worker_registry()
+    for w, info in registry.items():
+        provider = info["provider"]
         try:
-            rc, o, e = run([str(NODE), str(CODEX_JS), "login", "status"],
-                           env={"CODEX_HOME": str(PROFILES[w])}, timeout=20)
-            text = (o + e).strip()
-            ready = rc == 0 and "not logged in" not in text.lower()
+            if provider == "codex":
+                rc, o, e = run([str(NODE), str(CODEX_JS), "login", "status"],
+                               env={"CODEX_HOME": str(info["home"])}, timeout=20)
+                text = (o + e).strip()
+                ready = rc == 0 and "not logged in" not in text.lower()
+            elif provider == "antigravity":
+                rc, o, e = run([str(AGY), "models"], timeout=30)
+                text = (o + e).strip()
+                ready = rc == 0 and bool(o.strip())
+            else:
+                ready, text = False, "unsupported provider"
         except Exception as exc:
             ready, text = False, str(exc)
-        out.append({"worker": w, "ready": ready, "detail": clip(text, 200)})
-    try:
-        rc, o, e = run([str(AGY), "models"], timeout=30)
-        ready = rc == 0 and bool(o.strip())
-        out.append({"worker": "antigravity", "ready": ready, "detail": "models available" if ready else clip(e, 300)})
-    except Exception as exc:
-        out.append({"worker": "antigravity", "ready": False, "detail": str(exc)})
+        out.append({
+            "worker": w,
+            "provider": provider,
+            "label": info.get("label", w),
+            "profile_id": info.get("profile_id"),
+            "ready": ready,
+            "detail": "models available" if provider == "antigravity" and ready else clip(text, 200),
+        })
+
     cfg = config()
     for item in out:
         w = item["worker"]
-        item["model"] = cfg.get("antigravity" if w == "antigravity" else "codex", {}).get("model")
+        item["model"] = cfg.get(item["provider"], {}).get("model")
         item["running_jobs"] = [m["id"] for m in running_jobs(w)]
         item["cooldown_seconds"] = cooldown_left(w)
         if item["cooldown_seconds"]:
@@ -309,7 +339,8 @@ def create_worktree(project_path, worker, idx):
 
 
 # --- MCP tools -------------------------------------------------------------------------------
-W_ENUM = {"type": "string", "enum": ["auto", *WORKERS], "default": "auto"}
+W_ENUM = {"type": "string", "default": "auto",
+          "description": "Use auto or any worker id returned by worker_status. Dynamic Codex profiles are discovered at runtime."}
 TOOLS = [
     {"name": "start_task", "description": (
         "Start a worker job and return at once with its job_id (non-blocking). The worker runs in its own "
@@ -341,10 +372,10 @@ TOOLS = [
                      "required": ["job_id", "message"], "additionalProperties": False}},
     {"name": "job_cancel", "description": "Stop a running job (kills the worker process tree).",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
-    {"name": "worker_status", "description": "Auth/availability, configured model, running jobs and usage cooldown for codex1, codex2 and antigravity.",
+    {"name": "worker_status", "description": "List all discovered workers/accounts with auth availability, provider, model, running jobs and usage cooldown.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "clear_worker_cooldown", "description": "Clear the usage-limit cooldown for one worker or all.",
-     "inputSchema": {"type": "object", "properties": {"worker": {"type": "string", "enum": list(WORKERS)}}, "additionalProperties": False}},
+     "inputSchema": {"type": "object", "properties": {"worker": {"type": "string"}}, "additionalProperties": False}},
     {"name": "run_ai_worker", "description": "Compatibility: start_task, then wait up to timeout_seconds. If the job is still running, returns its job_id instead of stopping it.",
      "inputSchema": {"type": "object", "properties": {"worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
@@ -395,7 +426,7 @@ def tool_call(name, a):
             data = json.loads(COOLDOWN_FILE.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-        for w in ([a["worker"]] if a.get("worker") else WORKERS):
+        for w in ([a["worker"]] if a.get("worker") else worker_ids()):
             data[w] = time.time()
         COOLDOWN_FILE.write_text(json.dumps(data), encoding="utf-8")
         return {"ok": True, "worker": a.get("worker") or "all"}
