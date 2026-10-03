@@ -790,21 +790,13 @@ def tool_call(name, a):
         return task_graph.graph_summary(graph)
     if name == "graph_approve":
         graph = task_graph.load_graph(ROOT, a["graph_id"])
-        nodes = task_graph.node_map(graph)
-        node = nodes.get(a["node_id"])
-        if not node:
-            raise ValueError(f"no such graph node: {a['node_id']}")
-        if not node.get("requires_approval"):
-            raise ValueError("that node does not require approval")
-        if node.get("status") != "pending":
-            raise ValueError(f"node cannot be approved from status {node.get('status')}")
-        decision = a["decision"]
-        node["approval_status"] = "approved" if decision == "approve" else "denied"
-        node["approval_note"] = str(a.get("note") or "").strip()[:500] or None
-        node["approved_at"] = time.time() if decision == "approve" else None
-        if graph.get("approval_pending_node_id") == node["id"] and decision == "approve":
-            graph["state"] = "running"
+        node = task_graph.decide_approval(graph, a["node_id"], a["decision"], a.get("note"))
+        if graph.get("approval_pending_node_id") == node["id"]:
             graph["approval_pending_node_id"] = None
+        if a["decision"] == "approve" and graph.get("state") == "awaiting_approval":
+            graph["state"] = "running"
+        elif a["decision"] == "deny":
+            task_graph.terminalize_graph(graph)
         task_graph.save_graph(ROOT, graph)
         return task_graph.graph_summary(graph)
     if name == "start_task":
