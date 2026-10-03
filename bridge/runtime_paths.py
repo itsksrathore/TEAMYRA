@@ -14,12 +14,16 @@ def first_existing(values):
     return ""
 
 
+def which(name, env):
+    return shutil.which(name, path=(env or {}).get("PATH"))
+
+
 def find_node(env=None, home=None):
     env = env or os.environ
     home = Path(home) if home else Path.home()
     return (
         env.get("TEAMYRA_NODE")
-        or shutil.which("node")
+        or which("node", env)
         or first_existing([
             Path(env.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / "node.exe",
             home / "AppData" / "Local" / "Programs" / "nodejs" / "node.exe",
@@ -43,11 +47,14 @@ def find_codex_js(env=None, home=None):
 
 def codex_launch(env=None, home=None):
     env = env or os.environ
+    explicit = env.get("TEAMYRA_CODEX")
+    if explicit:
+        return [explicit]
     node = find_node(env, home)
     script = find_codex_js(env, home)
     if node and script:
         return [node, script]
-    binary = env.get("TEAMYRA_CODEX") or shutil.which("codex")
+    binary = which("codex", env)
     return [binary] if binary else []
 
 
@@ -57,7 +64,7 @@ def agy_launch(env=None, home=None):
     local = env.get("LOCALAPPDATA")
     binary = (
         env.get("TEAMYRA_AGY")
-        or shutil.which("agy")
+        or which("agy", env)
         or first_existing([
             Path(local) / "agy" / "bin" / "agy.exe" if local else None,
             home / "AppData" / "Local" / "agy" / "bin" / "agy.exe",
@@ -72,7 +79,7 @@ def claude_launch(env=None, home=None):
     appdata = env.get("APPDATA")
     binary = (
         env.get("TEAMYRA_CLAUDE")
-        or shutil.which("claude")
+        or which("claude", env)
         or first_existing([
             Path(appdata) / "npm" / "claude.cmd" if appdata else None,
             home / "AppData" / "Roaming" / "npm" / "claude.cmd",
