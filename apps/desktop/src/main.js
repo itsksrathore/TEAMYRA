@@ -1,7 +1,9 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
-const { detectProviders } = require('./provider-registry');
+const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
+const { detectProviders, providerById, profileRoot } = require('./provider-registry');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const JOBS = path.join(ROOT, 'jobs');
@@ -55,6 +57,30 @@ function createWindow() {
 
 ipcMain.handle('teamyra:providers', () => detectProviders());
 ipcMain.handle('teamyra:jobs', () => listJobs());
+
+ipcMain.handle('teamyra:add-account', async (_event, providerId) => {
+  const provider = providerById(providerId);
+  if (!provider) throw new Error('Unknown provider');
+  if (!provider.managed?.verified || !provider.managed.env || !provider.managed.loginArgv) {
+    return { ok: false, reason: 'profile-isolation-not-verified' };
+  }
+
+  const profileId = 'account-' + crypto.randomBytes(3).toString('hex');
+  const dir = path.join(profileRoot(provider.id), profileId);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const env = { ...process.env, [provider.managed.env]: dir };
+  const child = spawn(provider.bin, provider.managed.loginArgv, {
+    env,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+    shell: process.platform === 'win32'
+  });
+  child.unref();
+
+  return { ok: true, provider: provider.id, profileId };
+});
 
 app.whenReady().then(() => {
   createWindow();
