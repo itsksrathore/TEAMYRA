@@ -303,5 +303,53 @@ class WorktreeManagerTests(unittest.TestCase):
             rebase.assert_not_called()
 
 
+    def test_diff_includes_bounded_untracked_text_preview(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "untracked")
+            wt = Path(created["path"])
+            (wt / "notes.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+
+            result = worktree_manager.diff(storage, created["id"], max_chars=5000)
+            self.assertIn("# TEAMYRA untracked file: notes.txt", result["diff"])
+            self.assertIn("+alpha", result["diff"])
+            self.assertIn("+beta", result["diff"])
+            self.assertFalse(result["clipped"])
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+    def test_diff_omits_binary_untracked_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "binary")
+            wt = Path(created["path"])
+            (wt / "asset.bin").write_bytes(b"abc\x00def")
+
+            result = worktree_manager.diff(storage, created["id"], max_chars=5000)
+            self.assertIn("binary untracked file omitted", result["diff"])
+            self.assertNotIn("abc", result["diff"])
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+    def test_diff_marks_untracked_preview_as_clipped_when_budget_exhausts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "clip")
+            wt = Path(created["path"])
+            (wt / "large.txt").write_text("x" * 5000, encoding="utf-8")
+
+            result = worktree_manager.diff(storage, created["id"], max_chars=1000)
+            self.assertTrue(result["clipped"])
+            self.assertLessEqual(len(result["diff"]), 1000)
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+
 if __name__ == "__main__":
     unittest.main()
