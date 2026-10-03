@@ -41,6 +41,21 @@ class WorkerRegistryTests(unittest.TestCase):
             self.assertEqual(item["label"], "Client One")
             self.assertEqual(item["profile_id"], "client-one-ab12")
 
+    def test_managed_claude_profiles_are_discovered(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile = root / "profiles" / "claude" / "work-aa11"
+            profile.mkdir(parents=True)
+            (profile / "teamyra-profile.json").write_text(
+                json.dumps({"name": "Claude Work"}), encoding="utf-8"
+            )
+            workers = build_worker_registry(root, home=root / "home")
+            self.assertIn("claude1", workers)
+            self.assertIn("claude-work-aa11", workers)
+            item = workers["claude-work-aa11"]
+            self.assertEqual(item["provider"], "claude")
+            self.assertEqual(item["label"], "Claude Work")
+
     def test_worker_parts_are_path_safe(self):
         self.assertEqual(safe_worker_part("My Account / #2"), "My-Account-2")
 
