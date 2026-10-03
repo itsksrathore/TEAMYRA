@@ -164,6 +164,15 @@ def tick(graph_id):
         graph["active_node_id"] = None
         return task_graph.save_graph(server.ROOT, graph)
 
+    waiting = task_graph.awaiting_approval_nodes(graph)
+    if waiting:
+        graph["state"] = "awaiting_approval"
+        graph["approval_pending_node_id"] = waiting[0]["id"]
+        graph["active_node_id"] = None
+        graph["error"] = None
+        return task_graph.save_graph(server.ROOT, graph)
+
+    graph["approval_pending_node_id"] = None
     if not _launch_ready_node(graph):
         graph["state"] = "failed"
         graph["error"] = "no runnable node remains"
