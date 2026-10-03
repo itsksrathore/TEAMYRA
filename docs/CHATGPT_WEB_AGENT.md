@@ -97,7 +97,7 @@ Blocked sensitive locations include SSH/GPG, AWS/Azure/GCloud/Kubernetes/Docker 
 
 ## Permissions
 
-Persisted per selected ChatGPT workspace:
+Persisted with the current selected ChatGPT workspace. When the user switches to a different workspace, high-risk permissions are reset to safe defaults instead of being carried over:
 
 - Read files
 - Search files
