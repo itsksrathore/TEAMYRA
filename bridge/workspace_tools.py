@@ -378,13 +378,27 @@ class WorkspaceToolService:
             path = self._path(args.get("path"), workspace, permissions, must_exist=True)
             if not path.is_file():
                 raise WorkspaceToolError("path is not a file")
-            max_bytes = max(1, min(int(args.get("max_bytes", 1024 * 1024)), 2 * 1024 * 1024))
-            data = path.read_bytes()
-            if b"\x00" in data[:8192]:
-                raise WorkspaceToolError("binary files are not returned as text")
-            clipped = len(data) > max_bytes
-            text = data[:max_bytes].decode("utf-8", errors="replace")
-            return {"path": str(path), "content": text, "bytes": len(data), "clipped": clipped}
+            total_bytes = path.stat().st_size
+            offset = max(0, min(int(args.get("offset", 0)), total_bytes))
+            max_bytes = max(1, min(int(args.get("max_bytes", 128 * 1024)), 512 * 1024))
+            with path.open("rb") as handle:
+                header = handle.read(8192)
+                if b"\x00" in header:
+                    raise WorkspaceToolError("binary files are not returned as text")
+                handle.seek(offset)
+                data = handle.read(max_bytes + 1)
+            clipped = len(data) > max_bytes or offset + len(data) < total_bytes
+            chunk = data[:max_bytes]
+            text = chunk.decode("utf-8", errors="replace")
+            next_offset = offset + len(chunk) if clipped else None
+            return {
+                "path": str(path),
+                "content": text,
+                "bytes": total_bytes,
+                "offset": offset,
+                "next_offset": next_offset,
+                "clipped": clipped,
+            }
 
         if tool == "filesystem.search":
             query = str(args.get("query") or "")
