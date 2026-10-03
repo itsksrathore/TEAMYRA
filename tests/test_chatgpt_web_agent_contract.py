@@ -83,6 +83,10 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         self.assertIn("for (let step = 0; step < 16; step += 1)", self.provider)
         self.assertIn("MAX_TOOL_RESULT_CHARS", self.provider)
         self.assertIn("next_offset", self.provider)
+        self.assertIn("before-input-event", self.provider)
+        self.assertIn("pointer-events: none", self.provider)
+        self.assertIn("activeJobDir", self.provider)
+        self.assertIn("'CANCEL'", self.provider)
 
 
 if __name__ == "__main__":
