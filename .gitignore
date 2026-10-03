@@ -34,3 +34,4 @@ apps/desktop/renderer/bundle.css
 build/
 dist/
 chatgpt/
+backups/
