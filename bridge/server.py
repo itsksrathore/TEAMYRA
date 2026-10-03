@@ -28,6 +28,8 @@ RESUME_MESSAGE = ("Your previous run on this task was interrupted: the worker pr
                   "Check git status, git log and your last steps, then continue the same task from where you "
                   "stopped. Do not redo finished work, and finish everything the original task asked for.")
 SEND_LOCK = threading.Lock()
+AUTH_CACHE = {}
+AUTH_CACHE_SECONDS = 20
 for p in (JOBS, LOGS, WORKTREES):
     p.mkdir(parents=True, exist_ok=True)
 
@@ -60,6 +62,55 @@ def run(cmd, cwd=None, env=None, timeout=60):
                         capture_output=True, timeout=timeout, encoding="utf-8", errors="replace",
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return cp.returncode, cp.stdout or "", cp.stderr or ""
+
+
+def worker_settings(info):
+    merged = dict(config().get(info["provider"], {}))
+    merged.update(info.get("settings") or {})
+    return merged
+
+
+def worker_auth_status(info, use_cache=True):
+    worker = info["id"]
+    now = time.time()
+    cached = AUTH_CACHE.get(worker)
+    if use_cache and cached and now - cached["at"] < AUTH_CACHE_SECONDS:
+        return cached["ready"], cached["detail"]
+
+    provider = info["provider"]
+    try:
+        if provider == "codex":
+            launch = codex_launch()
+            if not launch:
+                raise RuntimeError("Codex CLI not found")
+            rc, out, err = run([*launch, "login", "status"],
+                                env={"CODEX_HOME": str(info["home"])}, timeout=20)
+            detail = (out + err).strip()
+            ready = rc == 0 and "not logged in" not in detail.lower()
+        elif provider == "claude":
+            launch = claude_launch()
+            if not launch:
+                raise RuntimeError("Claude Code CLI not found")
+            env = {}
+            if not info.get("native"):
+                env["CLAUDE_CONFIG_DIR"] = str(info["home"])
+            rc, out, err = run([*launch, "auth", "status", "--json"], env=env, timeout=20)
+            detail = (out + err).strip()
+            ready = rc == 0
+        elif provider == "antigravity":
+            launch = agy_launch()
+            if not launch:
+                raise RuntimeError("Antigravity CLI not found")
+            rc, out, err = run([*launch, "models"], timeout=30)
+            detail = (out + err).strip()
+            ready = rc == 0 and bool(out.strip())
+        else:
+            ready, detail = False, "unsupported provider"
+    except Exception as exc:
+        ready, detail = False, str(exc)
+
+    AUTH_CACHE[worker] = {"at": now, "ready": ready, "detail": detail}
+    return ready, detail
 
 
 def git(cwd, *args):
@@ -118,8 +169,8 @@ def cooldown_left(worker):
 
 
 # --- commands -------------------------------------------------------------------------------
-def codex_cmd(task, cwd, write, final_path, session_id=None):
-    c = config().get("codex", {})
+def codex_cmd(task, cwd, write, final_path, session_id=None, settings=None):
+    c = settings or config().get("codex", {})
     launch = codex_launch()
     if not launch:
         raise RuntimeError("Codex CLI not found. Install Codex or set TEAMYRA_CODEX / TEAMYRA_CODEX_JS.")
@@ -134,8 +185,8 @@ def codex_cmd(task, cwd, write, final_path, session_id=None):
     return base + ["exec", "--json", *mode, "-C", str(cwd), "-o", str(final_path), task]
 
 
-def claude_cmd(task, cwd, write, session_id=None):
-    c = config().get("claude", {})
+def claude_cmd(task, cwd, write, session_id=None, settings=None):
+    c = settings or config().get("claude", {})
     launch = claude_launch()
     if not launch:
         raise RuntimeError("Claude Code CLI not found. Install Claude Code or set TEAMYRA_CLAUDE.")
@@ -175,14 +226,25 @@ def pick_worker(worker):
     registry = worker_registry()
     if worker != "auto":
         return worker
-    configured = [w for w in config().get("auto_order", []) if w in registry]
-    discovered = [w for w in registry if w not in configured]
+
+    configured = [w for w in config().get("auto_order", [])
+                  if w in registry and registry[w].get("enabled", True)]
+    discovered = sorted(
+        (w for w in registry if w not in configured and registry[w].get("enabled", True)),
+        key=lambda w: (registry[w].get("priority", 100), w),
+    )
     order = configured + discovered
     if not order:
-        raise ValueError("no workers are configured or discovered")
+        raise ValueError("no enabled workers are configured or discovered")
+
     free = [w for w in order if not cooldown_left(w)]
     idle = [w for w in free if not running_jobs(w)]
-    return (idle or free or order)[0]
+    candidates = idle + [w for w in free if w not in idle]
+    for candidate in candidates:
+        ready, _ = worker_auth_status(registry[candidate])
+        if ready:
+            return candidate
+    raise ValueError("no authenticated worker is currently ready")
 
 
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
@@ -195,7 +257,13 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     if worker not in registry:
         raise ValueError(f"unknown worker: {worker}")
     worker_info = registry[worker]
+    if not worker_info.get("enabled", True):
+        raise ValueError(f"{worker} is disabled")
     provider = worker_info["provider"]
+    ready, auth_detail = worker_auth_status(worker_info)
+    if not ready:
+        raise ValueError(f"{worker} is not authenticated/ready: {clip(auth_detail, 300)}")
+    settings = worker_settings(worker_info)
     left = cooldown_left(worker)
     if left:
         raise ValueError(f"{worker} is cooling down after a usage limit ({left} s left); "
@@ -206,15 +274,15 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     jdir.mkdir()
     final_path = jdir / "final.txt"
     if provider == "codex":
-        cmd = codex_cmd(task, cwd, write, final_path, session_id)
+        cmd = codex_cmd(task, cwd, write, final_path, session_id, settings)
         env = {"CODEX_HOME": str(worker_info["home"])}
-        resume_cmd = codex_cmd(RESUME_MESSAGE, cwd, write, final_path, "{SESSION}")
+        resume_cmd = codex_cmd(RESUME_MESSAGE, cwd, write, final_path, "{SESSION}", settings)
     elif provider == "claude":
-        cmd = claude_cmd(task, cwd, write, session_id)
+        cmd = claude_cmd(task, cwd, write, session_id, settings)
         env = {}
         if not worker_info.get("native"):
             env["CLAUDE_CONFIG_DIR"] = str(worker_info["home"])
-        resume_cmd = claude_cmd(RESUME_MESSAGE, cwd, write, "{SESSION}")
+        resume_cmd = claude_cmd(RESUME_MESSAGE, cwd, write, "{SESSION}", settings)
     elif provider == "antigravity":
         cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
         resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
@@ -321,49 +389,23 @@ def worker_status():
     registry = worker_registry()
     for w, info in registry.items():
         provider = info["provider"]
-        try:
-            if provider == "codex":
-                launch = codex_launch()
-                if not launch:
-                    raise RuntimeError("Codex CLI not found")
-                rc, o, e = run([*launch, "login", "status"],
-                               env={"CODEX_HOME": str(info["home"])}, timeout=20)
-                text = (o + e).strip()
-                ready = rc == 0 and "not logged in" not in text.lower()
-            elif provider == "claude":
-                launch = claude_launch()
-                if not launch:
-                    raise RuntimeError("Claude Code CLI not found")
-                env = {}
-                if not info.get("native"):
-                    env["CLAUDE_CONFIG_DIR"] = str(info["home"])
-                rc, o, e = run([*launch, "auth", "status", "--json"], env=env, timeout=20)
-                text = (o + e).strip()
-                ready = rc == 0
-            elif provider == "antigravity":
-                launch = agy_launch()
-                if not launch:
-                    raise RuntimeError("Antigravity CLI not found")
-                rc, o, e = run([*launch, "models"], timeout=30)
-                text = (o + e).strip()
-                ready = rc == 0 and bool(o.strip())
-            else:
-                ready, text = False, "unsupported provider"
-        except Exception as exc:
-            ready, text = False, str(exc)
+        ready, text = worker_auth_status(info, use_cache=False)
+        settings = worker_settings(info)
         out.append({
             "worker": w,
             "provider": provider,
             "label": info.get("label", w),
             "profile_id": info.get("profile_id"),
+            "enabled": info.get("enabled", True),
+            "priority": info.get("priority", 100),
             "ready": ready,
             "detail": "models available" if provider == "antigravity" and ready else clip(text, 200),
+            "model": settings.get("model"),
+            "effort": settings.get("effort"),
         })
 
-    cfg = config()
     for item in out:
         w = item["worker"]
-        item["model"] = cfg.get(item["provider"], {}).get("model")
         item["running_jobs"] = [m["id"] for m in running_jobs(w)]
         item["cooldown_seconds"] = cooldown_left(w)
         if item["cooldown_seconds"]:
