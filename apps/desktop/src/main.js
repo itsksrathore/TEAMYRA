@@ -102,6 +102,7 @@ async function providersCached(force = false) {
           const provider = data.find(item => item.id === 'chatgpt-web');
           if (provider) {
             provider.signedIn = chatStatus.automationReady === true;
+            provider.workerReady = chatStatus.workerReady === true;
             provider.status = chatStatus.challenged
               ? 'User verification required'
               : chatStatus.automationReady
@@ -155,7 +156,8 @@ function mergeUsageProviderState(snapshot, providers) {
       const row = byWorker.get(workerId);
       if (!row) continue;
       row.provider = provider.id || row.provider;
-      row.ready = Boolean(provider.installed && profile.signedIn && profile.enabled !== false);
+      const providerReady = provider.id === 'chatgpt-web' ? provider.workerReady === true : true;
+      row.ready = Boolean(provider.installed && profile.signedIn && profile.enabled !== false && providerReady);
     }
   }
   snapshot.provider_status_at = PROVIDER_CACHE.at / 1000;
