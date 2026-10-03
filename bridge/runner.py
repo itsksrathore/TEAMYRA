@@ -180,7 +180,10 @@ class Job:
                 time.sleep(3)
         threading.Thread(target=watchdog, daemon=True).start()
 
-        handler = self.codex_event if self.spec["worker"].startswith("codex") else self.agy_event
+        provider = self.spec.get("provider")
+        if not provider:
+            provider = "codex" if self.spec["worker"].startswith("codex") else "antigravity"
+        handler = self.codex_event if provider == "codex" else self.agy_event
         last_save = 0.0
         for line in proc.stdout:
             line = line.strip()
