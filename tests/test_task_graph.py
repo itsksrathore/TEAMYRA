@@ -87,5 +87,76 @@ class TaskGraphTests(unittest.TestCase):
                 self.assertEqual(status["counts"], {"pending": 1})
 
 
+    def test_approval_metadata_and_mcp_decision(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            with patch.object(server, "ROOT", root):
+                created = server.tool_call("graph_create", {
+                    "title": "Approval graph",
+                    "project_path": str(project),
+                    "nodes": [{
+                        "id": "deploy",
+                        "task": "Deploy the change",
+                        "requires_approval": True,
+                        "approval_reason": "Production change",
+                    }],
+                })
+                node = created["nodes"][0]
+                self.assertTrue(node["requires_approval"])
+                self.assertEqual(node["approval_status"], "pending")
+
+                approved = server.tool_call("graph_approve", {
+                    "graph_id": created["id"],
+                    "node_id": "deploy",
+                    "decision": "approve",
+                    "note": "Approved for release",
+                })
+                approved_node = approved["nodes"][0]
+                self.assertEqual(approved_node["approval_status"], "approved")
+                self.assertEqual(approved_node["approval_note"], "Approved for release")
+
+    def test_non_gated_node_cannot_be_approved(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            with patch.object(server, "ROOT", root):
+                created = server.tool_call("graph_create", {
+                    "project_path": str(project),
+                    "nodes": [{"id": "build", "task": "Build"}],
+                })
+                with self.assertRaisesRegex(ValueError, "does not require approval"):
+                    server.tool_call("graph_approve", {
+                        "graph_id": created["id"],
+                        "node_id": "build",
+                        "decision": "approve",
+                    })
+
+    def test_denied_approval_is_persisted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            with patch.object(server, "ROOT", root):
+                created = server.tool_call("graph_create", {
+                    "project_path": str(project),
+                    "nodes": [{
+                        "id": "delete",
+                        "task": "Delete generated artifacts",
+                        "requires_approval": True,
+                    }],
+                })
+                denied = server.tool_call("graph_approve", {
+                    "graph_id": created["id"],
+                    "node_id": "delete",
+                    "decision": "deny",
+                    "note": "Keep artifacts",
+                })
+                self.assertEqual(denied["nodes"][0]["approval_status"], "denied")
+                self.assertEqual(denied["nodes"][0]["approval_note"], "Keep artifacts")
+
+
 if __name__ == "__main__":
     unittest.main()
