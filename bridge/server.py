@@ -10,6 +10,7 @@ from pathlib import Path
 from worker_registry import build_worker_registry
 from runtime_paths import codex_launch, agy_launch, claude_launch
 import task_graph
+import review_cycle
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -622,10 +623,57 @@ def start_conductor(graph_id):
     return task_graph.graph_summary(task_graph.load_graph(ROOT, graph_id))
 
 
+def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2):
+    if not chain_is_complete(source_job_id):
+        raise ValueError("source job is still running")
+    source = job_result(source_job_id)
+    if source.get("state") != "done":
+        raise ValueError(f"source job is not reviewable from state {source.get('state')}")
+
+    state = review_cycle.create(ROOT, source_job_id, reviewer_worker, max_rounds)
+    log_path = ROOT / "tasks" / "reviews" / f"{state['id']}.monitor.log"
+    log = open(log_path, "a", encoding="utf-8")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    cmd = [str(PYTHON), str(BRIDGE / "review_monitor.py"), state["id"]]
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            close_fds=True,
+            creationflags=flags | 0x01000000,
+        )
+    except OSError:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            close_fds=True,
+            creationflags=flags,
+        )
+    return review_cycle.summary(state)
+
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic Codex profiles are discovered at runtime."}
 TOOLS = [
+    {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"},
+         "reviewer_worker": W_ENUM,
+         "max_rounds": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5}},
+         "required": ["job_id"], "additionalProperties": False}},
+    {"name": "review_status", "description": "Read reviewer/fixer loop state, active job, decision and round history.",
+     "inputSchema": {"type": "object", "properties": {"review_id": {"type": "string"}},
+                     "required": ["review_id"], "additionalProperties": False}},
+    {"name": "review_cancel", "description": "Request cancellation of an active review/fix loop.",
+     "inputSchema": {"type": "object", "properties": {"review_id": {"type": "string"}},
+                     "required": ["review_id"], "additionalProperties": False}},
     {"name": "graph_create", "description": "Create a persistent dependency task graph. Phase 3 executes graph nodes sequentially until Phase 4 worktree merge semantics are available.",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string"},
@@ -716,6 +764,19 @@ TOOLS = [
 
 
 def tool_call(name, a):
+    if name == "review_start":
+        return start_review_cycle(
+            a["job_id"],
+            a.get("reviewer_worker", "auto"),
+            a.get("max_rounds", 2),
+        )
+    if name == "review_status":
+        return review_cycle.summary(review_cycle.load(ROOT, a["review_id"]))
+    if name == "review_cancel":
+        state = review_cycle.load(ROOT, a["review_id"])
+        state["cancel_requested"] = True
+        review_cycle.save(ROOT, state)
+        return review_cycle.summary(state)
     if name == "graph_create":
         project_path = Path(a["project_path"]).resolve()
         if not project_path.exists():
