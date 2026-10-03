@@ -20,5 +20,6 @@
     "model": "opus",
     "effort": "high",
     "permission_mode": "auto"
-  }
+  },
+  "max_failovers": 2
 }
