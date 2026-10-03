@@ -13,6 +13,55 @@ class DesktopContractTests(unittest.TestCase):
         cls.preload = (ROOT / "apps" / "desktop" / "src" / "preload.js").read_text(encoding="utf-8")
         cls.main = (ROOT / "apps" / "desktop" / "src" / "main.js").read_text(encoding="utf-8")
         cls.core_api = (ROOT / "apps" / "desktop" / "src" / "core-api.js").read_text(encoding="utf-8")
+        cls.chatgpt_provider = (ROOT / "apps" / "desktop" / "src" / "chatgpt-web-provider.js").read_text(encoding="utf-8")
+        cls.chatgpt_session = (ROOT / "apps" / "desktop" / "src" / "chatgpt-session-manager.js").read_text(encoding="utf-8")
+        cls.chatgpt_automation = (ROOT / "apps" / "desktop" / "src" / "chatgpt-automation-adapter.js").read_text(encoding="utf-8")
+
+
+    def test_chatgpt_renderer_ids_and_ipc_contract_exist(self):
+        ids = [
+            "navChatgpt", "chatgptView", "chatgptViewport", "chatgptConnection",
+            "chatgptAccount", "chatgptBridge", "chatgptTools", "chatgptWorkspace",
+            "chatgptOpen", "chatgptNew", "chatgptReload", "chatgptStop",
+            "chatgptReconnect", "chatgptSelectWorkspace", "chatgptSavePermissions",
+            "chatgptViewChanges", "chatgptViewDiff", "chatgptRevert",
+        ]
+        for element_id in ids:
+            self.assertIn(f'id="{element_id}"', self.html, element_id)
+            self.assertIn(f"#{element_id}", self.renderer, element_id)
+
+        contracts = {
+            "chatgptStatus": "teamyra:chatgpt-status",
+            "openChatgpt": "teamyra:chatgpt-open",
+            "reloadChatgpt": "teamyra:chatgpt-reload",
+            "newChatgptChat": "teamyra:chatgpt-new-chat",
+            "stopChatgpt": "teamyra:chatgpt-stop",
+            "setChatgptBounds": "teamyra:chatgpt-bounds",
+            "selectChatgptWorkspace": "teamyra:chatgpt-select-workspace",
+            "chatgptChanges": "teamyra:chatgpt-changes",
+            "revertChatgptChanges": "teamyra:chatgpt-revert",
+        }
+        for method, channel in contracts.items():
+            self.assertRegex(self.preload, rf"\b{re.escape(method)}\s*:")
+            self.assertIn(channel, self.preload)
+            self.assertIn(channel, self.main)
+
+    def test_chatgpt_uses_persistent_sandboxed_webcontentsview(self):
+        self.assertIn("WebContentsView", self.chatgpt_provider)
+        self.assertIn("persist:teamyra-chatgpt-profile", self.chatgpt_session)
+        self.assertIn("nodeIntegration: false", self.chatgpt_provider)
+        self.assertIn("contextIsolation: true", self.chatgpt_provider)
+        self.assertIn("sandbox: true", self.chatgpt_provider)
+        self.assertIn("setWindowOpenHandler", self.chatgpt_provider)
+        self.assertNotIn("shell.openExternal", self.chatgpt_provider)
+
+    def test_chatgpt_automation_is_semantic_not_coordinate_based(self):
+        self.assertIn("data-testid", self.chatgpt_automation)
+        self.assertIn("aria-label", self.chatgpt_automation)
+        self.assertIn("contenteditable", self.chatgpt_automation)
+        self.assertNotIn("robotjs", self.chatgpt_automation)
+        self.assertNotIn("screenX", self.chatgpt_automation)
+        self.assertNotIn("screenY", self.chatgpt_automation)
 
     def test_worktree_renderer_ids_exist_in_html(self):
         ids = [
