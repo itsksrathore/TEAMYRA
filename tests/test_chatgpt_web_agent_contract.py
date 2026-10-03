@@ -43,6 +43,12 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         self.assertIn("WorkspaceToolService", self.server)
         self.assertIn("execute_in_workspace", self.server)
 
+    def test_mcp_workspace_tool_cannot_self_confirm_destructive_actions(self):
+        workspace_tool_block = self.server.split('if name == "workspace_tool":', 1)[1].split('if name == "memory_add":', 1)[0]
+        self.assertIn('permissions={"terminal": True}', workspace_tool_block)
+        self.assertIn("confirm=False", workspace_tool_block)
+        self.assertNotIn('a.get("confirm")', workspace_tool_block)
+
     def test_sensitive_roots_and_confirmation_gates_exist(self):
         for marker in (
             '".ssh"', '".aws"', '".azure"', '".codex"', '".claude"', '".gemini"',
