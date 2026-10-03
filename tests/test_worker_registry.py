@@ -27,6 +27,28 @@ class WorkerRegistryTests(unittest.TestCase):
             self.assertIn("codex2", workers)
             self.assertTrue(workers["codex2"]["legacy"])
 
+    def test_legacy_codex2_metadata_controls_routing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile = root / "profiles" / "codex2"
+            profile.mkdir(parents=True)
+            (profile / "teamyra-profile.json").write_text(
+                json.dumps({
+                    "name": "Codex Backup",
+                    "enabled": False,
+                    "priority": 7,
+                    "model": "gpt-test",
+                    "effort": "medium",
+                }),
+                encoding="utf-8",
+            )
+            item = build_worker_registry(root, home=root / "home")["codex2"]
+            self.assertEqual(item["label"], "Codex Backup")
+            self.assertFalse(item["enabled"])
+            self.assertEqual(item["priority"], 7)
+            self.assertEqual(item["settings"]["model"], "gpt-test")
+            self.assertEqual(item["settings"]["effort"], "medium")
+
     def test_managed_codex_profiles_are_discovered_with_label(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

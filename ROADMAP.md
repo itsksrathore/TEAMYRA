@@ -25,7 +25,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [ ] Verify and implement Antigravity profile isolation.
 - [x] Add initial account-aware routing and cooldown handling across discovered workers.
 - [ ] Add automatic reassignment/failover after worker failure.
-- [ ] Add per-profile model and effort settings.
+- [x] Add per-profile model/effort settings plus enabled/priority routing controls.
 
 ## Phase 3 — Orchestration
 - [ ] Add Conductor/supervisor mode.

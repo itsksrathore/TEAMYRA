@@ -77,14 +77,18 @@ def build_worker_registry(root, home=None):
 
     legacy = profiles / "codex2"
     if legacy.exists():
+        meta = profile_metadata(legacy)
         workers["codex2"] = {
             "id": "codex2",
             "provider": "codex",
-            "label": "Codex 2",
+            "label": meta["name"] if meta["name"] != "codex2" else "Codex 2",
             "profile_id": "codex2",
             "home": str(legacy),
             "native": False,
             "legacy": True,
+            "enabled": meta["enabled"],
+            "priority": meta["priority"],
+            "settings": {k: meta[k] for k in ("model", "effort", "permission_mode") if meta[k] is not None},
         }
 
     managed = profiles / "codex"

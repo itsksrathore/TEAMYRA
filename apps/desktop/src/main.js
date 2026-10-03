@@ -192,6 +192,20 @@ ipcMain.handle('teamyra:terminal-close', (event, id) => {
   return { ok: true };
 });
 
+function managedProfileDir(providerId, profileId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(profileId || '') || profileId === 'native') return '';
+  if (providerId === 'codex' && profileId === 'codex2') {
+    const legacy = path.join(PROFILES_ROOT, 'codex2');
+    return fs.existsSync(legacy) ? legacy : '';
+  }
+  const dir = path.join(profileRoot(providerId), profileId);
+  try {
+    return fs.existsSync(dir) && fs.statSync(dir).isDirectory() ? dir : '';
+  } catch {
+    return '';
+  }
+}
+
 function safeProfileSlug(value) {
   return String(value || 'account')
     .trim()
@@ -201,6 +215,15 @@ function safeProfileSlug(value) {
     .slice(0, 40) || 'account';
 }
 
+function safeSettingToken(value, field, maxLength = 120) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  if (text.length > maxLength || !/^[A-Za-z0-9._:/-]+$/.test(text)) {
+    throw new Error('Invalid ' + field);
+  }
+  return text;
+}
+
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
@@ -208,13 +231,19 @@ ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) 
     return { ok: false, reason: 'profile-isolation-not-verified' };
   }
 
-  const name = String(requestedName || '').trim() || (provider.name + ' account');
+  const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
   const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
   const dir = path.join(profileRoot(provider.id), profileId);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, 'teamyra-profile.json'),
-    JSON.stringify({ name, provider: provider.id, createdAt: new Date().toISOString() }, null, 2),
+    JSON.stringify({
+      name,
+      provider: provider.id,
+      enabled: true,
+      priority: 100,
+      createdAt: new Date().toISOString()
+    }, null, 2),
     'utf8'
   );
 
@@ -224,6 +253,69 @@ ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) 
     profileId,
     name,
     loginReady: true
+  };
+});
+
+ipcMain.handle('teamyra:update-account', async (_event, providerId, profileId, patch = {}) => {
+  const provider = providerById(providerId);
+  if (!provider) throw new Error('Unknown provider');
+  const dir = managedProfileDir(providerId, profileId);
+  if (!dir) return { ok: false, reason: 'managed-profile-not-found' };
+
+  const file = path.join(dir, 'teamyra-profile.json');
+  let meta = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) meta = parsed;
+  } catch {}
+
+  if ('name' in patch) {
+    const name = String(patch.name || '').trim();
+    if (!name || name.length > 80) throw new Error('Invalid account name');
+    meta.name = name;
+  }
+  if ('enabled' in patch) meta.enabled = patch.enabled !== false;
+  if ('priority' in patch) {
+    const priority = Number.parseInt(patch.priority, 10);
+    if (!Number.isFinite(priority) || priority < 0 || priority > 10000) throw new Error('Invalid priority');
+    meta.priority = priority;
+  }
+
+  for (const key of ['model', 'effort']) {
+    if (!(key in patch)) continue;
+    const value = safeSettingToken(patch[key], key, key === 'model' ? 120 : 32);
+    if (value) meta[key] = value;
+    else delete meta[key];
+  }
+
+  if ('permissionMode' in patch) {
+    const value = String(patch.permissionMode || '').trim();
+    const allowed = new Set(['', 'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']);
+    if (!allowed.has(value)) throw new Error('Invalid permission mode');
+    if (providerId !== 'claude' || !value) delete meta.permission_mode;
+    else meta.permission_mode = value;
+  }
+
+  meta.provider = providerId;
+  meta.updatedAt = new Date().toISOString();
+  if (!meta.createdAt) meta.createdAt = meta.updatedAt;
+
+  const temp = file + '.tmp-' + process.pid + '-' + crypto.randomBytes(2).toString('hex');
+  fs.writeFileSync(temp, JSON.stringify(meta, null, 2), 'utf8');
+  fs.renameSync(temp, file);
+
+  return {
+    ok: true,
+    provider: providerId,
+    profileId,
+    profile: {
+      name: meta.name || profileId,
+      enabled: meta.enabled !== false,
+      priority: Number.isFinite(Number(meta.priority)) ? Number(meta.priority) : 100,
+      model: meta.model || '',
+      effort: meta.effort || '',
+      permissionMode: meta.permission_mode || ''
+    }
   };
 });
 

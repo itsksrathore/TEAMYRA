@@ -257,8 +257,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     if worker not in registry:
         raise ValueError(f"unknown worker: {worker}")
     worker_info = registry[worker]
-    if not worker_info.get("enabled", True):
-        raise ValueError(f"{worker} is disabled")
+    # enabled controls automatic routing only; explicit/manual worker selection remains allowed.
     provider = worker_info["provider"]
     ready, auth_detail = worker_auth_status(worker_info)
     if not ready:

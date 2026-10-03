@@ -104,6 +104,24 @@ async function nativeStatus(provider, binary) {
   return { signedIn, label: signedIn ? 'Existing local login detected' : 'Sign-in needed' };
 }
 
+function profileMetadata(dir, fallbackName) {
+  let data = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'teamyra-profile.json'), 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed;
+  } catch {}
+
+  const rawPriority = Number.parseInt(data.priority, 10);
+  return {
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : fallbackName,
+    enabled: data.enabled !== false,
+    priority: Number.isFinite(rawPriority) ? Math.max(0, Math.min(rawPriority, 10000)) : 100,
+    model: typeof data.model === 'string' ? data.model : '',
+    effort: typeof data.effort === 'string' ? data.effort : '',
+    permissionMode: typeof data.permission_mode === 'string' ? data.permission_mode : ''
+  };
+}
+
 function managedProfiles(provider) {
   const profiles = [];
   const root = path.join(PROFILES_ROOT, provider.id);
@@ -118,17 +136,19 @@ function managedProfiles(provider) {
           : provider.id === 'claude'
             ? fileExists(path.join(dir, '.credentials.json'))
             : false;
-        let displayName = entry.name;
-        try {
-          const meta = JSON.parse(fs.readFileSync(path.join(dir, 'teamyra-profile.json'), 'utf8'));
-          if (meta && typeof meta.name === 'string' && meta.name.trim()) displayName = meta.name.trim();
-        } catch {}
+        const meta = profileMetadata(dir, entry.name);
         profiles.push({
           id: entry.name,
-          name: displayName,
+          name: meta.name,
           kind: 'managed',
           path: dir,
-          signedIn
+          signedIn,
+          editable: true,
+          enabled: meta.enabled,
+          priority: meta.priority,
+          model: meta.model,
+          effort: meta.effort,
+          permissionMode: meta.permissionMode
         });
       }
     } catch {}
@@ -137,12 +157,19 @@ function managedProfiles(provider) {
   if (provider.id === 'codex') {
     const legacy = path.join(PROFILES_ROOT, 'codex2');
     if (fileExists(legacy) && !profiles.some(profile => profile.path === legacy)) {
+      const meta = profileMetadata(legacy, 'Codex 2');
       profiles.push({
         id: 'codex2',
-        name: 'Codex 2',
+        name: meta.name,
         kind: 'legacy',
         path: legacy,
-        signedIn: fileExists(path.join(legacy, 'auth.json'))
+        signedIn: fileExists(path.join(legacy, 'auth.json')),
+        editable: true,
+        enabled: meta.enabled,
+        priority: meta.priority,
+        model: meta.model,
+        effort: meta.effort,
+        permissionMode: meta.permissionMode
       });
     }
   }
@@ -164,7 +191,13 @@ async function detectProviders() {
         name: 'Default',
         kind: 'native',
         path: provider.nativeHome,
-        signedIn: true
+        signedIn: true,
+        editable: false,
+        enabled: true,
+        priority: null,
+        model: '',
+        effort: '',
+        permissionMode: ''
       });
     }
     profiles.push(...managedProfiles(provider));

@@ -16,12 +16,74 @@ let currentJobs = [];
 const providersEl = document.querySelector('#providers');
 const jobsEl = document.querySelector('#jobs');
 const providerTpl = document.querySelector('#providerTpl');
+const settingsDialog = document.querySelector('#accountSettingsDialog');
+const settingsForm = document.querySelector('#accountSettingsForm');
+const settingsTitle = document.querySelector('#settingsTitle');
+const settingsName = document.querySelector('#settingsName');
+const settingsPriority = document.querySelector('#settingsPriority');
+const settingsEnabled = document.querySelector('#settingsEnabled');
+const settingsModel = document.querySelector('#settingsModel');
+const settingsEffort = document.querySelector('#settingsEffort');
+const settingsPermission = document.querySelector('#settingsPermission');
+const permissionField = document.querySelector('#permissionField');
+const settingsError = document.querySelector('#settingsError');
+const settingsSave = document.querySelector('#settingsSave');
+let settingsContext = null;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'
   }[ch]));
 }
+
+function openAccountSettings(provider, profile) {
+  if (!profile.editable) return;
+  settingsContext = { providerId: provider.id, profileId: profile.id };
+  settingsTitle.textContent = provider.name + ' · ' + profile.name;
+  settingsName.value = profile.name || '';
+  settingsPriority.value = Number.isFinite(profile.priority) ? profile.priority : 100;
+  settingsEnabled.checked = profile.enabled !== false;
+  settingsModel.value = profile.model || '';
+  settingsEffort.value = profile.effort || '';
+  settingsPermission.value = profile.permissionMode || '';
+  permissionField.hidden = provider.id !== 'claude';
+  settingsError.hidden = true;
+  settingsError.textContent = '';
+  settingsDialog.showModal();
+}
+
+function closeAccountSettings() {
+  settingsContext = null;
+  if (settingsDialog.open) settingsDialog.close();
+}
+
+settingsForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!settingsContext) return;
+  settingsSave.disabled = true;
+  settingsError.hidden = true;
+  try {
+    const result = await window.teamyra.updateAccount(settingsContext.providerId, settingsContext.profileId, {
+      name: settingsName.value,
+      enabled: settingsEnabled.checked,
+      priority: settingsPriority.value,
+      model: settingsModel.value,
+      effort: settingsEffort.value,
+      permissionMode: settingsPermission.value
+    });
+    if (!result.ok) throw new Error(result.reason || 'Could not update profile');
+    closeAccountSettings();
+    await refresh();
+  } catch (err) {
+    settingsError.textContent = String(err?.message || err);
+    settingsError.hidden = false;
+  } finally {
+    settingsSave.disabled = false;
+  }
+});
+
+document.querySelector('#settingsClose').addEventListener('click', closeAccountSettings);
+document.querySelector('#settingsCancel').addEventListener('click', closeAccountSettings);
 
 function renderProviders(providers) {
   providersEl.innerHTML = '';
@@ -70,10 +132,19 @@ function renderProviders(providers) {
     } else {
       for (const profile of provider.profiles) {
         const row = document.createElement('div');
-        row.className = 'account' + (profile.signedIn ? ' on' : '');
-        row.innerHTML = '<span class="dot"></span><b></b><span class="account-kind"></span><button class="account-open">Open</button>';
+        row.className = 'account' + (profile.signedIn ? ' on' : '') + (profile.enabled === false ? ' disabled' : '');
+        row.innerHTML = '<span class="dot"></span><b></b><span class="account-kind"></span><span class="account-config"></span><button class="account-settings">Settings</button><button class="account-open">Open</button>';
         row.querySelector('b').textContent = profile.name;
         row.querySelector('.account-kind').textContent = profile.kind;
+        const configParts = [];
+        if (profile.enabled === false) configParts.push('disabled');
+        if (profile.model) configParts.push(profile.model);
+        if (profile.effort) configParts.push(profile.effort);
+        if (profile.editable && Number.isFinite(profile.priority)) configParts.push('p' + profile.priority);
+        row.querySelector('.account-config').textContent = configParts.join(' · ');
+        const settingsButton = row.querySelector('.account-settings');
+        settingsButton.hidden = !profile.editable;
+        settingsButton.addEventListener('click', () => openAccountSettings(provider, profile));
         row.querySelector('.account-open').addEventListener('click', () => {
           openTerminal({ providerId: provider.id, profileId: profile.id, label: provider.name + ' · ' + profile.name })
             .catch(error => alert('Terminal error: ' + String(error)));

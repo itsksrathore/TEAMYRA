@@ -83,6 +83,44 @@
     </section>
   </main>
 
+  <dialog id="accountSettingsDialog" class="settings-dialog">
+    <form id="accountSettingsForm" class="settings-form">
+      <div class="settings-head">
+        <div>
+          <p class="eyebrow">ACCOUNT PROFILE</p>
+          <h3 id="settingsTitle">Account settings</h3>
+        </div>
+        <button type="button" id="settingsClose" class="icon-button" aria-label="Close">×</button>
+      </div>
+      <div class="settings-body">
+        <label class="field"><span>Name</span><input id="settingsName" maxlength="80" required /></label>
+        <div class="field-grid">
+          <label class="field"><span>Priority</span><input id="settingsPriority" type="number" min="0" max="10000" step="1" /></label>
+          <label class="field toggle-field"><span>Routing</span><span class="toggle-line"><input id="settingsEnabled" type="checkbox" /> Enabled for auto routing</span></label>
+        </div>
+        <label class="field"><span>Model override</span><input id="settingsModel" maxlength="120" placeholder="Inherit provider default" /></label>
+        <label class="field"><span>Effort override</span><input id="settingsEffort" maxlength="32" placeholder="Inherit provider default" /></label>
+        <label class="field" id="permissionField"><span>Claude permission mode</span>
+          <select id="settingsPermission">
+            <option value="">Inherit provider default</option>
+            <option value="auto">auto</option>
+            <option value="acceptEdits">acceptEdits</option>
+            <option value="manual">manual</option>
+            <option value="dontAsk">dontAsk</option>
+            <option value="plan">plan</option>
+            <option value="bypassPermissions">bypassPermissions</option>
+          </select>
+        </label>
+        <p class="settings-hint">Lower priority runs earlier among discovered auto-routing workers. Blank model/effort inherits the provider default.</p>
+        <div id="settingsError" class="settings-error" hidden></div>
+      </div>
+      <div class="settings-actions">
+        <button type="button" class="secondary" id="settingsCancel">Cancel</button>
+        <button type="submit" class="primary" id="settingsSave">Save profile</button>
+      </div>
+    </form>
+  </dialog>
+
   <template id="providerTpl">
     <article class="provider-card">
       <div class="provider-head">

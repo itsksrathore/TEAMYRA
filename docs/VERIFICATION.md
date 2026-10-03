@@ -42,8 +42,10 @@ Verified on the active TEAMYRA development Windows machine:
 - Claude stream-json event shapes were captured from the installed CLI.
 - Claude runner parser handles session id, text, usage, rate-limit state, result, and permission denial events.
 - Claude runner integration is replay-tested through a real subprocess NDJSON stream without consuming extra model quota.
+- Managed account settings were roundtrip-tested from desktop modal to profile JSON to Python worker registry for Codex and Claude.
+- Enabled/disabled routing state, priority, model, effort, and Claude permission mode persist correctly; invalid model tokens are rejected.
 
-Current automated suite: 13 Python tests passing after merging concurrent routing work, desktop JavaScript syntax passing, renderer build passing, clean npm ci passing with 0 reported vulnerabilities.
+Current automated suite: 16 Python tests passing, desktop JavaScript syntax passing, renderer build passing, clean npm ci passing with 0 reported vulnerabilities.
 
 ## Known pending verification
 
