@@ -73,6 +73,12 @@ def _validate_nodes(nodes):
             "started_at": None,
             "ended_at": None,
             "error": None,
+            "worktree_id": None,
+            "worktree_path": None,
+            "worktree_branch": None,
+            "snapshot_commit": None,
+            "merged_commit": None,
+            "merge_state": "not_required",
         })
 
     for node in normalized:
@@ -102,7 +108,7 @@ def _validate_nodes(nodes):
     return normalized
 
 
-def create_graph(root, title, project_path, nodes, objective=None):
+def create_graph(root, title, project_path, nodes, objective=None, max_parallel=1):
     graph_id = "graph-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     now = time.time()
     graph = {
@@ -114,7 +120,9 @@ def create_graph(root, title, project_path, nodes, objective=None):
         "created_at": now,
         "updated_at": now,
         "cancel_requested": False,
+        "max_parallel": max(1, min(int(max_parallel or 1), 4)),
         "active_node_id": None,
+        "active_node_ids": [],
         "nodes": _validate_nodes(nodes),
     }
     _atomic_write(_graph_path(root, graph_id), graph)
@@ -235,8 +243,11 @@ def graph_summary(graph):
         "objective": graph.get("objective"),
         "project_path": graph.get("project_path"),
         "state": graph.get("state"),
+        "max_parallel": graph.get("max_parallel", 1),
         "active_node_id": graph.get("active_node_id"),
+        "active_node_ids": list(graph.get("active_node_ids") or ([graph.get("active_node_id")] if graph.get("active_node_id") else [])),
         "approval_pending_node_id": graph.get("approval_pending_node_id"),
+        "approval_pending_node_ids": list(graph.get("approval_pending_node_ids") or ([graph.get("approval_pending_node_id")] if graph.get("approval_pending_node_id") else [])),
         "counts": counts,
         "nodes": [
             {
@@ -257,6 +268,12 @@ def graph_summary(graph):
                 "approved_at": node.get("approved_at"),
                 "denied_at": node.get("denied_at"),
                 "approval_note": node.get("approval_note"),
+                "worktree_id": node.get("worktree_id"),
+                "worktree_path": node.get("worktree_path"),
+                "worktree_branch": node.get("worktree_branch"),
+                "snapshot_commit": node.get("snapshot_commit"),
+                "merged_commit": node.get("merged_commit"),
+                "merge_state": node.get("merge_state", "not_required"),
                 "error": node.get("error"),
             }
             for node in graph.get("nodes", [])
