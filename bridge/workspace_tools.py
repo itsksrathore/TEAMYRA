@@ -29,6 +29,7 @@ DEFAULT_PERMISSIONS = {
 
 PERMISSION_BY_TOOL = {
     "filesystem.list": "read",
+    "filesystem.stat": "read",
     "filesystem.read": "read",
     "filesystem.search": "search",
     "filesystem.create": "create",
@@ -43,9 +44,10 @@ PERMISSION_BY_TOOL = {
     "git.log": "git",
     "git.add": "git",
     "git.commit": "git",
+    "git.restore": "git",
 }
 
-DESTRUCTIVE_TOOLS = {"filesystem.delete"}
+DESTRUCTIVE_TOOLS = {"filesystem.delete", "git.restore"}
 HARD_BLOCKED_EXECUTABLES = {
     "format", "format.com", "diskpart", "shutdown", "shutdown.exe", "reboot",
     "bcdedit", "reg", "reg.exe", "cipher", "takeown", "icacls", "wmic",
@@ -258,6 +260,16 @@ class WorkspaceToolService:
                 })
             return {"path": str(path), "items": items, "clipped": len(items) >= limit}
 
+        if tool == "filesystem.stat":
+            path = self._path(args.get("path"), workspace, permissions, must_exist=True)
+            stat = path.stat()
+            return {
+                "path": str(path),
+                "type": "directory" if path.is_dir() else "file",
+                "size": stat.st_size if path.is_file() else None,
+                "modified": stat.st_mtime,
+            }
+
         if tool == "filesystem.read":
             path = self._path(args.get("path"), workspace, permissions, must_exist=True)
             if not path.is_file():
@@ -450,6 +462,15 @@ class WorkspaceToolService:
             if not message or len(message) > 500:
                 raise WorkspaceToolError("commit message is required and must be <= 500 characters")
             argv = [*base, "commit", "-m", message]
+        elif tool == "git.restore":
+            paths = args.get("paths") or ["."]
+            if not isinstance(paths, list) or len(paths) > 200:
+                raise WorkspaceToolError("paths must be a list")
+            rel = []
+            for raw in paths:
+                path = self._path(raw, workspace, permissions, must_exist=False)
+                rel.append(os.path.relpath(path, workspace))
+            argv = [*base, "restore", "--worktree", "--", *rel]
         else:
             raise WorkspaceToolError(f"unsupported git tool: {tool}")
 
