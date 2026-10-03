@@ -390,6 +390,10 @@ ipcMain.handle('teamyra:chatgpt-reload', () => {
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
   return chatgptProvider.reload();
 });
+ipcMain.handle('teamyra:chatgpt-reconnect', () => {
+  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
+  return chatgptProvider.reconnect();
+});
 ipcMain.handle('teamyra:chatgpt-new-chat', () => {
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
   return chatgptProvider.createConversation();
