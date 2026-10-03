@@ -109,8 +109,8 @@ class ChatGPTAutomationAdapter {
     if (!line) return null;
     try {
       const data = JSON.parse(line.slice(TOOL_REQUEST_PREFIX.length));
-      if (!data || typeof data.tool !== 'string' || typeof data.args !== 'object') return null;
-      return { tool: data.tool, args: data.args || {} };
+      if (!data || typeof data.tool !== 'string' || !data.args || typeof data.args !== 'object' || Array.isArray(data.args)) return null;
+      return { tool: data.tool, args: data.args };
     } catch {
       return null;
     }
