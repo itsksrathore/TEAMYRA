@@ -7,424 +7,190 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <aside class="sidebar">
-    <div class="brand"><div class="brand-mark">T</div><div><b>TEAMYRA</b><span>CONTROL OS</span></div></div>
-    <nav>
-      <button class="active" id="navCommand" data-view="command">Command Desk</button>
-      <button id="navChatgpt" data-view="chatgpt">ChatGPT Normal</button>
-      <button disabled>Tasks</button>
-      <button id="navWorktrees" data-view="worktrees">Worktrees</button>
-      <button id="navObservability" data-view="observability">Observability</button>
-      <button disabled>Connections</button>
-      <button id="navMemory" data-view="memory">Memory</button>
-      <button disabled>Settings</button>
-    </nav>
-    <div class="core-status"><span></span> Local core</div>
-  </aside>
+  <div class="desk">
+    <div class="sheet">
+      <header class="topbar">
+        <div class="brand" aria-label="Teamyra">
+          <span class="brand-mark">T</span>
+          <span class="brand-name">Teamyra</span>
+        </div>
 
-  <main>
-    <header>
-      <div>
-        <p class="eyebrow" id="pageEyebrow">MULTI-AGENT CONTROL PLANE</p>
-        <h1 id="pageTitle">Command Desk</h1>
-      </div>
-      <div class="actions">
-        <button class="secondary" id="refresh">Refresh</button>
-        <button class="secondary" id="openTerminal">Open Terminal</button>
-        <button class="primary" disabled>+ New Task</button>
-      </div>
-    </header>
+        <nav class="view-switch" aria-label="Primary navigation">
+          <button id="navTasks" class="view-choice active" type="button" data-view="tasks">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10v9H3zM5 6h6M5 8.5h4"/></svg>
+            Tasks
+          </button>
+          <button id="navAgents" class="view-choice" type="button" data-view="agents">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v2M4.2 5.2h7.6v6.3H4.2zM6.2 8h.1M9.7 8h.1M6.5 10h3"/></svg>
+            Agents
+          </button>
+        </nav>
 
-    <div id="commandView" class="app-view">
-    <section class="hero">
-      <div class="hero-copy">
-        <span class="ready">● SYSTEM READY</span>
-        <h2>One desk.<br>Many minds.</h2>
-        <p>TEAMYRA discovers the agents already available on this machine and brings their accounts, tasks and execution into one local control plane.</p>
-      </div>
-      <div class="metrics">
-        <div><strong id="mAgents">—</strong><span>Agents detected</span></div>
-        <div><strong id="mAccounts">—</strong><span>Accounts ready</span></div>
-        <div><strong id="mRunning">—</strong><span>Running tasks</span></div>
-        <div><strong id="mJobs">—</strong><span>Recent jobs</span></div>
-      </div>
-    </section>
+        <div class="topbar-right">
+          <span id="liveBadge" class="live-badge" hidden><i></i><span id="liveLabel">0 live</span></span>
+          <button id="refresh" class="icon-btn" type="button" aria-label="Refresh" title="Refresh">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.7 5.7A5 5 0 1 0 13 9M12.7 5.7V2.8M12.7 5.7H9.8"/></svg>
+          </button>
+        </div>
+      </header>
 
-    <section class="section-title">
-      <div><p class="eyebrow">WORKFORCE</p><h3>Agents & Accounts</h3></div>
-      <span>Existing local logins appear automatically.</span>
-    </section>
-    <section id="providers" class="provider-grid"></section>
-
-    <section class="section-title">
-      <div><p class="eyebrow">EXECUTION</p><h3>Recent tasks</h3></div>
-      <span>Read directly from the existing TEAMYRA job store.</span>
-    </section>
-    <section class="execution-grid">
-      <div>
-        <section id="jobs" class="jobs-panel"></section>
-      </div>
-      <aside class="detail-panel">
-        <div class="detail-head">
-          <div>
-            <p class="eyebrow">TASK DETAIL</p>
-            <h3 id="detailTitle">Select a task</h3>
-          </div>
-          <span id="detailState" class="detail-state">—</span>
-        </div>
-        <div id="detailMeta" class="detail-meta">Click a task to inspect its live transcript.</div>
-        <pre id="transcript" class="transcript">No task selected.</pre>
-      </aside>
-    </section>
-
-    </div>
-
-    <div id="chatgptView" class="app-view" hidden>
-      <section class="chatgpt-hero">
-        <div>
-          <span class="ready">● EMBEDDED WEB AGENT</span>
-          <h2>ChatGPT Normal</h2>
-          <p>Your normal ChatGPT web account runs inside TEAMYRA with a dedicated persistent browser session and controlled access to one selected workspace.</p>
-        </div>
-        <div class="chatgpt-status-grid">
-          <div><strong id="chatgptConnection">Idle</strong><span>ChatGPT</span></div>
-          <div><strong id="chatgptAccount">Unknown</strong><span>Account session</span></div>
-          <div><strong id="chatgptBridge">Connected</strong><span>Local bridge</span></div>
-          <div><strong id="chatgptTools">Unavailable</strong><span>Tools</span></div>
-        </div>
-      </section>
-
-      <section class="chatgpt-toolbar">
-        <div class="inline-actions">
-          <button class="primary" id="chatgptOpen">Open Chat</button>
-          <button class="secondary" id="chatgptNew">New Chat</button>
-          <button class="secondary" id="chatgptReload">Reload</button>
-          <button class="secondary" id="chatgptStop">Stop</button>
-          <button class="secondary" id="chatgptReconnect">Reconnect</button>
-        </div>
-        <div class="chatgpt-workspace-row">
-          <label><span>Workspace</span><input id="chatgptWorkspace" readonly placeholder="Select a Teamyra workspace" /></label>
-          <button class="secondary" id="chatgptSelectWorkspace">Select Workspace</button>
-        </div>
-      </section>
-
-      <section class="chatgpt-permissions">
-        <div>
-          <p class="eyebrow">CHATGPT AGENT PERMISSIONS</p>
-          <h3>Workspace access</h3>
-        </div>
-        <div class="permission-grid">
-          <label><input type="checkbox" id="chatgptPermRead" checked /> Read files</label>
-          <label><input type="checkbox" id="chatgptPermSearch" checked /> Search files</label>
-          <label><input type="checkbox" id="chatgptPermCreate" checked /> Create files</label>
-          <label><input type="checkbox" id="chatgptPermWrite" checked /> Edit files</label>
-          <label><input type="checkbox" id="chatgptPermTerminal" /> Terminal commands</label>
-          <label><input type="checkbox" id="chatgptPermGit" checked /> Git access</label>
-          <label title="TEAMYRA keeps ChatGPT strictly workspace-scoped"><input type="checkbox" id="chatgptPermOutside" disabled /> Access outside workspace</label>
-          <label><input type="checkbox" id="chatgptPermDestructive" /> Destructive operations without confirmation</label>
-        </div>
-        <div class="inline-actions">
-          <button class="secondary" id="chatgptSavePermissions">Save Permissions</button>
-          <button class="secondary" id="chatgptAttach">Attach Workspace File</button>
-          <button class="secondary" id="chatgptViewChanges">View Changed Files</button>
-          <button class="secondary" id="chatgptViewDiff">View Diff</button>
-          <button class="secondary danger-soft" id="chatgptRevert">Revert Tracked Changes</button>
-        </div>
-        <div id="chatgptPermissionHint" class="chatgpt-hint">Outside-workspace access is intentionally disabled. Destructive operations remain confirmation-gated unless explicitly enabled.</div>
-      </section>
-
-      <section class="chatgpt-browser-shell">
-        <div class="chatgpt-browser-head">
-          <div>
-            <p class="eyebrow">TEAMYRA WORKER — CHATGPT</p>
-            <strong id="chatgptSessionLabel">Persistent session: teamyra-chatgpt-profile</strong>
-          </div>
-          <span id="chatgptUrl">Not loaded</span>
-        </div>
-        <div id="chatgptViewport" class="chatgpt-viewport">
-          <div class="chatgpt-placeholder">Open Chat to load ChatGPT inside this panel.</div>
-        </div>
-      </section>
-
-      <section id="chatgptChangesPanel" class="chatgpt-changes" hidden>
-        <div class="detail-head">
-          <div><p class="eyebrow">WORKSPACE CHANGES</p><h3 id="chatgptChangesTitle">Git status</h3></div>
-          <button class="secondary" id="chatgptChangesClose">Close</button>
-        </div>
-        <pre id="chatgptChangesOutput">No changes loaded.</pre>
-      </section>
-    </div>
-
-    <div id="worktreesView" class="app-view" hidden>
-      <section class="worktree-hero">
-        <div>
-          <span class="ready">● GIT ISOLATION</span>
-          <h2>Worktrees</h2>
-          <p>Review isolated agent branches before merging them back into the original target branch.</p>
-        </div>
-        <div class="worktree-metrics">
-          <div><strong id="wtManaged">0</strong><span>Managed</span></div>
-          <div><strong id="wtDirty">0</strong><span>Dirty</span></div>
-          <div><strong id="wtConflicts">0</strong><span>Conflicts</span></div>
-        </div>
-      </section>
-
-      <section class="section-title">
-        <div><p class="eyebrow">GIT WORKSPACES</p><h3>Managed worktrees</h3></div>
-        <div class="inline-actions">
-          <button class="secondary" id="createWorktree">+ Create</button>
-          <button class="secondary" id="refreshWorktrees">Refresh</button>
-        </div>
-      </section>
-
-      <section class="worktree-layout">
-        <div id="worktreeList" class="worktree-list">
-          <div class="empty">No managed worktrees loaded.</div>
-        </div>
-        <aside class="worktree-detail">
-          <div class="detail-head">
+      <main class="main">
+        <section id="tasksView" class="view">
+          <div class="view-head">
             <div>
-              <p class="eyebrow">WORKTREE REVIEW</p>
-              <h3 id="wtTitle">Select a worktree</h3>
+              <span class="micro-label">WORK DESK</span>
+              <h1>Tasks</h1>
             </div>
-            <span id="wtState" class="detail-state">—</span>
+            <div class="head-actions">
+              <div class="segmented" aria-label="Task filter">
+                <button id="filterActive" class="active" type="button">Active</button>
+                <button id="filterAll" type="button">All</button>
+              </div>
+              <button id="newTask" class="btn primary" type="button">
+                <span class="plus">+</span> New task
+              </button>
+            </div>
           </div>
-          <div id="wtMeta" class="detail-meta">Choose a managed worktree to inspect its branch and diff.</div>
-          <div class="worktree-actions">
-            <button class="secondary" id="wtOpenTerminal" disabled>Open Terminal</button>
-            <button class="secondary" id="wtRebase" disabled>Update branch</button>
-            <button class="secondary" id="wtMerge" disabled>Merge</button>
-            <button class="secondary danger-soft" id="wtDiscard" disabled>Discard</button>
-            <button class="secondary danger" id="wtForceDiscard" disabled>Force discard</button>
+
+          <div id="taskDesk" class="task-desk">
+            <div class="empty-state">
+              <div class="empty-orb"></div>
+              <strong>No active tasks</strong>
+              <span>Start one and its agent will appear here.</span>
+            </div>
           </div>
-          <div id="wtSummary" class="worktree-summary"></div>
-          <section id="wtConflictPanel" class="conflict-panel" hidden>
-            <div class="conflict-head">
+        </section>
+
+        <section id="agentsView" class="view" hidden>
+          <div id="agentsShelf">
+            <div class="view-head">
               <div>
-                <p class="eyebrow">INTERACTIVE RESOLUTION</p>
-                <h4 id="wtConflictTitle">Resolve rebase conflicts</h4>
+                <span class="micro-label">WORKFORCE</span>
+                <h1>Agents</h1>
               </div>
-              <span id="wtConflictCount" class="conflict-count">0 unresolved</span>
+              <span id="agentSummary" class="quiet-status">Checking connections…</span>
             </div>
-            <div id="wtConflictFiles" class="conflict-files"></div>
-            <div class="conflict-editor">
-              <div class="conflict-path" id="wtConflictPath">Select a conflicted file.</div>
-              <div class="conflict-choices">
-                <button class="secondary" id="wtUseTarget" disabled>Use target</button>
-                <button class="secondary" id="wtUseWorktree" disabled>Use worktree</button>
-              </div>
-              <textarea id="wtConflictEditor" spellcheck="false" disabled placeholder="Conflict content will appear here."></textarea>
-              <div id="wtConflictHint" class="conflict-hint">Start an interactive update to preserve conflicts for review.</div>
-              <div class="conflict-actions">
-                <button class="secondary" id="wtAbortConflict" disabled>Abort rebase</button>
-                <button class="secondary" id="wtSaveConflict" disabled>Save manual resolution</button>
-                <button class="primary" id="wtContinueConflict" disabled>Continue rebase</button>
-              </div>
-            </div>
-          </section>
-          <pre id="wtDiff" class="diff-viewer">No worktree selected.</pre>
-        </aside>
-      </section>
-    </div>
-
-    <div id="observabilityView" class="app-view" hidden>
-      <section class="obs-hero">
-        <div>
-          <span class="ready">● LIVE TELEMETRY</span>
-          <h2>Observability</h2>
-          <p>Real worker readiness, persisted token usage, unified execution history, and bounded log search from one local view.</p>
-        </div>
-        <div class="obs-metrics">
-          <div><strong id="obsWorkers">0</strong><span>Workers</span></div>
-          <div><strong id="obsReady">0</strong><span>Ready</span></div>
-          <div><strong id="obsRunning">0</strong><span>Running</span></div>
-          <div><strong id="obsJobs">0</strong><span>Jobs</span></div>
-        </div>
-      </section>
-
-      <section class="section-title">
-        <div><p class="eyebrow">USAGE / QUOTA</p><h3>Worker telemetry</h3></div>
-        <span>Real tokens and readiness only. Unavailable quota percentages are not guessed.</span>
-      </section>
-      <section id="usageCards" class="usage-grid"></section>
-
-      <section class="section-title">
-        <div><p class="eyebrow">UNIFIED TIMELINE</p><h3>Jobs, graphs, reviews & worktrees</h3></div>
-        <button class="secondary" id="refreshObservability">Refresh</button>
-      </section>
-      <section class="obs-filters">
-        <label><span>Project path</span><input id="obsProject" placeholder="Optional project/repo path" /></label>
-        <label><span>Worker</span><select id="obsWorker"><option value="">All workers</option></select></label>
-        <label><span>Source</span>
-          <select id="obsSource">
-            <option value="">All sources</option>
-            <option value="job">Jobs</option>
-            <option value="graph">Graphs</option>
-            <option value="review">Reviews</option>
-            <option value="handoff">Handoffs</option>
-            <option value="worktree">Worktrees</option>
-          </select>
-        </label>
-        <label class="obs-query-field"><span>Filter timeline</span><input id="obsQuery" placeholder="Search timeline text" /></label>
-      </section>
-      <section id="timelineList" class="timeline-list"><div class="empty">Loading timeline…</div></section>
-
-      <section class="section-title">
-        <div><p class="eyebrow">SEARCHABLE LOGS</p><h3>Find anything in worker history</h3></div>
-        <span>Searches events, transcripts, stderr, runner logs, and task text.</span>
-      </section>
-      <form id="logSearchForm" class="log-search-bar">
-        <input id="logSearchQuery" required placeholder="Search logs, commands, errors, messages…" />
-        <select id="logSearchKind">
-          <option value="">All log types</option>
-          <option value="events.jsonl">Events</option>
-          <option value="transcript.md">Transcripts</option>
-          <option value="stderr.txt">stderr</option>
-          <option value="runner.log">Runner logs</option>
-          <option value="task.txt">Task text</option>
-        </select>
-        <button class="primary" type="submit">Search</button>
-      </form>
-      <section id="logSearchResults" class="log-results"><div class="empty">Enter a query to search persisted TEAMYRA logs.</div></section>
-    </div>
-
-    <div id="memoryView" class="app-view" hidden>
-      <section class="memory-hero">
-        <div>
-          <span class="ready">● LOCAL PROJECT MEMORY</span>
-          <h2>Memory</h2>
-          <p>Store architecture decisions, facts, handoffs, notes, and TODOs per project. Runtime memory stays local and is excluded from source control.</p>
-        </div>
-        <div class="memory-project">
-          <label><span>Project / repository path</span><input id="memoryProject" placeholder="D:\\path\\to\\project" /></label>
-          <button class="primary" id="loadMemory">Load memory</button>
-        </div>
-      </section>
-
-      <section class="memory-toolbar">
-        <input id="memorySearch" placeholder="Search project memory…" />
-        <select id="memoryKindFilter">
-          <option value="">All kinds</option>
-          <option value="decision">Decision</option>
-          <option value="architecture">Architecture</option>
-          <option value="fact">Fact</option>
-          <option value="note">Note</option>
-          <option value="handoff">Handoff</option>
-          <option value="todo">Todo</option>
-        </select>
-        <select id="memoryStatusFilter">
-          <option value="active">Active</option>
-          <option value="archived">Archived</option>
-          <option value="all">All</option>
-        </select>
-        <button class="secondary" id="memoryNew">+ New memory</button>
-        <button class="secondary" id="memoryContext">Context pack</button>
-      </section>
-
-      <section class="memory-layout">
-        <div id="memoryList" class="memory-list"><div class="empty">Choose a project path and load memory.</div></div>
-        <aside class="memory-editor">
-          <div class="detail-head">
-            <div>
-              <p class="eyebrow">PROJECT MEMORY</p>
-              <h3 id="memoryEditorTitle">New memory</h3>
-            </div>
-            <span id="memoryEditorState" class="detail-state">LOCAL</span>
+            <div id="agentGrid" class="agent-grid"></div>
           </div>
-          <form id="memoryForm" class="memory-form">
-            <div class="memory-form-grid">
-              <label><span>Kind</span><select id="memoryKind">
-                <option value="decision">Decision</option>
-                <option value="architecture">Architecture</option>
-                <option value="fact">Fact</option>
-                <option value="note" selected>Note</option>
-                <option value="handoff">Handoff</option>
-                <option value="todo">Todo</option>
-              </select></label>
-              <label><span>Importance</span><select id="memoryImportance">
-                <option value="low">Low</option>
-                <option value="normal" selected>Normal</option>
-                <option value="high">High</option>
-                <option value="critical">Critical</option>
-              </select></label>
+
+          <div id="chatgptDetail" class="chatgpt-detail" hidden>
+            <div class="chatgpt-head">
+              <button id="chatgptBack" class="btn quiet" type="button">← Agents</button>
+              <div class="chatgpt-title">
+                <span class="agent-avatar chatgpt-avatar">GPT</span>
+                <div>
+                  <strong>ChatGPT Normal</strong>
+                  <span id="chatgptStatusText">Not opened</span>
+                </div>
+              </div>
+              <div class="chatgpt-actions">
+                <button id="chatgptWorkspaceButton" class="workspace-chip" type="button" title="Change workspace">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h4l1-1h6v8.5h-11z"/></svg>
+                  <span id="chatgptWorkspaceLabel">Choose workspace</span>
+                </button>
+                <button id="chatgptTools" class="btn quiet" type="button">Tools</button>
+                <button id="chatgptNew" class="btn quiet" type="button">New chat</button>
+                <button id="chatgptReload" class="icon-btn" type="button" aria-label="Reload ChatGPT" title="Reload">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.7 5.7A5 5 0 1 0 13 9M12.7 5.7V2.8M12.7 5.7H9.8"/></svg>
+                </button>
+                <button id="chatgptStop" class="icon-btn danger-icon" type="button" aria-label="Stop ChatGPT" title="Stop">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4.5" y="4.5" width="7" height="7" rx="1"/></svg>
+                </button>
+              </div>
             </div>
-            <label><span>Title</span><input id="memoryTitle" maxlength="180" required /></label>
-            <label><span>Tags</span><input id="memoryTags" placeholder="architecture, routing, auth" /></label>
-            <label><span>Content</span><textarea id="memoryContent" rows="14" maxlength="24000" required></textarea></label>
-            <div id="memoryMeta" class="memory-meta">New local memory entry.</div>
-            <div class="memory-actions">
-              <button type="button" class="secondary danger-soft" id="memoryArchive" disabled>Archive</button>
-              <button type="button" class="secondary" id="memoryReset">Reset</button>
-              <button type="submit" class="primary" id="memorySave">Save memory</button>
+            <div id="chatgptViewport" class="chatgpt-viewport">
+              <div class="chatgpt-placeholder">
+                <div class="empty-orb"></div>
+                <strong>ChatGPT stays inside Teamyra</strong>
+                <span>Open the agent to load your normal ChatGPT account here.</span>
+                <button id="chatgptOpen" class="btn primary" type="button">Open ChatGPT</button>
+              </div>
             </div>
-          </form>
-          <div class="memory-context-panel">
-            <div class="memory-context-head"><b>Agent context preview</b><button class="secondary" id="memoryContextClose">Clear</button></div>
-            <pre id="memoryContextPreview">Build a context pack to preview bounded project memory for agents.</pre>
           </div>
-        </aside>
-      </section>
+        </section>
+      </main>
+
+      <footer class="statusbar">
+        <span><i class="core-dot"></i> Local core</span>
+        <span id="updateNote"></span>
+      </footer>
     </div>
+  </div>
 
-    <section id="terminalPanel" class="terminal-panel" hidden>
-      <div class="terminal-head">
-        <span id="terminalLabel">Terminal · TEAMYRA</span>
-        <button id="closeTerminal" class="terminal-close">Close</button>
-      </div>
-      <div id="terminalHost" class="terminal-host"></div>
-    </section>
-  </main>
-
-  <dialog id="accountSettingsDialog" class="settings-dialog">
-    <form id="accountSettingsForm" class="settings-form">
-      <div class="settings-head">
+  <dialog id="newTaskDialog" class="glass-dialog">
+    <form id="newTaskForm" class="dialog-card">
+      <div class="dialog-head">
         <div>
-          <p class="eyebrow">ACCOUNT PROFILE</p>
-          <h3 id="settingsTitle">Account settings</h3>
+          <span class="micro-label">NEW TASK</span>
+          <h2>What should get done?</h2>
         </div>
-        <button type="button" id="settingsClose" class="icon-button" aria-label="Close">×</button>
+        <button class="icon-btn" id="newTaskClose" type="button" aria-label="Close">×</button>
       </div>
-      <div class="settings-body">
-        <label class="field"><span>Name</span><input id="settingsName" maxlength="80" required /></label>
-        <div class="field-grid">
-          <label class="field"><span>Priority</span><input id="settingsPriority" type="number" min="0" max="10000" step="1" /></label>
-          <label class="field toggle-field"><span>Routing</span><span class="toggle-line"><input id="settingsEnabled" type="checkbox" /> Enabled for auto routing</span></label>
-        </div>
-        <label class="field"><span>Model override</span><input id="settingsModel" maxlength="120" placeholder="Inherit provider default" /></label>
-        <label class="field"><span>Effort override</span><input id="settingsEffort" maxlength="32" placeholder="Inherit provider default" /></label>
-        <label class="field" id="permissionField"><span>Claude permission mode</span>
-          <select id="settingsPermission">
-            <option value="">Inherit provider default</option>
-            <option value="auto">auto</option>
-            <option value="acceptEdits">acceptEdits</option>
-            <option value="manual">manual</option>
-            <option value="dontAsk">dontAsk</option>
-            <option value="plan">plan</option>
-            <option value="bypassPermissions">bypassPermissions</option>
-          </select>
-        </label>
-        <p class="settings-hint">Lower priority runs earlier among discovered auto-routing workers. Blank model/effort inherits the provider default.</p>
-        <div id="settingsError" class="settings-error" hidden></div>
+      <label class="task-prompt">
+        <textarea id="taskPrompt" maxlength="24000" required autofocus placeholder="Describe the result you want…"></textarea>
+      </label>
+      <div class="task-options">
+        <button id="taskWorkspacePick" class="workspace-field" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h4l1-1h6v8.5h-11z"/></svg>
+          <span id="taskWorkspaceLabel">Choose workspace</span>
+        </button>
+        <select id="taskAgent" aria-label="Agent">
+          <option value="auto">Auto · best available</option>
+        </select>
       </div>
-      <div class="settings-actions">
-        <button type="button" class="secondary" id="settingsCancel">Cancel</button>
-        <button type="submit" class="primary" id="settingsSave">Save profile</button>
+      <input id="taskWorkspace" type="hidden" />
+      <div id="taskError" class="dialog-error" hidden></div>
+      <div class="dialog-actions">
+        <button id="newTaskCancel" class="btn quiet" type="button">Cancel</button>
+        <button id="taskStart" class="btn primary" type="submit">Start task</button>
       </div>
     </form>
   </dialog>
 
-  <template id="providerTpl">
-    <article class="provider-card">
-      <div class="provider-head">
-        <div class="provider-icon"></div>
-        <div class="provider-name"><h4></h4><span></span></div>
-        <button class="plus" title="Managed multi-account flow will be enabled after adapter verification">+</button>
+  <dialog id="chatgptToolsDialog" class="glass-dialog tools-dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <span class="micro-label">CHATGPT TOOLS</span>
+          <h2>Workspace access</h2>
+        </div>
+        <button class="icon-btn" id="chatgptToolsClose" value="cancel" aria-label="Close">×</button>
       </div>
-      <div class="binary"></div>
-      <div class="accounts"></div>
-      <div class="provider-foot"></div>
-    </article>
-  </template>
+      <div class="tool-grid">
+        <label><input id="chatgptPermRead" type="checkbox" checked /><span>Read files</span></label>
+        <label><input id="chatgptPermSearch" type="checkbox" checked /><span>Search</span></label>
+        <label><input id="chatgptPermCreate" type="checkbox" checked /><span>Create files</span></label>
+        <label><input id="chatgptPermWrite" type="checkbox" checked /><span>Edit files</span></label>
+        <label><input id="chatgptPermGit" type="checkbox" checked /><span>Git</span></label>
+        <label><input id="chatgptPermTerminal" type="checkbox" /><span>Terminal</span></label>
+      </div>
+      <p class="tools-note">Access always stays inside the selected workspace. Destructive actions remain confirmation-gated.</p>
+      <div class="dialog-actions">
+        <button id="chatgptViewChanges" class="btn quiet" type="button">Changes</button>
+        <button id="chatgptSavePermissions" class="btn primary" type="button">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="changesDialog" class="glass-dialog changes-dialog">
+    <div class="dialog-card">
+      <div class="dialog-head">
+        <div><span class="micro-label">WORKSPACE</span><h2>Changes</h2></div>
+        <button id="changesClose" class="icon-btn" type="button" aria-label="Close">×</button>
+      </div>
+      <pre id="changesOutput">No changes loaded.</pre>
+    </div>
+  </dialog>
+
+  <section id="terminalPanel" class="terminal-panel" hidden>
+    <div class="terminal-card">
+      <div class="terminal-head">
+        <span id="terminalLabel">Agent terminal</span>
+        <button id="closeTerminal" class="icon-btn" type="button" aria-label="Close terminal">×</button>
+      </div>
+      <div id="terminalHost" class="terminal-host"></div>
+    </div>
+  </section>
 
   <link rel="stylesheet" href="./bundle.css" />
   <script src="./bundle.js"></script>
