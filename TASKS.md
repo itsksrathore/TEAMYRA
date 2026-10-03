@@ -99,3 +99,18 @@ This checklist is updated as implementation lands.
 - [x] First functional/security review and fixes.
 - [x] Second architecture/security review and fixes.
 - [ ] Live Windows ChatGPT account acceptance (requires an online desktop/user session; do not mark passed from CI alone).
+
+
+## Phase 9 — Minimal Nami-style Desktop
+- [x] Two-view primary shell: Tasks + Agents.
+- [x] Nami Glass-inspired visual rebuild with aurora background, translucent panes, coral accents, capsule controls, and compact typography.
+- [x] Live task tiles with incremental transcript tails and active Stop control.
+- [x] Minimal New Task composer with workspace + worker selector using the existing TEAMYRA job engine.
+- [x] Clean provider/account connection shelf with connect/open and verified Add Account flows.
+- [x] ChatGPT Normal embedded as an Agents detail surface with minimal workspace/tool controls.
+- [x] Remove Worktrees, Observability, Memory, Connections, Settings, and dashboard metrics from permanent primary navigation while preserving their backend APIs.
+- [x] Preserve updater, terminal, provider login, worktree/conflict, memory, observability, MCP/CLI, and orchestration contracts.
+- [x] Add desktop task action regression tests and simplified UI contract tests.
+- [x] Complete first functional review and second complexity/maintainability review.
+- [x] Retain Nami Apache-2.0 attribution/license for adapted visual implementation.
+- [x] Windows + Linux CI validation for the rebuilt renderer and existing backend.
