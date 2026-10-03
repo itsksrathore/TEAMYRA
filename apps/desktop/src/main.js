@@ -2,8 +2,7 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
-const { detectProviders, providerById, profileRoot, PROFILES_ROOT } = require('./provider-registry');
+const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary } = require('./provider-registry');
 
 let pty = null;
 try { pty = require('@lydell/node-pty'); } catch {}
@@ -63,6 +62,16 @@ function terminalArgs(shell) {
   return [];
 }
 
+function quoteShellArg(value) {
+  const text = String(value);
+  if (process.platform === 'win32') return '"' + text.replace(/"/g, '""') + '"';
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
+function launchLine(binary, args = []) {
+  return [quoteShellArg(binary), ...args.map(quoteShellArg)].join(' ');
+}
+
 function terminalFor(event, id) {
   const item = TERMINALS.get(id);
   if (!item || item.owner !== event.sender.id) return null;
@@ -100,7 +109,7 @@ ipcMain.handle('teamyra:providers', () => detectProviders());
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
 
-ipcMain.handle('teamyra:terminal-open', (event, options = {}) => {
+ipcMain.handle('teamyra:terminal-open', async (event, options = {}) => {
   if (!pty) return { ok: false, reason: 'pty-unavailable' };
   const requested = typeof options.cwd === 'string' ? options.cwd : '';
   const cwd = requested && path.isAbsolute(requested) && fs.existsSync(requested) ? requested : ROOT;
@@ -112,7 +121,10 @@ ipcMain.handle('teamyra:terminal-open', (event, options = {}) => {
   if (typeof options.providerId === 'string' && options.providerId) {
     const provider = providerById(options.providerId);
     if (!provider) return { ok: false, reason: 'unknown-provider' };
-    launchCommand = provider.bin;
+    const binary = await whereBinary(provider.bin);
+    if (!binary) return { ok: false, reason: 'provider-cli-not-found' };
+    const args = options.login === true ? (provider.managed?.loginArgv || []) : [];
+    launchCommand = launchLine(binary, args);
 
     const profileId = typeof options.profileId === 'string' ? options.profileId : 'native';
     if (profileId === 'native' && provider.managed?.env) {
@@ -206,17 +218,13 @@ ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) 
     'utf8'
   );
 
-  const env = { ...process.env, [provider.managed.env]: dir };
-  const child = spawn(provider.bin, provider.managed.loginArgv, {
-    env,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false,
-    shell: process.platform === 'win32'
-  });
-  child.unref();
-
-  return { ok: true, provider: provider.id, profileId, name };
+  return {
+    ok: true,
+    provider: provider.id,
+    profileId,
+    name,
+    loginReady: true
+  };
 });
 
 app.whenReady().then(() => {
