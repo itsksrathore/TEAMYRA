@@ -31,6 +31,7 @@ This checklist is updated as implementation lands.
 - [x] Claude profiles available as independent bridge workers.
 - [ ] Verified Antigravity profile isolation.
 - [x] Initial account-aware routing/cooldowns across discovered workers.
+- [x] Bounded automatic reassignment/failover for eligible worker/provider failures, with lineage tracking.
 - [x] Per-account model/effort UI and persisted settings, with enabled/priority routing controls.
 
 ## Phase 3 — Orchestration
