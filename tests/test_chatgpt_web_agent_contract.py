@@ -30,6 +30,12 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         self.assertIn("setWindowOpenHandler", self.provider)
         self.assertIn("action: 'deny'", self.provider)
 
+    def test_auth_popups_stay_inside_teamyra(self):
+        self.assertIn("createEmbeddedPopup", self.provider)
+        self.assertIn("createWindow: options => this.createEmbeddedPopup(options)", self.provider)
+        self.assertIn("new WebContentsView", self.provider)
+        self.assertNotIn("new BrowserWindow", self.provider)
+
     def test_persistent_session_is_dedicated(self):
         self.assertIn("persist:teamyra-chatgpt-profile", self.session)
         self.assertIn("session.fromPartition", self.session)
