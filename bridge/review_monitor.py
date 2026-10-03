@@ -99,11 +99,17 @@ def main():
 
         impl_terminal = server.failover_terminal_job_id(implementation_job_id)
         impl_meta = server.read_meta(impl_terminal)
-        exclude = [impl_meta.get("worker")] if impl_meta.get("worker") else []
+        allow_self_review = state.get("allow_self_review", False)
+        exclude = []
+        if not allow_self_review and impl_meta.get("worker"):
+            exclude = [impl_meta.get("worker")]
         requested_reviewer = state.get("reviewer_worker") or "auto"
         reviewer = requested_reviewer
         if reviewer == "auto":
             reviewer = server.pick_worker("auto", exclude=exclude)
+        elif not allow_self_review and reviewer == impl_meta.get("worker"):
+            finish(state, "failed", error="reviewer worker matched implementation worker")
+            return
 
         review_job_id, review_worker = server.start_job(
             reviewer,
