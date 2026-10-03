@@ -50,10 +50,12 @@ This checklist is updated as implementation lands.
 - [x] Managed worktree status, commits, diffstat, conflict detection and bounded unified diff.
 - [x] Safe merge/discard backend with explicit confirmation and dirty/unmerged protection.
 - [x] Parallel worker jobs use managed worktree IDs and persist worktree metadata.
-- [ ] Desktop Worktrees screen and visual diff viewer — implementation in progress; Windows runtime verification pending.
-- [ ] Desktop merge/discard controls runtime verification.
+- [x] Desktop Worktrees screen + visual diff viewer — code/CI verified; Windows runtime UX verification pending.
+- [x] Guarded merge/discard/update-branch controls — backend + IPC + renderer contracts CI verified.
+- [x] Rebase/update-branch workflow with automatic abort on conflict.
+- [x] Bounded untracked text previews; binary/large untracked content is not dumped.
+- [ ] Windows runtime verification of the new Worktrees screen/actions.
 - [ ] Interactive conflict-resolution UI.
-- [ ] Rebase/update-branch workflow.
 
 ## Phase 5 — MCP / CLI / Plugins
 - [ ] TEAMYRA MCP namespace.
