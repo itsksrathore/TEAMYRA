@@ -30,7 +30,7 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Cookies/session storage are owned by Chromium. TEAMYRA does not store ChatGPT usernames or passwords.
 - `nodeIntegration=false`, `contextIsolation=true`, and `sandbox=true`.
 - Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled.
-- New-window requests are denied; approved HTTPS authentication/navigation destinations remain in the embedded view.
+- New-window requests never create a visible external BrowserWindow. Approved HTTPS authentication popups are hosted in a sibling WebContentsView overlay inside the same TEAMYRA window; unapproved destinations are denied.
 - No Chrome/Edge process is launched as a user-visible external browser.
 - If login expires, the normal ChatGPT login experience is shown in the embedded panel.
 - CAPTCHA/human-verification pages are surfaced to the user. TEAMYRA does not attempt to bypass them.
