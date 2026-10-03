@@ -103,28 +103,15 @@ This checklist is updated as implementation lands.
 
 ## Phase 9 — Minimal Nami-style Desktop
 - [x] Two-view primary shell: Tasks + Agents.
-- [x] Nami Glass-inspired visual rebuild with aurora background, translucent panes, coral accents, capsule controls, and compact typography.
+- [x] Nami Glass-inspired visual rebuild with aurora background, translucent panes, coral accents, capsule controls, compact typography, native hidden-titlebar treatment, and agent brand glyphs.
 - [x] Live task tiles with incremental transcript tails and active Stop control.
 - [x] Minimal New Task composer with workspace + worker selector using the existing TEAMYRA job engine.
 - [x] Clean provider/account connection shelf with connect/open and verified Add Account flows.
 - [x] ChatGPT Normal embedded as an Agents detail surface with minimal workspace/tool controls.
 - [x] Remove Worktrees, Observability, Memory, Connections, Settings, and dashboard metrics from permanent primary navigation while preserving their backend APIs.
-- [x] Preserve updater, terminal, provider login, worktree/conflict, memory, observability, MCP/CLI, and orchestration contracts.
-- [x] Add desktop task action regression tests and simplified UI contract tests.
-- [x] Complete first functional review and second complexity/maintainability review.
+- [x] Preserve updater, terminal, provider login, worktree/conflict, memory, observability, MCP/CLI, review/handoff, and orchestration contracts.
+- [x] Add desktop task-action regression tests and simplified UI contract tests.
+- [x] Complete functional plus complexity/maintainability review passes.
 - [x] Retain Nami Apache-2.0 attribution/license for adapted visual implementation.
-- [x] Windows + Linux CI validation for the rebuilt renderer and existing backend.
-
-
-## Phase 9 — Desktop UI Simplification
-- [x] Permanent navigation reduced to Tasks + Agents only.
-- [x] Nami-inspired Glass visual system applied to the full desktop shell.
-- [x] Live task tiles replace dashboard metrics and separate task-detail clutter.
-- [x] New Task flow uses one prompt, one workspace, and one agent choice.
-- [x] Desktop task start/cancel actions reuse the existing TEAMYRA job store and server.start_job path.
-- [x] Agents shelf handles Claude, Codex, Antigravity, and ChatGPT Normal connections.
-- [x] ChatGPT Normal opens inside the Agents view with workspace/tools controls kept secondary.
-- [x] Worktrees, Observability, Memory, and other advanced systems removed from permanent navigation but preserved in core/IPC.
-- [x] Nami Apache-2.0 attribution and UI design rules committed.
-- [x] Linux/Windows automated contract and renderer checks.
+- [x] Windows + Linux automated validation for the rebuilt renderer and existing backend.
 - [ ] Live Windows visual/runtime acceptance of the rebuilt UI.
