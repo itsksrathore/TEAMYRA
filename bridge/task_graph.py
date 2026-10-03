@@ -52,6 +52,8 @@ def _validate_nodes(nodes):
             raise ValueError(f"node {node_id} has invalid dependencies")
 
         timeout = max(1, min(int(raw.get("timeout_minutes") or 90), 360))
+        requires_approval = raw.get("requires_approval", False) is True
+        approval_reason = str(raw.get("approval_reason") or "").strip()[:500] or None
         normalized.append({
             "id": node_id,
             "label": str(raw.get("label") or node_id).strip()[:120] or node_id,
@@ -60,8 +62,11 @@ def _validate_nodes(nodes):
             "depends_on": deps,
             "write": raw.get("write", True) is not False,
             "timeout_minutes": timeout,
-            "requires_approval": raw.get("requires_approval", False) is True,
+            "requires_approval": requires_approval,
+            "approval_status": "pending" if requires_approval else "not_required",
+            "approval_reason": approval_reason,
             "approved_at": None,
+            "denied_at": None,
             "approval_note": None,
             "status": "pending",
             "job_id": None,
@@ -143,7 +148,7 @@ def ready_nodes(graph):
         if any(dep.get("status") in {"failed", "cancelled", "blocked"} for dep in deps):
             continue
         if all(dep.get("status") == "done" for dep in deps):
-            if node.get("requires_approval") and not node.get("approved_at"):
+            if node.get("requires_approval") and node.get("approval_status") != "approved":
                 continue
             ready.append(node)
     return ready
@@ -156,27 +161,48 @@ def awaiting_approval_nodes(graph):
         if node.get("status") != "pending" or not node.get("requires_approval"):
             continue
         deps = [nodes[dep] for dep in node.get("depends_on", [])]
-        if all(dep.get("status") == "done" for dep in deps) and not node.get("approved_at"):
+        if (all(dep.get("status") == "done" for dep in deps)
+                and node.get("approval_status") == "pending"):
             waiting.append(node)
     return waiting
 
 
-def approve_node(graph, node_id, note=None):
+def decide_approval(graph, node_id, decision, note=None):
     nodes = node_map(graph)
     node = nodes.get(node_id)
     if not node:
         raise ValueError(f"no such graph node: {node_id}")
     if node.get("status") != "pending":
         raise ValueError(f"node {node_id} cannot be approved from state {node.get('status')}")
+    if not node.get("requires_approval"):
+        raise ValueError(f"node {node_id} does not require approval")
+
     deps = [nodes[dep] for dep in node.get("depends_on", [])]
     if not all(dep.get("status") == "done" for dep in deps):
         raise ValueError(f"node {node_id} dependencies are not complete")
-    if not node.get("requires_approval"):
-        raise ValueError(f"node {node_id} does not require approval")
-    node["approved_at"] = time.time()
+
+    decision = str(decision or "").strip().lower()
+    if decision not in {"approve", "deny"}:
+        raise ValueError("decision must be approve or deny")
+
     node["approval_note"] = str(note or "").strip()[:500] or None
+    if decision == "approve":
+        node["approval_status"] = "approved"
+        node["approved_at"] = time.time()
+        node["denied_at"] = None
+    else:
+        node["approval_status"] = "denied"
+        node["denied_at"] = time.time()
+        node["approved_at"] = None
+        node["status"] = "cancelled"
+        node["ended_at"] = time.time()
+        node["error"] = "approval denied"
+        mark_blocked_nodes(graph)
     return node
 
+
+def approve_node(graph, node_id, note=None):
+    return decide_approval(graph, node_id, "approve", note)
 
 def mark_blocked_nodes(graph):
     nodes = node_map(graph)
@@ -217,24 +243,25 @@ def graph_summary(graph):
                 "id": node["id"],
                 "label": node.get("label"),
                 "worker": node.get("worker"),
+                "selected_worker": node.get("selected_worker"),
                 "depends_on": node.get("depends_on", []),
                 "write": node.get("write", True),
                 "timeout_minutes": node.get("timeout_minutes", 90),
-                "requires_approval": node.get("requires_approval", False),
-                "approved_at": node.get("approved_at"),
-                "approval_note": node.get("approval_note"),
                 "status": node.get("status"),
                 "job_id": node.get("job_id"),
+                "terminal_job_id": node.get("terminal_job_id"),
+                "terminal_worker": node.get("terminal_worker"),
                 "requires_approval": node.get("requires_approval", False),
                 "approval_status": node.get("approval_status", "not_required"),
                 "approval_reason": node.get("approval_reason"),
+                "approved_at": node.get("approved_at"),
+                "denied_at": node.get("denied_at"),
                 "approval_note": node.get("approval_note"),
                 "error": node.get("error"),
             }
             for node in graph.get("nodes", [])
         ],
     }
-
 
 def graph_is_terminal(graph):
     return graph.get("state") in {"done", "failed", "cancelled"}
