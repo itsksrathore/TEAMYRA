@@ -31,6 +31,14 @@ def build_worker_registry(root, home=None):
     profiles = root / "profiles"
 
     workers = {
+        "claude1": {
+            "id": "claude1",
+            "provider": "claude",
+            "label": "Claude Default",
+            "profile_id": "native",
+            "home": str(home / ".claude"),
+            "native": True,
+        },
         "antigravity": {
             "id": "antigravity",
             "provider": "antigravity",
@@ -71,6 +79,22 @@ def build_worker_registry(root, home=None):
             workers[worker_id] = {
                 "id": worker_id,
                 "provider": "codex",
+                "label": profile_label(path),
+                "profile_id": path.name,
+                "home": str(path),
+                "native": False,
+            }
+
+    claude_profiles = profiles / "claude"
+    if claude_profiles.exists():
+        for path in sorted((p for p in claude_profiles.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
+            part = safe_worker_part(path.name)
+            worker_id = "claude-" + part
+            if worker_id in workers:
+                continue
+            workers[worker_id] = {
+                "id": worker_id,
+                "provider": "claude",
                 "label": profile_label(path),
                 "profile_id": path.name,
                 "home": str(path),
