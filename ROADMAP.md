@@ -67,7 +67,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [x] Crash recovery with heartbeat/PID-aware job reconciliation, same-session resume, graph/failover monitor restart, and duplicate-safe interrupted review preservation.
 
 ## Phase 7 — Distribution
-- [ ] Automated tests and CI.
+- [x] Automated tests and CI on Linux + Windows via GitHub Actions matrix.
 - [ ] Windows installer.
 - [ ] Update pipeline.
 - [ ] Documentation and examples.
