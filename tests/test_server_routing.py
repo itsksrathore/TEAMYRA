@@ -91,6 +91,7 @@ class RoutingTests(unittest.TestCase):
                  patch.object(server, "git", return_value="head"), \
                  patch.object(server, "codex_cmd", return_value=["codex"]), \
                  patch.object(server.subprocess, "Popen") as popen:
+                popen.return_value.pid = 12345
                 job_id, worker = server.start_job("auto", "Inspect", project, auto_failover=False)
             self.assertEqual(worker, "codex1")
             popen.assert_called_once()
@@ -116,6 +117,7 @@ class RoutingTests(unittest.TestCase):
                  patch.object(server, "worker_auth_status", return_value=(True, "ready")), \
                  patch.object(server, "worker_settings", return_value={}), \
                  patch.object(server, "cooldown_left", return_value=0), \
+                 patch.object(server, "_chatgpt_workspace_matches", return_value=True), \
                  patch.object(server, "git", return_value="head"), \
                  patch.object(server, "config", return_value={"auto_resume": 2, "max_failovers": 2}), \
                  patch.object(server.subprocess, "Popen") as popen:
