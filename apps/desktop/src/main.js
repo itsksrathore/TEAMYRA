@@ -69,16 +69,31 @@ ipcMain.handle('teamyra:providers', () => detectProviders());
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
 
-ipcMain.handle('teamyra:add-account', async (_event, providerId) => {
+function safeProfileSlug(value) {
+  return String(value || 'account')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'account';
+}
+
+ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
   if (!provider.managed?.verified || !provider.managed.env || !provider.managed.loginArgv) {
     return { ok: false, reason: 'profile-isolation-not-verified' };
   }
 
-  const profileId = 'account-' + crypto.randomBytes(3).toString('hex');
+  const name = String(requestedName || '').trim() || (provider.name + ' account');
+  const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
   const dir = path.join(profileRoot(provider.id), profileId);
   fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'teamyra-profile.json'),
+    JSON.stringify({ name, provider: provider.id, createdAt: new Date().toISOString() }, null, 2),
+    'utf8'
+  );
 
   const env = { ...process.env, [provider.managed.env]: dir };
   const child = spawn(provider.bin, provider.managed.loginArgv, {
@@ -90,7 +105,7 @@ ipcMain.handle('teamyra:add-account', async (_event, providerId) => {
   });
   child.unref();
 
-  return { ok: true, provider: provider.id, profileId };
+  return { ok: true, provider: provider.id, profileId, name };
 });
 
 app.whenReady().then(() => {
