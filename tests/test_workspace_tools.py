@@ -414,6 +414,33 @@ class WorkspaceToolTests(unittest.TestCase):
             result = service.execute("filesystem.search", {"query": "TOP-SECRET-SEARCH-TOKEN"}, token="x" * 64)
             self.assertEqual(result["results"], [])
 
+    def test_teamyra_desktop_user_data_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "runtime"
+            workspace = base / "project"
+            user_data = base / "desktop-user-data"
+            workspace.mkdir()
+            user_data.mkdir()
+            (user_data / "Cookies").write_text("session", encoding="utf-8")
+            old = os.environ.get("TEAMYRA_DESKTOP_USER_DATA")
+            os.environ["TEAMYRA_DESKTOP_USER_DATA"] = str(user_data)
+            try:
+                service = self.make_service(root, workspace)
+                with self.assertRaises(PermissionError):
+                    service.execute(
+                        "filesystem.read",
+                        {"path": str(user_data / "Cookies")},
+                        token="x" * 64,
+                    )
+                with self.assertRaises(PermissionError):
+                    service.configure(user_data, token="x" * 64)
+            finally:
+                if old is None:
+                    os.environ.pop("TEAMYRA_DESKTOP_USER_DATA", None)
+                else:
+                    os.environ["TEAMYRA_DESKTOP_USER_DATA"] = old
+
     def test_git_internal_files_are_hidden_from_filesystem_tools(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
