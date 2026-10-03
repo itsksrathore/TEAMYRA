@@ -231,6 +231,23 @@ class WorkspaceToolService:
     def execute(self, tool, args=None, *, token=None, trusted=False, actor="teamyra", confirm=False):
         self._verify_token(token, trusted)
         workspace, permissions = self._workspace()
+        return self._execute_scoped(tool, args, workspace, permissions, actor, confirm)
+
+    def execute_in_workspace(
+        self, workspace, tool, args=None, permissions=None, *,
+        token=None, trusted=False, actor="teamyra", confirm=False,
+    ):
+        """Run the shared implementation against an explicit workspace without
+        mutating the persisted ChatGPT workspace selection."""
+        self._verify_token(token, trusted)
+        scoped = Path(str(workspace or "")).expanduser().resolve()
+        if not scoped.exists() or not scoped.is_dir():
+            raise WorkspaceToolError("workspace must be an existing directory")
+        return self._execute_scoped(
+            tool, args, scoped, _safe_permissions(permissions), actor, confirm
+        )
+
+    def _execute_scoped(self, tool, args, workspace, permissions, actor, confirm):
         args = args if isinstance(args, dict) else {}
         self._check(tool, permissions, confirm=confirm)
         target = args.get("path") or args.get("cwd") or str(workspace)
