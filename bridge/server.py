@@ -577,7 +577,7 @@ def create_worktree(project_path, worker, idx):
 
 def start_conductor(graph_id):
     graph = task_graph.load_graph(ROOT, graph_id)
-    if graph.get("state") in {"starting", "running", "awaiting_approval"}:
+    if graph.get("state") in {"starting", "running", "awaiting_approval", "waiting_for_worker", "cancelling"}:
         return task_graph.graph_summary(graph)
     if graph.get("state") not in {"draft"}:
         raise ValueError(f"graph cannot be started from state {graph.get('state')}")
@@ -707,15 +707,17 @@ TOOLS = [
     {"name": "review_cancel", "description": "Request cancellation of an active review/fix loop.",
      "inputSchema": {"type": "object", "properties": {"review_id": {"type": "string"}},
                      "required": ["review_id"], "additionalProperties": False}},
-    {"name": "graph_create", "description": "Create a persistent dependency task graph. Phase 3 executes graph nodes sequentially until Phase 4 worktree merge semantics are available.",
+    {"name": "graph_create", "description": "Create a persistent dependency task graph. Set max_parallel > 1 to run independent nodes concurrently; write nodes are isolated in managed Git worktrees and integrated deterministically.",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string"},
          "objective": {"type": "string"},
          "project_path": {"type": "string"},
+         "max_parallel": {"type": "integer", "default": 1, "minimum": 1, "maximum": 4},
          "nodes": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object", "properties": {
              "id": {"type": "string"}, "label": {"type": "string"}, "task": {"type": "string"},
              "worker": W_ENUM, "depends_on": {"type": "array", "items": {"type": "string"}},
              "write": {"type": "boolean", "default": True},
+             "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
              "requires_approval": {"type": "boolean", "default": False},
              "approval_reason": {"type": "string"}},
              "required": ["id", "task"], "additionalProperties": False}}},
@@ -846,7 +848,9 @@ def tool_call(name, a):
         project_path = Path(a["project_path"]).resolve()
         if not project_path.exists():
             raise ValueError(f"project_path not found: {project_path}")
-        graph = task_graph.create_graph(ROOT, a.get("title"), project_path, a["nodes"], a.get("objective"))
+        graph = task_graph.create_graph(
+            ROOT, a.get("title"), project_path, a["nodes"], a.get("objective"), a.get("max_parallel", 1)
+        )
         return task_graph.graph_summary(graph)
     if name == "graph_start":
         return start_conductor(a["graph_id"])
@@ -860,8 +864,9 @@ def tool_call(name, a):
     if name == "graph_approve":
         graph = task_graph.load_graph(ROOT, a["graph_id"])
         node = task_graph.decide_approval(graph, a["node_id"], a["decision"], a.get("note"))
-        if graph.get("approval_pending_node_id") == node["id"]:
-            graph["approval_pending_node_id"] = None
+        pending = [item for item in graph.get("approval_pending_node_ids", []) if item != node["id"]]
+        graph["approval_pending_node_ids"] = pending
+        graph["approval_pending_node_id"] = pending[0] if pending else None
         if a["decision"] == "approve" and graph.get("state") == "awaiting_approval":
             graph["state"] = "running"
         elif a["decision"] == "deny":
