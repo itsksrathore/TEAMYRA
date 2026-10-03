@@ -421,6 +421,12 @@ button:focus-visible, textarea:focus-visible, select:focus-visible {
 .agent-avatar.antigravity { color: #6952a8; background: rgba(211,199,244,.52); }
 .agent-avatar.chatgpt { color: #157a61; background: rgba(191,234,220,.52); }
 .chatgpt-avatar { color: #157a61; background: rgba(191,234,220,.65); }
+.agent-avatar svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+.agent-avatar.antigravity svg { width: 19px; height: 19px; }
 
 .task-title {
   min-width: 0;
