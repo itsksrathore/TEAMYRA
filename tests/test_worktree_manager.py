@@ -229,5 +229,60 @@ class WorktreeManagerTests(unittest.TestCase):
             diff.assert_called_once_with(desktop_api.WORKTREES, "wt-1", 12345)
 
 
+    def test_rebase_updates_worktree_onto_latest_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "rebase-ok")
+            wt = Path(created["path"])
+
+            (wt / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git(wt, "add", "feature.txt")
+            git(wt, "commit", "-m", "feature")
+            old_head = git(wt, "rev-parse", "HEAD")
+
+            (repo / "target.txt").write_text("target\n", encoding="utf-8")
+            git(repo, "add", "target.txt")
+            git(repo, "commit", "-m", "target update")
+            target_head = git(repo, "rev-parse", "HEAD")
+
+            result = worktree_manager.rebase(storage, created["id"])
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["base_commit"], target_head)
+            self.assertNotEqual(result["head"], old_head)
+            status = worktree_manager.status(storage, created["id"])
+            self.assertEqual(status["base_commit"], target_head)
+            self.assertEqual(len(status["commits"]), 1)
+
+            worktree_manager.discard(storage, created["id"], force=True)
+
+    def test_rebase_conflict_aborts_and_restores_clean_worktree(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            storage = root / "worktrees"
+            created = worktree_manager.create(repo, storage, "rebase-conflict")
+            wt = Path(created["path"])
+            original_head = git(wt, "rev-parse", "HEAD")
+
+            (wt / "app.txt").write_text("worktree\n", encoding="utf-8")
+            git(wt, "add", "app.txt")
+            git(wt, "commit", "-m", "worktree change")
+            feature_head = git(wt, "rev-parse", "HEAD")
+
+            (repo / "app.txt").write_text("target\n", encoding="utf-8")
+            git(repo, "add", "app.txt")
+            git(repo, "commit", "-m", "target conflict")
+
+            with self.assertRaises(RuntimeError):
+                worktree_manager.rebase(storage, created["id"])
+
+            self.assertEqual(git(wt, "rev-parse", "HEAD"), feature_head)
+            self.assertEqual(git(wt, "status", "--porcelain"), "")
+            self.assertNotEqual(feature_head, original_head)
+            worktree_manager.discard(storage, created["id"], force=True)
+
+
 if __name__ == "__main__":
     unittest.main()
