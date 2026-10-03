@@ -139,7 +139,7 @@ def worker_auth_status(info, use_cache=True):
             except Exception:
                 status = {}
             age = now - float(status.get("heartbeat_at") or 0)
-            ready = age <= 20 and status.get("automation_ready") is True
+            ready = age <= 20 and status.get("worker_ready") is True
             detail = str(status.get("detail") or (
                 "embedded ChatGPT session ready" if ready else "open ChatGPT in TEAMYRA and sign in"
             ))
@@ -876,6 +876,7 @@ TOOLS = [
              "git.add", "git.commit", "git.restore"
          ]},
          "args": {"type": "object"},
+         "agent": {"type": "string", "description": "Optional agent identity recorded in workspace-tool audit logs."},
          "confirm": {"type": "boolean", "default": False}},
          "required": ["project_path", "tool"], "additionalProperties": False}},
     {"name": "memory_add", "description": "Add a structured local project memory entry. Runtime memory is stored under TEAMYRA memory/ and excluded from source control.",
@@ -1145,12 +1146,15 @@ def tool_call(name, a):
             a.get("project_path"),
         )
     if name == "workspace_tool":
+        actor = "teamyra-mcp"
+        if a.get("agent"):
+            actor += ":" + str(a["agent"])[:80]
         return workspace_tools.WorkspaceToolService(ROOT).execute_in_workspace(
             a["project_path"],
             a["tool"],
             a.get("args"),
             trusted=True,
-            actor="teamyra-mcp",
+            actor=actor,
             confirm=a.get("confirm") is True,
         )
     if name == "memory_add":
