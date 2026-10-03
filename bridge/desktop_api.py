@@ -39,6 +39,10 @@ def handle(action, payload):
             payload.get("label") or "task",
             payload.get("base_ref") or "HEAD",
         )
+    if action == "worktree.rebase":
+        if payload.get("confirm") is not True:
+            raise ValueError("worktree.rebase requires confirm=true")
+        return worktree_manager.rebase(WORKTREES, payload["worktree_id"])
     if action == "worktree.merge":
         if payload.get("confirm") is not True:
             raise ValueError("worktree.merge requires confirm=true")
