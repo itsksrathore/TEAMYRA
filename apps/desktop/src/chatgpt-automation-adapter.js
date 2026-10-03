@@ -70,18 +70,25 @@ class ChatGPTAutomationAdapter {
 
   async assistantSnapshot() {
     return this.evaluate(`(() => {
-      const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"], article')];
+      const assistantNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+      const nodes = assistantNodes.length ? assistantNodes : [...document.querySelectorAll('article')];
       const messages = nodes.map(node => (node.innerText || '').trim()).filter(Boolean);
       const stop = !!document.querySelector('button[data-testid*="stop"], button[aria-label*="Stop"], button[aria-label*="stop"]');
       return { count:messages.length, text:messages[messages.length - 1] || '', generating:stop };
     })()`);
   }
 
-  async waitForAssistantReply({ previousCount = 0, timeoutMs = 180000 } = {}) {
+  async waitForAssistantReply({ previousCount = 0, timeoutMs = 180000, shouldCancel = null } = {}) {
     const deadline = Date.now() + timeoutMs;
     let stableText = '';
     let stableCount = 0;
     while (Date.now() < deadline) {
+      if (typeof shouldCancel === 'function' && shouldCancel()) {
+        await this.stopGeneration().catch(() => {});
+        const error = new Error('TEAMYRA job cancelled');
+        error.code = 'TEAMYRA_CANCELLED';
+        throw error;
+      }
       const snap = await this.assistantSnapshot();
       if (snap.count > previousCount && snap.text && !snap.generating) {
         if (snap.text === stableText) stableCount += 1;
