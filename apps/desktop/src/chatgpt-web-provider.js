@@ -251,7 +251,7 @@ class ChatGPTWebProvider {
   async attachFile(filePath) {
     const status = await this.workspaceBridge.status();
     if (!status?.available) throw new Error('Select a workspace first');
-    await this.workspaceBridge.execute('filesystem.read', { path: filePath, max_bytes: 1 });
+    await this.workspaceBridge.execute('filesystem.stat', { path: filePath });
     const view = this.ensureView();
     await view.webContents.executeJavaScript(`(() => {
       const button = document.querySelector('button[aria-label*="Attach"], button[aria-label*="attach"], button[data-testid*="attach"]');
@@ -329,7 +329,7 @@ class ChatGPTWebProvider {
         'Do not claim you changed/read local files unless TEAMYRA returned the tool result.',
         'When you need a local tool, reply with exactly one line and nothing else:',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
-        'Available tools: filesystem.list, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit.',
+        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
         'Destructive operations may be denied pending explicit user confirmation. Never try to bypass that denial.',
         'When the task is complete, reply normally with the final result and do not emit a tool request.',
         '',
