@@ -157,6 +157,40 @@ def cmd_memory(args):
     return 0
 
 
+def cmd_handoff(args):
+    action = args.handoff_action
+    if action == "start":
+        result = call("job_handoff", {
+            "job_id": args.job_id,
+            "target_worker": args.target_worker,
+            "message": args.message,
+            "objective": args.objective,
+            "constraints": args.constraint or [],
+            "acceptance_criteria": args.accept or [],
+            "artifacts": args.artifact or [],
+            "notes": args.notes,
+            "include_project_memory": not args.no_project_memory,
+            "memory_query": args.memory_query,
+            "memory_max_chars": args.memory_max_chars,
+            "persist_memory": args.persist_memory,
+            "write": args.write,
+            "timeout_minutes": args.timeout_minutes,
+        })
+    elif action == "get":
+        result = call("handoff_get", {"handoff_id": args.handoff_id})
+    elif action == "list":
+        result = call("handoff_list", {
+            "project_path": args.project,
+            "source_job_id": args.source_job_id,
+            "target_worker": args.target_worker,
+            "limit": args.limit,
+        })
+    else:
+        raise ValueError("unsupported handoff action")
+    emit(result)
+    return 0
+
+
 def cmd_test(args):
     argv = list(args.command or [])
     if argv and argv[0] == "--":
@@ -282,7 +316,7 @@ def parser():
     timeline.add_argument("--limit", type=int, default=100)
     timeline.add_argument("--project")
     timeline.add_argument("--worker")
-    timeline.add_argument("--source", action="append", choices=["job", "graph", "review", "worktree"])
+    timeline.add_argument("--source", action="append", choices=["job", "graph", "review", "handoff", "worktree"])
     timeline.add_argument("--query")
     timeline.add_argument("--since", type=float)
     timeline.set_defaults(func=cmd_timeline)
@@ -359,6 +393,37 @@ def parser():
     mem_context.add_argument("--max-chars", type=int, default=8000)
     mem_context.add_argument("--limit", type=int, default=40)
     mem_context.set_defaults(func=cmd_memory)
+
+    handoff = sub.add_parser("handoff", help="Create or inspect persistent structured cross-agent handoffs")
+    handoff_sub = handoff.add_subparsers(dest="handoff_action", required=True)
+
+    handoff_start = handoff_sub.add_parser("start")
+    handoff_start.add_argument("job_id")
+    handoff_start.add_argument("--message", required=True)
+    handoff_start.add_argument("--target-worker", default="auto")
+    handoff_start.add_argument("--objective")
+    handoff_start.add_argument("--constraint", action="append")
+    handoff_start.add_argument("--accept", action="append")
+    handoff_start.add_argument("--artifact", action="append")
+    handoff_start.add_argument("--notes")
+    handoff_start.add_argument("--write", action="store_true")
+    handoff_start.add_argument("--timeout-minutes", type=int, default=90)
+    handoff_start.add_argument("--no-project-memory", action="store_true")
+    handoff_start.add_argument("--memory-query")
+    handoff_start.add_argument("--memory-max-chars", type=int, default=6000)
+    handoff_start.add_argument("--persist-memory", action="store_true")
+    handoff_start.set_defaults(func=cmd_handoff)
+
+    handoff_get = handoff_sub.add_parser("get")
+    handoff_get.add_argument("handoff_id")
+    handoff_get.set_defaults(func=cmd_handoff)
+
+    handoff_list = handoff_sub.add_parser("list")
+    handoff_list.add_argument("--project")
+    handoff_list.add_argument("--source-job-id")
+    handoff_list.add_argument("--target-worker")
+    handoff_list.add_argument("--limit", type=int, default=100)
+    handoff_list.set_defaults(func=cmd_handoff)
 
     test = sub.add_parser("test", help="Run one deterministic no-shell test command")
     test.add_argument("--project", required=True)

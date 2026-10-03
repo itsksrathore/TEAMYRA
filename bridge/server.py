@@ -15,6 +15,7 @@ import review_cycle
 import worktree_manager
 import observability
 import project_memory
+import handoff_store
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -677,7 +678,11 @@ def start_review_cycle(source_job_id, reviewer_worker="auto", max_rounds=2, allo
     return review_cycle.summary(state)
 
 
-def handoff_task(source_job_id, message):
+def handoff_task(source_job_id, message, structured_record=None):
+    if structured_record is not None:
+        return handoff_store.render_prompt(structured_record)
+
+    # Backward-compatible compact handoff prompt for existing callers/tests.
     terminal_id = failover_terminal_job_id(source_job_id)
     meta = read_meta(terminal_id)
     result = job_result(source_job_id)
@@ -704,6 +709,56 @@ Inspect the actual workspace before acting. Treat the source summary as context,
 """
 
 
+
+def prepare_handoff_record(source_job_id, target_worker, payload):
+    terminal_id = failover_terminal_job_id(source_job_id)
+    source = read_meta(terminal_id)
+    result = job_result(source_job_id)
+
+    memory_context = None
+    if payload.get("include_project_memory", True):
+        try:
+            pack = project_memory.context_pack(
+                ROOT,
+                source["cwd"],
+                payload.get("memory_query") or None,
+                max_chars=payload.get("memory_max_chars", 6000),
+                limit=30,
+            )
+            memory_context = pack.get("text") or None
+        except Exception as exc:
+            memory_context = "[Project memory unavailable: " + clip(str(exc), 280) + "]"
+
+    artifacts = list(payload.get("artifacts") or [])
+    transcript = result.get("transcript")
+    if transcript:
+        artifacts.append("Source transcript: " + str(transcript))
+    artifacts.append("Workspace: " + str(source.get("cwd") or ""))
+
+    record = handoff_store.create(
+        ROOT,
+        project_path=source["cwd"],
+        source_job_id=source_job_id,
+        terminal_job_id=terminal_id,
+        source_worker=source.get("worker"),
+        target_worker=target_worker,
+        message=payload["message"],
+        objective=payload.get("objective"),
+        constraints=payload.get("constraints"),
+        acceptance_criteria=payload.get("acceptance_criteria"),
+        artifacts=artifacts,
+        notes=payload.get("notes"),
+        source_state=source.get("state"),
+        source_final_message=result.get("final_message"),
+        git_status=result.get("git_status"),
+        diffstat=result.get("diffstat"),
+        memory_context=memory_context,
+        write=payload.get("write", False),
+        label=f"handoff from {source.get('label') or source_job_id}"[:120],
+    )
+    return record, source, terminal_id
+
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic Codex profiles are discovered at runtime."}
@@ -727,7 +782,7 @@ TOOLS = [
          "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
          "project_path": {"type": "string"},
          "worker": {"type": "string"},
-         "sources": {"type": "array", "items": {"type": "string", "enum": ["job", "graph", "review", "worktree"]}},
+         "sources": {"type": "array", "items": {"type": "string", "enum": ["job", "graph", "review", "handoff", "worktree"]}},
          "query": {"type": "string"},
          "since": {"type": "number"}},
          "additionalProperties": False}},
@@ -895,13 +950,33 @@ TOOLS = [
                      "mode": {"type": "string", "enum": ["all", "any"], "default": "all"},
                      "timeout_seconds": {"type": "integer", "default": 1500}},
                      "required": ["job_ids"], "additionalProperties": False}},
-    {"name": "job_handoff", "description": "Hand a completed job's compact result and workspace context to another worker/account for review, continuation, testing, or a new task.",
+    {"name": "job_handoff", "description": "Hand a completed job to another worker using a persistent structured envelope with source lineage, acceptance criteria, artifacts, and optional bounded project-memory context.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"}, "target_worker": W_ENUM,
-         "message": {"type": "string"},
+         "message": {"type": "string", "description": "Requested action. Kept required for backward compatibility."},
+         "objective": {"type": "string"},
+         "constraints": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+         "acceptance_criteria": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+         "artifacts": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+         "notes": {"type": "string"},
+         "include_project_memory": {"type": "boolean", "default": True},
+         "memory_query": {"type": "string"},
+         "memory_max_chars": {"type": "integer", "default": 6000, "minimum": 1000, "maximum": 8000},
+         "persist_memory": {"type": "boolean", "default": False},
          "write": {"type": "boolean", "default": False},
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360}},
          "required": ["job_id", "message"], "additionalProperties": False}},
+    {"name": "handoff_get", "description": "Read one persistent structured handoff envelope by handoff_id.",
+     "inputSchema": {"type": "object", "properties": {
+         "handoff_id": {"type": "string"}},
+         "required": ["handoff_id"], "additionalProperties": False}},
+    {"name": "handoff_list", "description": "List persistent structured handoffs, optionally scoped by project, source job, or target worker.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string"},
+         "source_job_id": {"type": "string"},
+         "target_worker": {"type": "string"},
+         "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500}},
+         "additionalProperties": False}},
     {"name": "job_message", "description": "Send a follow-up message to a finished job's worker session (resumes the same Codex thread or Antigravity conversation in the same folder). Returns a new job_id.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "message": {"type": "string"},
                      "timeout_minutes": {"type": "integer", "default": 60}},
@@ -1089,24 +1164,73 @@ def tool_call(name, a):
         target = requested
         if requested == "auto":
             target = pick_worker("auto", exclude=[source.get("worker")] if source.get("worker") else [])
+
+        record, source, terminal_id = prepare_handoff_record(a["job_id"], target, a)
+        prompt = handoff_task(a["job_id"], a["message"], record)
         job_id, worker = start_job(
             target,
-            handoff_task(a["job_id"], a["message"]),
+            prompt,
             source["cwd"],
-            f"handoff from {source.get('label') or a['job_id']}"[:80],
+            record.get("label") or f"handoff from {source.get('label') or a['job_id']}"[:80],
             a.get("timeout_minutes", 90),
             a.get("write", False),
             parent=terminal_id,
             auto_failover=requested == "auto",
             max_failovers=config().get("max_failovers", 2),
         )
+        record = handoff_store.attach_target_job(ROOT, record["id"], job_id, worker)
+
+        memory_entry_id = None
+        if a.get("persist_memory", False):
+            try:
+                memory_entry = project_memory.add(
+                    ROOT,
+                    source["cwd"],
+                    "handoff",
+                    (a.get("objective") or record.get("label") or "Agent handoff")[:200],
+                    (
+                        f"Handoff {record['id']} from {source.get('worker')} to {worker}. "
+                        f"Source job {a['job_id']} -> target job {job_id}. "
+                        f"Requested action: {a['message']}"
+                    ),
+                    tags=["handoff", str(source.get("worker") or ""), str(worker or "")],
+                    importance="normal",
+                    source_job_id=a["job_id"],
+                )
+                memory_entry_id = memory_entry["id"]
+                record["memory_entry_id"] = memory_entry_id
+                handoff_store.save(ROOT, record)
+            except Exception as exc:
+                record["memory_persist_error"] = clip(str(exc), 300)
+                handoff_store.save(ROOT, record)
+
         patch_job_meta(
             job_id,
+            handoff_id=record["id"],
             handoff_from_job_id=a["job_id"],
             handoff_from_terminal_job_id=terminal_id,
             handoff_from_worker=source.get("worker"),
+            handoff_memory_entry_id=memory_entry_id,
         )
-        return {"job_id": job_id, "worker": worker, "source_job_id": a["job_id"], **follow_info(job_id)}
+        return {
+            "job_id": job_id,
+            "worker": worker,
+            "source_job_id": a["job_id"],
+            "handoff_id": record["id"],
+            "handoff": handoff_store.summary(record),
+            "memory_entry_id": memory_entry_id,
+            **follow_info(job_id),
+        }
+    if name == "handoff_get":
+        return handoff_store.load(ROOT, a["handoff_id"])
+    if name == "handoff_list":
+        return handoff_store.list_records(
+            ROOT,
+            a.get("project_path"),
+            a.get("source_job_id"),
+            a.get("target_worker"),
+            a.get("limit", 100),
+        )
     if name == "job_message":
         terminal_id = failover_terminal_job_id(a["job_id"])
         m = read_meta(terminal_id)

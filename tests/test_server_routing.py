@@ -35,12 +35,20 @@ class RoutingTests(unittest.TestCase):
             "label": "source",
             "state": "done",
         }
+        record = {
+            "id": "handoff-test",
+            "label": "handoff from source",
+            "message": "Review the implementation",
+        }
         with patch.object(server, "failover_terminal_job_id", return_value="source-terminal"), \
              patch.object(server, "read_meta", return_value=source_meta), \
              patch.object(server, "chain_is_complete", return_value=True), \
              patch.object(server, "pick_worker", return_value="claude1") as pick, \
+             patch.object(server, "prepare_handoff_record", return_value=(record, source_meta, "source-terminal")), \
              patch.object(server, "handoff_task", return_value="handoff prompt"), \
              patch.object(server, "start_job", return_value=("handoff-job", "claude1")) as start, \
+             patch.object(server.handoff_store, "attach_target_job", return_value={**record, "target_job_id": "handoff-job", "target_worker": "claude1"}), \
+             patch.object(server.handoff_store, "summary", return_value={"id": "handoff-test"}), \
              patch.object(server, "patch_job_meta") as patch_meta, \
              patch.object(server, "follow_info", return_value={}):
             result = server.tool_call("job_handoff", {

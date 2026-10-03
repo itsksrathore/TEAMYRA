@@ -62,7 +62,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 - [ ] Reliable provider context-window visibility.
 - [x] Searchable bounded job logs and transcripts.
 - [x] Local project memory and architecture decisions with structured entries, provenance, archive lifecycle, ranked search, MCP/CLI/Desktop access, and bounded context packs.
-- [ ] Shared structured handoffs.
+- [x] Shared structured handoffs with persistent envelopes, lineage, acceptance criteria, artifacts, and bounded project-memory context.
 - [ ] MCP pooling and crash recovery.
 
 ## Phase 7 — Distribution

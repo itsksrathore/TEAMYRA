@@ -130,6 +130,71 @@ class CliTests(unittest.TestCase):
         self.assertEqual(name, "memory_context")
         self.assertEqual(payload["max_chars"], 4000)
 
+    def test_handoff_start_preserves_structured_payload(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"handoff_id": "handoff-1"}) as call:
+            code, out, _ = self.run_cli([
+                "handoff", "start", "job-1",
+                "--message", "Review and finish",
+                "--target-worker", "claude1",
+                "--objective", "Ship safely",
+                "--constraint", "Keep API stable",
+                "--constraint", "No destructive migration",
+                "--accept", "Tests pass",
+                "--artifact", "src/app.py",
+                "--notes", "Focus on correctness",
+                "--write",
+                "--memory-query", "architecture",
+                "--memory-max-chars", "4200",
+                "--persist-memory",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["handoff_id"], "handoff-1")
+        name, payload = call.call_args.args
+        self.assertEqual(name, "job_handoff")
+        self.assertEqual(payload["job_id"], "job-1")
+        self.assertEqual(payload["target_worker"], "claude1")
+        self.assertEqual(payload["objective"], "Ship safely")
+        self.assertEqual(payload["constraints"], ["Keep API stable", "No destructive migration"])
+        self.assertEqual(payload["acceptance_criteria"], ["Tests pass"])
+        self.assertEqual(payload["artifacts"], ["src/app.py"])
+        self.assertTrue(payload["include_project_memory"])
+        self.assertEqual(payload["memory_query"], "architecture")
+        self.assertEqual(payload["memory_max_chars"], 4200)
+        self.assertTrue(payload["persist_memory"])
+        self.assertTrue(payload["write"])
+
+    def test_handoff_start_can_disable_project_memory(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"handoff_id": "handoff-1"}) as call:
+            code, _, _ = self.run_cli([
+                "handoff", "start", "job-1",
+                "--message", "Continue",
+                "--no-project-memory",
+            ])
+        self.assertEqual(code, 0)
+        self.assertFalse(call.call_args.args[1]["include_project_memory"])
+
+    def test_handoff_get_and_list_delegate(self):
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"id": "handoff-1"}) as call:
+            code, _, _ = self.run_cli(["handoff", "get", "handoff-1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(call.call_args.args, ("handoff_get", {"handoff_id": "handoff-1"}))
+
+        with patch.object(teamyra_cli.server, "tool_call", return_value={"items": []}) as call:
+            code, _, _ = self.run_cli([
+                "handoff", "list",
+                "--project", "P",
+                "--source-job-id", "job-1",
+                "--target-worker", "claude1",
+                "--limit", "7",
+            ])
+        self.assertEqual(code, 0)
+        name, payload = call.call_args.args
+        self.assertEqual(name, "handoff_list")
+        self.assertEqual(payload["project_path"], "P")
+        self.assertEqual(payload["source_job_id"], "job-1")
+        self.assertEqual(payload["target_worker"], "claude1")
+        self.assertEqual(payload["limit"], 7)
+
     def test_worktree_merge_requires_yes(self):
         with patch.object(teamyra_cli.server, "tool_call") as call:
             code, _, err = self.run_cli(["worktree", "merge", "wt-test"])

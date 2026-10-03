@@ -268,6 +268,47 @@ def _review_timeline(root):
     return rows
 
 
+def _handoff_timeline(root):
+    directory = Path(root) / "tasks" / "handoffs"
+    rows = []
+    if not directory.exists():
+        return rows
+    for path in directory.glob("handoff-*.json"):
+        record = _read_json(path)
+        if not isinstance(record, dict):
+            continue
+        handoff_id = record.get("id") or path.stem
+        target_job_id = record.get("target_job_id")
+        base = {
+            "source": "handoff",
+            "source_id": handoff_id,
+            "handoff_id": handoff_id,
+            "source_job_id": record.get("source_job_id"),
+            "job_id": target_job_id,
+            "label": record.get("label") or handoff_id,
+            "worker": record.get("target_worker"),
+            "project_path": record.get("project_path"),
+            "state": "dispatched" if target_job_id else "created",
+        }
+        created = record.get("created_at")
+        if isinstance(created, (int, float)):
+            rows.append({
+                **base,
+                "ts": float(created),
+                "kind": "handoff.created",
+                "message": _clip(record.get("objective") or record.get("message") or "Structured handoff created", 900),
+            })
+        updated = record.get("updated_at")
+        if target_job_id and isinstance(updated, (int, float)) and updated != created:
+            rows.append({
+                **base,
+                "ts": float(updated),
+                "kind": "handoff.target.attached",
+                "message": f"Dispatched to {record.get('target_worker') or 'worker'} as {target_job_id}",
+            })
+    return rows
+
+
 def _worktree_timeline(root):
     directory = Path(root) / "worktrees" / ".teamyra"
     rows = []
@@ -322,6 +363,7 @@ def timeline(root, limit=100, project_path=None, worker=None, sources=None, quer
     rows.extend(_job_timeline(root))
     rows.extend(_graph_timeline(root))
     rows.extend(_review_timeline(root))
+    rows.extend(_handoff_timeline(root))
     rows.extend(_worktree_timeline(root))
 
     filtered = []
