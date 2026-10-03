@@ -18,6 +18,7 @@ class DesktopContractTests(unittest.TestCase):
         cls.chatgpt_provider = (ROOT / "apps" / "desktop" / "src" / "chatgpt-web-provider.js").read_text(encoding="utf-8")
         cls.chatgpt_session = (ROOT / "apps" / "desktop" / "src" / "chatgpt-session-manager.js").read_text(encoding="utf-8")
         cls.chatgpt_automation = (ROOT / "apps" / "desktop" / "src" / "chatgpt-automation-adapter.js").read_text(encoding="utf-8")
+        cls.agent_icons = (ROOT / "apps" / "desktop" / "renderer" / "agent-icons.mjs").read_text(encoding="utf-8")
 
     def test_primary_ui_has_only_tasks_and_agents_navigation(self):
         self.assertIn('id="navTasks"', self.html)
@@ -80,6 +81,24 @@ class DesktopContractTests(unittest.TestCase):
             self.assertIn(marker, self.styles)
         self.assertIn("Portions of this visual language are adapted from Nami", self.styles)
         self.assertIn("Copyright 2026 Dainami Pte Ltd, licensed under Apache-2.0", self.styles)
+
+    def test_nami_style_agent_brand_glyphs_are_bundled(self):
+        self.assertIn("agentIconSvg", self.renderer)
+        self.assertIn("claude:", self.agent_icons)
+        self.assertIn("openai:", self.agent_icons)
+        self.assertIn("antigravity:", self.agent_icons)
+        self.assertIn("mrdainami/nami", self.agent_icons)
+        self.assertIn(".agent-avatar svg", self.styles)
+
+    def test_nami_style_native_window_chrome_is_used(self):
+        self.assertIn("function windowChrome()", self.main)
+        self.assertIn("titleBarStyle: 'hidden'", self.main)
+        self.assertIn("titleBarOverlay", self.main)
+        self.assertIn("trafficLightPosition", self.main)
+        self.assertIn('class="lights-deck"', self.html)
+        self.assertIn('body[data-platform="win32"] .lights-deck', self.styles)
+        self.assertIn("platform: process.platform", self.preload)
+        self.assertIn("document.body.dataset.platform", self.renderer)
 
     def test_chatgpt_is_nested_under_agents_and_keeps_core_controls(self):
         ids = [
