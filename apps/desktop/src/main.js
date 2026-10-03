@@ -246,7 +246,7 @@ function createWindow() {
     height: 920,
     minWidth: 1060,
     minHeight: 680,
-    backgroundColor: '#080a0f',
+    backgroundColor: '#e9e9ef',
     title: 'TEAMYRA',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
