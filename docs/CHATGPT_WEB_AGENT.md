@@ -78,7 +78,7 @@ Supported tools:
 - `git.commit`
 - `git.restore`
 
-MCP callers use the same implementation through `teamyra.workspace_tool`; they do not mutate the selected ChatGPT workspace.
+MCP callers use the same implementation through `teamyra.workspace_tool`; they do not mutate the selected ChatGPT workspace. MCP callers cannot self-authorize destructive/per-command confirmations. Their terminal surface is limited to the same bounded automatic inspection commands unless a future user-approval subsystem grants a capability explicitly.
 
 ## Workspace sandbox
 
