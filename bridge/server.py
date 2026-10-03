@@ -141,7 +141,7 @@ def patch_job_meta(job_id, **changes):
     meta = read_meta(job_id)
     meta.update(changes)
     meta["updated"] = time.time()
-    tmp = path.with_suffix(".json.tmp")
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, path)
     return meta
@@ -397,16 +397,16 @@ def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2
     if not failover_eligible(meta):
         raise ValueError(f"job is not eligible for automatic failover: {meta.get('reason')}")
 
-    task_path = JOBS / job_id / "task.txt"
+    root_id = root_job_id or meta.get("failover_root") or job_id
+    task_path = JOBS / root_id / "task.txt"
     if not task_path.exists():
-        raise ValueError("original task text is missing")
+        raise ValueError("original root task text is missing")
     original_task = task_path.read_text(encoding="utf-8", errors="replace")
     previous = list(previous_workers or [])
     if meta.get("worker") and meta["worker"] not in previous:
         previous.append(meta["worker"])
 
     next_worker = pick_worker("auto", exclude=previous)
-    root_id = root_job_id or meta.get("failover_root") or job_id
     continuation = failover_task(meta, original_task)
     timeout_minutes = max(1, min(int((meta.get("timeout_s") or 5400) / 60), 360))
     label = f"failover {attempt}: {meta.get('label') or job_id}"[:80]
