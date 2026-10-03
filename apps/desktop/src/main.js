@@ -435,11 +435,9 @@ ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
     ? await dialog.showOpenDialog(focused, dialogOptions)
     : await dialog.showOpenDialog(dialogOptions);
   if (result.canceled || !result.filePaths[0]) return { cancelled: true };
-  let current = {};
-  try { current = await chatgptProvider.workspaceBridge.status(); } catch {}
   const configured = await chatgptProvider.workspaceBridge.configure(
     result.filePaths[0],
-    current.permissions || {}
+    {}
   );
   return { cancelled: false, ...configured };
 });
