@@ -41,10 +41,12 @@ class ChatGPTWebProvider {
     this.view = null;
     this.automation = null;
     this.interactionCssKey = null;
+    this.activeJobDir = null;
     this.bounds = { x: 220, y: 96, width: 1000, height: 700 };
     this.visible = false;
     this.loaded = false;
     this.busy = false;
+    this.activeJobDir = null;
     this.lastProbe = null;
     this.interactionCssKey = null;
     this.jobTimer = null;
@@ -149,19 +151,23 @@ class ChatGPTWebProvider {
   }
 
   async setInteractionLocked(locked) {
-    const view = this.ensureView();
-    if (locked) {
-      if (!this.interactionCssKey) {
-        this.interactionCssKey = await view.webContents.insertCSS(
-          'html { pointer-events: none !important; }'
-        );
+    if (!locked) {
+      if (!this.view || this.view.webContents.isDestroyed()) {
+        this.interactionCssKey = null;
+        return;
+      }
+      if (this.interactionCssKey) {
+        const key = this.interactionCssKey;
+        this.interactionCssKey = null;
+        await this.view.webContents.removeInsertedCSS(key).catch(() => {});
       }
       return;
     }
-    if (this.interactionCssKey) {
-      const key = this.interactionCssKey;
-      this.interactionCssKey = null;
-      await view.webContents.removeInsertedCSS(key).catch(() => {});
+    const view = this.ensureView();
+    if (!this.interactionCssKey) {
+      this.interactionCssKey = await view.webContents.insertCSS(
+        'html { pointer-events: none !important; }'
+      );
     }
   }
 
@@ -307,8 +313,14 @@ class ChatGPTWebProvider {
   }
 
   async stopGeneration() {
+    if (this.busy && this.activeJobDir) {
+      try {
+        fs.writeFileSync(path.join(this.activeJobDir, 'CANCEL'), 'cancel', 'utf8');
+      } catch {}
+    }
     if (!this.automation) return { ok: false, reason: 'view-not-initialized' };
-    return this.automation.stopGeneration();
+    const result = await this.automation.stopGeneration();
+    return { ...result, jobCancelRequested: Boolean(this.busy && this.activeJobDir) };
   }
 
   async attachFile(filePath) {
@@ -383,6 +395,7 @@ class ChatGPTWebProvider {
 
   async runDelegatedJob(jobDir) {
     this.busy = true;
+    this.activeJobDir = jobDir;
     let state = 'failed';
     try {
       const spec = JSON.parse(fs.readFileSync(path.join(jobDir, 'spec.json'), 'utf8'));
@@ -506,6 +519,7 @@ class ChatGPTWebProvider {
       fs.writeFileSync(path.join(jobDir, 'DONE'), state, 'utf8');
     } finally {
       await this.setInteractionLocked(false).catch(() => {});
+      this.activeJobDir = null;
       this.busy = false;
       await this.refreshStatus().catch(() => {});
     }
