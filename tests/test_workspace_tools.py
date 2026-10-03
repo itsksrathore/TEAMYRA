@@ -52,8 +52,9 @@ class WorkspaceToolTests(unittest.TestCase):
 
             with self.assertRaises(PermissionError):
                 service.execute("filesystem.delete", {"path": "nested/c.txt"}, token=token)
-            service.execute("filesystem.delete", {"path": "nested/c.txt"}, token=token, confirm=True)
+            deleted = service.execute("filesystem.delete", {"path": "nested/c.txt"}, token=token, confirm=True)
             self.assertFalse((workspace / "nested" / "c.txt").exists())
+            self.assertTrue(Path(deleted["recoverable_at"]).is_file())
 
 
     def test_workspace_root_and_home_are_rejected(self):
@@ -179,6 +180,7 @@ class WorkspaceToolTests(unittest.TestCase):
             workspace = Path(td) / "project"
             workspace.mkdir()
             service = self.make_service(root, workspace)
+            service.configure(workspace, {"terminal": True}, token="x" * 64)
             script = workspace / "env_check.py"
             script.write_text(
                 "import os; print(os.getenv('TEAMYRA_LOCAL_AGENT_TOKEN_FILE')); print(os.getenv('MY_API_KEY'))",
@@ -206,6 +208,37 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertEqual(result["exit_code"], 0)
             self.assertNotIn("do-not-leak", result["stdout"])
             self.assertNotIn("security", result["stdout"])
+
+    def test_teamyra_runtime_and_credential_like_files_are_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            root.mkdir()
+            (root / "profiles" / "codex").mkdir(parents=True)
+            (root / "profiles" / "codex" / "auth.json").write_text("secret", encoding="utf-8")
+            (root / ".env").write_text("TOKEN=secret", encoding="utf-8")
+            service = WorkspaceToolService(root)
+            service.state_root.mkdir(parents=True, exist_ok=True)
+            service.token_file.write_text("x" * 64, encoding="utf-8")
+            service.configure(root, token="x" * 64)
+
+            for target in ("profiles/codex/auth.json", "chatgpt/local-agent.token", ".env"):
+                with self.assertRaises(PermissionError, msg=target):
+                    service.execute("filesystem.read", {"path": target}, token="x" * 64)
+
+            listing = service.execute("filesystem.list", {}, token="x" * 64)
+            names = {item["name"] for item in listing["items"]}
+            self.assertNotIn("profiles", names)
+            self.assertNotIn("chatgpt", names)
+            self.assertNotIn(".env", names)
+
+    def test_default_terminal_permission_is_off(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            with self.assertRaises(PermissionError):
+                service.execute("terminal.run", {"argv": ["git", "status"]}, token="x" * 64)
 
     def test_explicit_workspace_execution_does_not_change_chatgpt_selection(self):
         with tempfile.TemporaryDirectory() as td:
