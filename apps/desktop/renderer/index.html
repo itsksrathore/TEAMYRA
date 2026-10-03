@@ -10,12 +10,12 @@
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark">T</div><div><b>TEAMYRA</b><span>CONTROL OS</span></div></div>
     <nav>
-      <button class="active">Command Desk</button>
-      <button>Tasks</button>
-      <button>Worktrees</button>
-      <button>Connections</button>
-      <button>Memory</button>
-      <button>Settings</button>
+      <button class="active" id="navCommand" data-view="command">Command Desk</button>
+      <button disabled>Tasks</button>
+      <button id="navWorktrees" data-view="worktrees">Worktrees</button>
+      <button disabled>Connections</button>
+      <button disabled>Memory</button>
+      <button disabled>Settings</button>
     </nav>
     <div class="core-status"><span></span> Local core</div>
   </aside>
@@ -23,8 +23,8 @@
   <main>
     <header>
       <div>
-        <p class="eyebrow">MULTI-AGENT CONTROL PLANE</p>
-        <h1>Command Desk</h1>
+        <p class="eyebrow" id="pageEyebrow">MULTI-AGENT CONTROL PLANE</p>
+        <h1 id="pageTitle">Command Desk</h1>
       </div>
       <div class="actions">
         <button class="secondary" id="refresh">Refresh</button>
@@ -33,6 +33,7 @@
       </div>
     </header>
 
+    <div id="commandView" class="app-view">
     <section class="hero">
       <div class="hero-copy">
         <span class="ready">● SYSTEM READY</span>
@@ -73,6 +74,55 @@
         <pre id="transcript" class="transcript">No task selected.</pre>
       </aside>
     </section>
+
+    </div>
+
+    <div id="worktreesView" class="app-view" hidden>
+      <section class="worktree-hero">
+        <div>
+          <span class="ready">● GIT ISOLATION</span>
+          <h2>Worktrees</h2>
+          <p>Review isolated agent branches before merging them back into the original target branch.</p>
+        </div>
+        <div class="worktree-metrics">
+          <div><strong id="wtManaged">0</strong><span>Managed</span></div>
+          <div><strong id="wtDirty">0</strong><span>Dirty</span></div>
+          <div><strong id="wtConflicts">0</strong><span>Conflicts</span></div>
+        </div>
+      </section>
+
+      <section class="section-title">
+        <div><p class="eyebrow">GIT WORKSPACES</p><h3>Managed worktrees</h3></div>
+        <div class="inline-actions">
+          <button class="secondary" id="createWorktree">+ Create</button>
+          <button class="secondary" id="refreshWorktrees">Refresh</button>
+        </div>
+      </section>
+
+      <section class="worktree-layout">
+        <div id="worktreeList" class="worktree-list">
+          <div class="empty">No managed worktrees loaded.</div>
+        </div>
+        <aside class="worktree-detail">
+          <div class="detail-head">
+            <div>
+              <p class="eyebrow">WORKTREE REVIEW</p>
+              <h3 id="wtTitle">Select a worktree</h3>
+            </div>
+            <span id="wtState" class="detail-state">—</span>
+          </div>
+          <div id="wtMeta" class="detail-meta">Choose a managed worktree to inspect its branch and diff.</div>
+          <div class="worktree-actions">
+            <button class="secondary" id="wtOpenTerminal" disabled>Open Terminal</button>
+            <button class="secondary" id="wtMerge" disabled>Merge</button>
+            <button class="secondary danger-soft" id="wtDiscard" disabled>Discard</button>
+            <button class="secondary danger" id="wtForceDiscard" disabled>Force discard</button>
+          </div>
+          <div id="wtSummary" class="worktree-summary"></div>
+          <pre id="wtDiff" class="diff-viewer">No worktree selected.</pre>
+        </aside>
+      </section>
+    </div>
 
     <section id="terminalPanel" class="terminal-panel" hidden>
       <div class="terminal-head">
