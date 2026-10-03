@@ -158,5 +158,80 @@ class TaskGraphTests(unittest.TestCase):
                 self.assertEqual(denied["nodes"][0]["approval_note"], "Keep artifacts")
 
 
+    def test_approval_gate_blocks_ready_node_until_approved(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            graph = task_graph.create_graph(root, "Approval", project, [
+                {"id": "plan", "task": "Plan", "write": False},
+                {
+                    "id": "deploy",
+                    "task": "Deploy",
+                    "depends_on": ["plan"],
+                    "requires_approval": True,
+                    "timeout_minutes": 45,
+                },
+            ], objective="Ship safely")
+            self.assertEqual(graph["objective"], "Ship safely")
+            self.assertEqual(graph["nodes"][1]["timeout_minutes"], 45)
+            self.assertTrue(graph["nodes"][1]["requires_approval"])
+
+            graph["nodes"][0]["status"] = "done"
+            self.assertEqual(task_graph.ready_nodes(graph), [])
+            waiting = task_graph.awaiting_approval_nodes(graph)
+            self.assertEqual([node["id"] for node in waiting], ["deploy"])
+
+            approved = task_graph.approve_node(graph, "deploy", "Reviewed by operator")
+            self.assertIsNotNone(approved["approved_at"])
+            self.assertEqual(approved["approval_note"], "Reviewed by operator")
+            self.assertEqual([node["id"] for node in task_graph.ready_nodes(graph)], ["deploy"])
+
+    def test_approval_rejects_incomplete_dependencies(self):
+        graph = {
+            "id": "graph-test",
+            "nodes": [
+                {"id": "plan", "status": "pending", "depends_on": []},
+                {
+                    "id": "deploy",
+                    "status": "pending",
+                    "depends_on": ["plan"],
+                    "requires_approval": True,
+                    "approved_at": None,
+                },
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "dependencies are not complete"):
+            task_graph.approve_node(graph, "deploy")
+
+    def test_server_graph_approve_tool_persists_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            with patch.object(server, "ROOT", root):
+                created = server.tool_call("graph_create", {
+                    "title": "Approval graph",
+                    "objective": "Safe change",
+                    "project_path": str(project),
+                    "nodes": [{
+                        "id": "reviewed-write",
+                        "task": "Make the change",
+                        "requires_approval": True,
+                        "timeout_minutes": 30,
+                    }],
+                })
+                approved = server.tool_call("graph_approve", {
+                    "graph_id": created["id"],
+                    "node_id": "reviewed-write",
+                    "note": "Approved in test",
+                })
+                node = approved["nodes"][0]
+                self.assertIsNotNone(node["approved_at"])
+                self.assertEqual(node["approval_note"], "Approved in test")
+                self.assertEqual(node["timeout_minutes"], 30)
+                self.assertEqual(approved["objective"], "Safe change")
+
+
 if __name__ == "__main__":
     unittest.main()
