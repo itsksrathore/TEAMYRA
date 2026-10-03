@@ -92,7 +92,8 @@ function createWindow() {
     }
   });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-  win.webContents.on('destroyed', () => killTerminalsFor(win.webContents.id));
+  const webContentsId = win.webContents.id;
+  win.webContents.on('destroyed', () => killTerminalsFor(webContentsId));
 }
 
 ipcMain.handle('teamyra:providers', () => detectProviders());
@@ -114,6 +115,9 @@ ipcMain.handle('teamyra:terminal-open', (event, options = {}) => {
     launchCommand = provider.bin;
 
     const profileId = typeof options.profileId === 'string' ? options.profileId : 'native';
+    if (profileId === 'native' && provider.managed?.env) {
+      delete env[provider.managed.env];
+    }
     if (profileId !== 'native') {
       let home = '';
       if (provider.id === 'codex' && profileId === 'codex2') {
