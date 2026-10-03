@@ -22,6 +22,8 @@ let currentTimeline = [];
 let observabilityTimelineRequestId = 0;
 let currentMemoryItems = [];
 let selectedMemoryId = null;
+let chatgptBoundsObserver = null;
+let chatgptStatusTimer = null;
 
 const providersEl = document.querySelector('#providers');
 const jobsEl = document.querySelector('#jobs');
@@ -103,9 +105,11 @@ function renderProviders(providers) {
     card.dataset.color = provider.color;
     fragment.querySelector('.provider-name h4').textContent = provider.name;
     const state = fragment.querySelector('.provider-name span');
-    state.textContent = provider.installed
-      ? (provider.signedIn ? 'Installed · signed in' : 'Installed · sign-in needed')
-      : 'Not installed';
+    state.textContent = provider.id === 'chatgpt-web'
+      ? (provider.status || 'Embedded web runtime')
+      : provider.installed
+        ? (provider.signedIn ? 'Installed · signed in' : 'Installed · sign-in needed')
+        : 'Not installed';
     if (provider.signedIn) state.classList.add('ok');
 
     fragment.querySelector('.binary').textContent = provider.binary || 'CLI not found on PATH';
@@ -156,6 +160,10 @@ function renderProviders(providers) {
         settingsButton.hidden = !profile.editable;
         settingsButton.addEventListener('click', () => openAccountSettings(provider, profile));
         row.querySelector('.account-open').addEventListener('click', () => {
+          if (provider.id === 'chatgpt-web') {
+            setView('chatgpt');
+            return;
+          }
           openTerminal({ providerId: provider.id, profileId: profile.id, label: provider.name + ' · ' + profile.name })
             .catch(error => alert('Terminal error: ' + String(error)));
         });
@@ -164,7 +172,9 @@ function renderProviders(providers) {
     }
 
     const foot = fragment.querySelector('.provider-foot');
-    if (provider.id === 'antigravity' && provider.installed) {
+    if (provider.id === 'chatgpt-web') {
+      foot.textContent = 'Runs the normal ChatGPT website inside TEAMYRA using a dedicated persistent Chromium session. Local tools stay workspace-scoped.';
+    } else if (provider.id === 'antigravity' && provider.installed) {
       foot.textContent = 'Native session detected via Antigravity secure keyring. Multi-account stays disabled until the CLI exposes a verified account/profile selector.';
     } else if (provider.managedProfilesVerified) {
       foot.textContent = 'Managed profile isolation verified. Use + to start a separate provider login.';
@@ -275,17 +285,20 @@ async function refresh() {
 }
 
 document.querySelector('#refresh').addEventListener('click', () => {
-  const action = activeView === 'worktrees'
-    ? refreshWorktrees()
-    : activeView === 'observability'
-      ? refreshObservability()
-      : activeView === 'memory'
-        ? refreshMemory({ preserveSelection: true })
-        : refresh();
+  const action = activeView === 'chatgpt'
+    ? refreshChatgptStatus()
+    : activeView === 'worktrees'
+      ? refreshWorktrees()
+      : activeView === 'observability'
+        ? refreshObservability()
+        : activeView === 'memory'
+          ? refreshMemory({ preserveSelection: true })
+          : refresh();
   action.catch(error => alert('Refresh failed: ' + String(error?.message || error)));
 });
 setInterval(() => refreshJobs().catch(() => {}), 3000);
 setInterval(() => {
+  if (activeView === 'chatgpt') refreshChatgptStatus().catch(() => {});
   if (activeView === 'worktrees') refreshWorktrees({ preserveSelection: true }).catch(() => {});
   if (activeView === 'observability') refreshObservability({ preserveFilters: true, lightweight: true }).catch(() => {});
 }, 5000);
@@ -407,13 +420,32 @@ document.querySelector('#closeTerminal').addEventListener('click', closeTerminal
 
 
 const commandView = document.querySelector('#commandView');
+const chatgptView = document.querySelector('#chatgptView');
 const worktreesView = document.querySelector('#worktreesView');
 const observabilityView = document.querySelector('#observabilityView');
 const memoryView = document.querySelector('#memoryView');
 const navCommand = document.querySelector('#navCommand');
+const navChatgpt = document.querySelector('#navChatgpt');
 const navWorktrees = document.querySelector('#navWorktrees');
 const navObservability = document.querySelector('#navObservability');
 const navMemory = document.querySelector('#navMemory');
+
+const chatgptViewport = document.querySelector('#chatgptViewport');
+const chatgptWorkspaceEl = document.querySelector('#chatgptWorkspace');
+const chatgptPermissionHint = document.querySelector('#chatgptPermissionHint');
+const chatgptChangesPanel = document.querySelector('#chatgptChangesPanel');
+const chatgptChangesOutput = document.querySelector('#chatgptChangesOutput');
+const chatgptChangesTitle = document.querySelector('#chatgptChangesTitle');
+const chatgptPermissionEls = {
+  read: document.querySelector('#chatgptPermRead'),
+  search: document.querySelector('#chatgptPermSearch'),
+  create: document.querySelector('#chatgptPermCreate'),
+  write: document.querySelector('#chatgptPermWrite'),
+  terminal: document.querySelector('#chatgptPermTerminal'),
+  git: document.querySelector('#chatgptPermGit'),
+  outside_workspace: document.querySelector('#chatgptPermOutside'),
+  destructive_without_confirmation: document.querySelector('#chatgptPermDestructive')
+};
 const worktreeListEl = document.querySelector('#worktreeList');
 const wtDiffEl = document.querySelector('#wtDiff');
 const wtSummaryEl = document.querySelector('#wtSummary');
@@ -465,38 +497,143 @@ const memoryContextPreviewEl = document.querySelector('#memoryContextPreview');
 const memoryEditorTitleEl = document.querySelector('#memoryEditorTitle');
 const memoryEditorStateEl = document.querySelector('#memoryEditorState');
 
+
+function chatgptPermissionsFromUi() {
+  return Object.fromEntries(Object.entries(chatgptPermissionEls).map(([key, el]) => [key, el.checked]));
+}
+
+function applyChatgptPermissions(permissions = {}) {
+  for (const [key, el] of Object.entries(chatgptPermissionEls)) {
+    if (Object.prototype.hasOwnProperty.call(permissions, key)) el.checked = permissions[key] === true;
+  }
+}
+
+function syncChatgptBounds() {
+  if (activeView !== 'chatgpt' || !chatgptViewport) return;
+  const rect = chatgptViewport.getBoundingClientRect();
+  window.teamyra.setChatgptBounds({
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height
+  }).catch(() => {});
+}
+
+async function refreshChatgptStatus() {
+  const [status, workspace] = await Promise.all([
+    window.teamyra.chatgptStatus(),
+    window.teamyra.chatgptWorkspaceStatus().catch(() => null)
+  ]);
+  document.querySelector('#chatgptConnection').textContent = status.connected ? 'Connected' : 'Idle';
+  document.querySelector('#chatgptAccount').textContent = status.automationReady
+    ? 'Active'
+    : status.loginVisible
+      ? 'Sign in'
+      : status.challenged
+        ? 'Verify'
+        : 'Unknown';
+  document.querySelector('#chatgptBridge').textContent = workspace?.local_agent || 'Disconnected';
+  document.querySelector('#chatgptTools').textContent = workspace?.available ? 'Available' : 'Unavailable';
+  document.querySelector('#chatgptUrl').textContent = status.url || 'Not loaded';
+  chatgptWorkspaceEl.value = workspace?.workspace || '';
+  if (workspace?.permissions) applyChatgptPermissions(workspace.permissions);
+  const busyLockedIds = [
+    'chatgptNew', 'chatgptReload', 'chatgptReconnect', 'chatgptSelectWorkspace',
+    'chatgptSavePermissions', 'chatgptAttach', 'chatgptRevert'
+  ];
+  for (const id of busyLockedIds) {
+    const button = document.querySelector('#' + id);
+    if (button) button.disabled = status.busy === true;
+  }
+  chatgptPermissionHint.textContent = status.busy
+    ? 'A delegated ChatGPT worker task is running. Manual browser interaction and workspace changes are temporarily locked.'
+    : status.challenged
+      ? 'ChatGPT requires user verification. Complete it manually inside the embedded panel.'
+    : status.loginVisible
+      ? 'ChatGPT session expired or is not signed in. Log in manually inside the embedded panel.'
+      : workspace?.available
+        ? 'Workspace bridge connected. Destructive operations remain confirmation-gated.'
+        : 'Select a workspace before enabling local tools.';
+  syncChatgptBounds();
+  return { status, workspace };
+}
+
+async function openChatgptPanel() {
+  await window.teamyra.openChatgpt();
+  syncChatgptBounds();
+  if (!chatgptBoundsObserver) {
+    chatgptBoundsObserver = new ResizeObserver(syncChatgptBounds);
+    chatgptBoundsObserver.observe(chatgptViewport);
+    window.addEventListener('resize', syncChatgptBounds);
+    window.addEventListener('scroll', syncChatgptBounds, true);
+  }
+  clearInterval(chatgptStatusTimer);
+  chatgptStatusTimer = setInterval(() => {
+    if (activeView === 'chatgpt') refreshChatgptStatus().catch(() => {});
+  }, 4000);
+  return refreshChatgptStatus();
+}
+
+async function showChatgptChanges(mode = 'status') {
+  const result = await window.teamyra.chatgptChanges();
+  chatgptChangesPanel.hidden = false;
+  chatgptChangesTitle.textContent = mode === 'diff' ? 'Workspace diff' : 'Files changed';
+  const unstaged = result.diff?.stdout || result.diff?.stderr || '';
+  const staged = result.stagedDiff?.stdout || result.stagedDiff?.stderr || '';
+  const combinedDiff = [
+    staged ? '--- STAGED ---\n' + staged : '',
+    unstaged ? '--- UNSTAGED ---\n' + unstaged : ''
+  ].filter(Boolean).join('\n\n');
+  chatgptChangesOutput.textContent = mode === 'diff'
+    ? (combinedDiff || 'No tracked diff.')
+    : (result.status?.stdout || result.status?.stderr || 'Working tree clean.');
+}
+
 function setView(view) {
-  activeView = ['worktrees', 'observability', 'memory'].includes(view) ? view : 'command';
+  activeView = ['chatgpt', 'worktrees', 'observability', 'memory'].includes(view) ? view : 'command';
   const isCommand = activeView === 'command';
+  const isChatgpt = activeView === 'chatgpt';
   const isWorktrees = activeView === 'worktrees';
   const isObservability = activeView === 'observability';
   const isMemory = activeView === 'memory';
 
   commandView.hidden = !isCommand;
+  chatgptView.hidden = !isChatgpt;
   worktreesView.hidden = !isWorktrees;
   observabilityView.hidden = !isObservability;
   memoryView.hidden = !isMemory;
   navCommand.classList.toggle('active', isCommand);
+  navChatgpt.classList.toggle('active', isChatgpt);
   navWorktrees.classList.toggle('active', isWorktrees);
   navObservability.classList.toggle('active', isObservability);
   navMemory.classList.toggle('active', isMemory);
 
-  document.querySelector('#pageEyebrow').textContent = isWorktrees
-    ? 'ISOLATED GIT WORKSPACES'
-    : isObservability
-      ? 'RUNTIME TELEMETRY'
-      : isMemory
-        ? 'LOCAL PROJECT CONTEXT'
-        : 'MULTI-AGENT CONTROL PLANE';
-  document.querySelector('#pageTitle').textContent = isWorktrees
-    ? 'Worktrees'
-    : isObservability
-      ? 'Observability'
-      : isMemory
-        ? 'Memory'
-        : 'Command Desk';
+  document.querySelector('#pageEyebrow').textContent = isChatgpt
+    ? 'EMBEDDED WEB AGENT'
+    : isWorktrees
+      ? 'ISOLATED GIT WORKSPACES'
+      : isObservability
+        ? 'RUNTIME TELEMETRY'
+        : isMemory
+          ? 'LOCAL PROJECT CONTEXT'
+          : 'MULTI-AGENT CONTROL PLANE';
+  document.querySelector('#pageTitle').textContent = isChatgpt
+    ? 'ChatGPT Normal'
+    : isWorktrees
+      ? 'Worktrees'
+      : isObservability
+        ? 'Observability'
+        : isMemory
+          ? 'Memory'
+          : 'Command Desk';
   document.querySelector('#openTerminal').hidden = !isCommand;
+  window.teamyra.setChatgptVisible(isChatgpt).catch(() => {});
 
+  if (isChatgpt) {
+    openChatgptPanel().catch(error => {
+      chatgptPermissionHint.textContent = 'ChatGPT panel error: ' + String(error?.message || error);
+    });
+  }
   if (isWorktrees) refreshWorktrees({ preserveSelection: true }).catch(error => {
     worktreeListEl.innerHTML = '<div class="empty">Could not load worktrees: ' + escapeHtml(error?.message || error) + '</div>';
   });
@@ -1189,7 +1326,64 @@ async function buildMemoryContext() {
   memoryContextPreviewEl.textContent = result.text || 'No active project memory matched.';
 }
 
+
+document.querySelector('#chatgptOpen').addEventListener('click', () => openChatgptPanel().catch(error => alert(String(error?.message || error))));
+document.querySelector('#chatgptReconnect').addEventListener('click', async () => {
+  await window.teamyra.reconnectChatgpt();
+  await refreshChatgptStatus();
+});
+document.querySelector('#chatgptReload').addEventListener('click', async () => {
+  await window.teamyra.reloadChatgpt();
+  await refreshChatgptStatus();
+});
+document.querySelector('#chatgptNew').addEventListener('click', async () => {
+  await window.teamyra.newChatgptChat();
+  await refreshChatgptStatus();
+});
+document.querySelector('#chatgptStop').addEventListener('click', () => window.teamyra.stopChatgpt().catch(() => {}));
+document.querySelector('#chatgptSelectWorkspace').addEventListener('click', async () => {
+  const result = await window.teamyra.selectChatgptWorkspace();
+  if (!result.cancelled) {
+    chatgptWorkspaceEl.value = result.workspace || '';
+    applyChatgptPermissions(result.permissions || {});
+    await refreshChatgptStatus();
+  }
+});
+document.querySelector('#chatgptSavePermissions').addEventListener('click', async () => {
+  if (!chatgptWorkspaceEl.value) {
+    alert('Select a workspace first.');
+    return;
+  }
+  chatgptPermissionEls.outside_workspace.checked = false;
+  if (chatgptPermissionEls.destructive_without_confirmation.checked) {
+    const phrase = prompt('This removes confirmation gates for destructive workspace tools. Type ALLOW to enable:');
+    if (phrase !== 'ALLOW') chatgptPermissionEls.destructive_without_confirmation.checked = false;
+  }
+  await window.teamyra.configureChatgptWorkspace(chatgptWorkspaceEl.value, chatgptPermissionsFromUi());
+  await refreshChatgptStatus();
+});
+document.querySelector('#chatgptViewChanges').addEventListener('click', () => showChatgptChanges('status').catch(error => alert(String(error?.message || error))));
+document.querySelector('#chatgptViewDiff').addEventListener('click', () => showChatgptChanges('diff').catch(error => alert(String(error?.message || error))));
+document.querySelector('#chatgptChangesClose').addEventListener('click', () => { chatgptChangesPanel.hidden = true; });
+document.querySelector('#chatgptRevert').addEventListener('click', async () => {
+  const phrase = prompt('Revert tracked workspace changes. Untracked files are preserved. Type REVERT to continue:');
+  if (phrase !== 'REVERT') return;
+  if (!confirm('Final confirmation: restore tracked files in the selected workspace?')) return;
+  await window.teamyra.revertChatgptChanges(['.'], true);
+  await showChatgptChanges('status');
+});
+document.querySelector('#chatgptAttach').addEventListener('click', async () => {
+  const relativePath = prompt('Workspace-relative file path to attach to ChatGPT:');
+  if (!relativePath) return;
+  try {
+    await window.teamyra.attachChatgptFile(relativePath);
+  } catch (error) {
+    alert('Could not attach file: ' + String(error?.message || error));
+  }
+});
+
 navCommand.addEventListener('click', () => setView('command'));
+navChatgpt.addEventListener('click', () => setView('chatgpt'));
 navWorktrees.addEventListener('click', () => setView('worktrees'));
 navObservability.addEventListener('click', () => setView('observability'));
 navMemory.addEventListener('click', () => setView('memory'));

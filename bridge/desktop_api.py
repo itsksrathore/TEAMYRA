@@ -22,6 +22,11 @@ sys.path.insert(0, str(BRIDGE))
 import worktree_manager
 import observability
 import project_memory
+import workspace_tools
+
+
+def _bridge_token(payload):
+    return os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN") or payload.get("bridge_token")
 
 
 def handle(action, payload):
@@ -98,6 +103,26 @@ def handle(action, payload):
         return project_memory.context_pack(
             ROOT, payload["project_path"], payload.get("query"), payload.get("kinds"),
             payload.get("tags"), payload.get("max_chars", 8000), payload.get("limit", 40),
+        )
+    if action == "chatgpt.workspace.configure":
+        service = workspace_tools.WorkspaceToolService(ROOT)
+        return service.configure(
+            payload.get("workspace"),
+            payload.get("permissions"),
+            token=_bridge_token(payload),
+            actor="chatgpt-normal",
+        )
+    if action == "chatgpt.workspace.status":
+        return workspace_tools.WorkspaceToolService(ROOT).status(
+            token=_bridge_token(payload),
+        )
+    if action == "chatgpt.tool.execute":
+        return workspace_tools.WorkspaceToolService(ROOT).execute(
+            payload.get("tool"),
+            payload.get("args"),
+            token=_bridge_token(payload),
+            actor="chatgpt-normal",
+            confirm=payload.get("confirm") is True,
         )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)

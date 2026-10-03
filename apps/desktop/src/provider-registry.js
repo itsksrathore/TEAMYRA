@@ -35,6 +35,16 @@ const PROVIDERS = [
     status: { kind: 'command', argv: ['models'], timeout: 30000, successLabel: 'Existing local login detected' },
     managed: { verified: false, env: null },
     color: 'violet'
+  },
+  {
+    id: 'chatgpt-web',
+    name: 'ChatGPT Normal',
+    kind: 'web',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'web' },
+    managed: { verified: false, env: null },
+    color: 'blue'
   }
 ];
 
@@ -180,6 +190,32 @@ function managedProfiles(provider) {
 
 async function detectProviders() {
   return Promise.all(PROVIDERS.map(async (provider) => {
+    if (provider.kind === 'web') {
+      return {
+        id: provider.id,
+        name: provider.name,
+        color: provider.color,
+        installed: true,
+        binary: 'Embedded Chromium · persistent session',
+        signedIn: false,
+        status: 'Open inside TEAMYRA to connect',
+        managedProfilesVerified: false,
+        managedProfileEnv: null,
+        profiles: [{
+          id: 'web',
+          name: 'Teamyra Worker — ChatGPT',
+          kind: 'web',
+          path: '',
+          signedIn: false,
+          editable: false,
+          enabled: true,
+          priority: 250,
+          model: '',
+          effort: '',
+          permissionMode: ''
+        }]
+      };
+    }
     const binary = await whereBinary(provider.bin);
     const status = binary
       ? await nativeStatus(provider, binary)

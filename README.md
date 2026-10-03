@@ -8,6 +8,7 @@ It is evolving from the existing AI worker bridge into a full desktop system tha
 - Claude Code as supervisor/orchestrator.
 - Codex account 1 and isolated Codex account 2.
 - Antigravity worker.
+- Normal ChatGPT web worker embedded inside TEAMYRA (no OpenAI API).
 - automatic rate/quota cooldown and fallback.
 - detached and resumable worker jobs.
 - compact final results with full local logs.
@@ -30,6 +31,7 @@ npm run mcp:http -- --port 8787
 The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally localhost-only in this build.
 
 Provider-specific Claude Code, Codex, and Antigravity setup is documented in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+The embedded normal ChatGPT web worker, workspace tool bridge, permissions, and security model are documented in [docs/CHATGPT_WEB_AGENT.md](docs/CHATGPT_WEB_AGENT.md).
 Windows packaging, installer/runtime layout, acceptance checks, and the release/update path are documented in [docs/WINDOWS_DISTRIBUTION.md](docs/WINDOWS_DISTRIBUTION.md).
 
 ## Windows distribution

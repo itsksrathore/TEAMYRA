@@ -73,6 +73,17 @@ def build_worker_registry(root, home=None):
             "home": str(home / ".codex"),
             "native": True,
         },
+        "chatgpt-normal": {
+            "id": "chatgpt-normal",
+            "provider": "chatgpt-web",
+            "label": "ChatGPT Normal",
+            "profile_id": "web",
+            "home": None,
+            "native": True,
+            "execution": "desktop-web",
+            "enabled": True,
+            "priority": 250,
+        },
     }
 
     legacy = profiles / "codex2"

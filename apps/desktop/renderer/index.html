@@ -11,6 +11,7 @@
     <div class="brand"><div class="brand-mark">T</div><div><b>TEAMYRA</b><span>CONTROL OS</span></div></div>
     <nav>
       <button class="active" id="navCommand" data-view="command">Command Desk</button>
+      <button id="navChatgpt" data-view="chatgpt">ChatGPT Normal</button>
       <button disabled>Tasks</button>
       <button id="navWorktrees" data-view="worktrees">Worktrees</button>
       <button id="navObservability" data-view="observability">Observability</button>
@@ -76,6 +77,82 @@
       </aside>
     </section>
 
+    </div>
+
+    <div id="chatgptView" class="app-view" hidden>
+      <section class="chatgpt-hero">
+        <div>
+          <span class="ready">● EMBEDDED WEB AGENT</span>
+          <h2>ChatGPT Normal</h2>
+          <p>Your normal ChatGPT web account runs inside TEAMYRA with a dedicated persistent browser session and controlled access to one selected workspace.</p>
+        </div>
+        <div class="chatgpt-status-grid">
+          <div><strong id="chatgptConnection">Idle</strong><span>ChatGPT</span></div>
+          <div><strong id="chatgptAccount">Unknown</strong><span>Account session</span></div>
+          <div><strong id="chatgptBridge">Connected</strong><span>Local bridge</span></div>
+          <div><strong id="chatgptTools">Unavailable</strong><span>Tools</span></div>
+        </div>
+      </section>
+
+      <section class="chatgpt-toolbar">
+        <div class="inline-actions">
+          <button class="primary" id="chatgptOpen">Open Chat</button>
+          <button class="secondary" id="chatgptNew">New Chat</button>
+          <button class="secondary" id="chatgptReload">Reload</button>
+          <button class="secondary" id="chatgptStop">Stop</button>
+          <button class="secondary" id="chatgptReconnect">Reconnect</button>
+        </div>
+        <div class="chatgpt-workspace-row">
+          <label><span>Workspace</span><input id="chatgptWorkspace" readonly placeholder="Select a Teamyra workspace" /></label>
+          <button class="secondary" id="chatgptSelectWorkspace">Select Workspace</button>
+        </div>
+      </section>
+
+      <section class="chatgpt-permissions">
+        <div>
+          <p class="eyebrow">CHATGPT AGENT PERMISSIONS</p>
+          <h3>Workspace access</h3>
+        </div>
+        <div class="permission-grid">
+          <label><input type="checkbox" id="chatgptPermRead" checked /> Read files</label>
+          <label><input type="checkbox" id="chatgptPermSearch" checked /> Search files</label>
+          <label><input type="checkbox" id="chatgptPermCreate" checked /> Create files</label>
+          <label><input type="checkbox" id="chatgptPermWrite" checked /> Edit files</label>
+          <label><input type="checkbox" id="chatgptPermTerminal" /> Terminal commands</label>
+          <label><input type="checkbox" id="chatgptPermGit" checked /> Git access</label>
+          <label title="TEAMYRA keeps ChatGPT strictly workspace-scoped"><input type="checkbox" id="chatgptPermOutside" disabled /> Access outside workspace</label>
+          <label><input type="checkbox" id="chatgptPermDestructive" /> Destructive operations without confirmation</label>
+        </div>
+        <div class="inline-actions">
+          <button class="secondary" id="chatgptSavePermissions">Save Permissions</button>
+          <button class="secondary" id="chatgptAttach">Attach Workspace File</button>
+          <button class="secondary" id="chatgptViewChanges">View Changed Files</button>
+          <button class="secondary" id="chatgptViewDiff">View Diff</button>
+          <button class="secondary danger-soft" id="chatgptRevert">Revert Tracked Changes</button>
+        </div>
+        <div id="chatgptPermissionHint" class="chatgpt-hint">Outside-workspace access is intentionally disabled. Destructive operations remain confirmation-gated unless explicitly enabled.</div>
+      </section>
+
+      <section class="chatgpt-browser-shell">
+        <div class="chatgpt-browser-head">
+          <div>
+            <p class="eyebrow">TEAMYRA WORKER — CHATGPT</p>
+            <strong id="chatgptSessionLabel">Persistent session: teamyra-chatgpt-profile</strong>
+          </div>
+          <span id="chatgptUrl">Not loaded</span>
+        </div>
+        <div id="chatgptViewport" class="chatgpt-viewport">
+          <div class="chatgpt-placeholder">Open Chat to load ChatGPT inside this panel.</div>
+        </div>
+      </section>
+
+      <section id="chatgptChangesPanel" class="chatgpt-changes" hidden>
+        <div class="detail-head">
+          <div><p class="eyebrow">WORKSPACE CHANGES</p><h3 id="chatgptChangesTitle">Git status</h3></div>
+          <button class="secondary" id="chatgptChangesClose">Close</button>
+        </div>
+        <pre id="chatgptChangesOutput">No changes loaded.</pre>
+      </section>
     </div>
 
     <div id="worktreesView" class="app-view" hidden>

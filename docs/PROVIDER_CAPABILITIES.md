@@ -25,6 +25,17 @@ TEAMYRA only enables provider features that can be verified through the provider
 - Add Account UI: intentionally disabled until a verifiable provider-supported isolation mechanism exists.
 - Reliable live context-window telemetry: currently not exposed through the verified CLI surface.
 
+## Normal ChatGPT Web
+
+- Normal logged-in ChatGPT website account: supported through TEAMYRA Desktop; no OpenAI API key is used.
+- Embedded UI: Electron `WebContentsView` inside TEAMYRA.
+- Persistent login/session storage: dedicated Chromium `persist:teamyra-chatgpt-profile` partition.
+- Local project tools: supported through the shared workspace-scoped TEAMYRA tool layer.
+- Worker ID: `chatgpt-normal`; routing readiness requires a fresh desktop heartbeat and interactive prompt.
+- Headless/server-only execution: intentionally unavailable because this provider depends on the user-owned embedded web session.
+- CAPTCHA, login and human-verification handling: user-interactive only; TEAMYRA does not bypass provider security.
+- DOM automation reliability: semantic selector fallbacks are implemented, but production UI changes can require adapter maintenance.
+
 ## Policy
 
 When a provider later exposes a stable capability, TEAMYRA should add it behind an adapter-level capability flag, add automated tests, verify it on the target OS, and only then expose it in routing or UI.

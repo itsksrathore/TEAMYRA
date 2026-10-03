@@ -53,8 +53,11 @@ Initial adapters:
 - Claude Code
 - Codex
 - Antigravity
+- Normal ChatGPT Web (desktop-backed embedded provider; no OpenAI API)
 
 Future adapters should be addable without changing the orchestration core.
+
+The Normal ChatGPT Web provider is intentionally split across layers: the Python core registers/routes `chatgpt-normal` and owns normalized local tools; Electron owns `WebContentsView`, persistent browser session and DOM automation. Core orchestration never depends on ChatGPT page selectors.
 
 ### 4. MCP
 TEAMYRA exposes its capabilities to external MCP clients.
@@ -82,6 +85,12 @@ Ecosystem-specific packaging that teaches supported agents when and how to use T
 - Avoid copying secrets into ordinary TEAMYRA app state.
 - Use isolated provider homes/config roots for managed accounts when officially or technically supported.
 - Keep unsupported account-isolation methods disabled until verified.
+
+## Shared local workspace tools
+
+`bridge/workspace_tools.py` is the normalized workspace-scoped Files / Terminal / Git implementation used by the ChatGPT desktop bridge and exposed through TEAMYRA MCP. Browser/provider integrations must not create incompatible filesystem implementations.
+
+See [docs/CHATGPT_WEB_AGENT.md](docs/CHATGPT_WEB_AGENT.md) for the embedded ChatGPT architecture, permissions and security boundaries.
 
 ## Existing implementation to preserve
 The current Python bridge already provides:

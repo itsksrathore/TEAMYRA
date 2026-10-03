@@ -1,3 +1,6 @@
+import json
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -10,6 +13,125 @@ import server
 
 
 class RoutingTests(unittest.TestCase):
+
+    def test_chatgpt_worker_readiness_uses_fresh_desktop_heartbeat(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            status_dir = root / "chatgpt"
+            status_dir.mkdir()
+            (status_dir / "status.json").write_text(json.dumps({
+                "heartbeat_at": time.time(),
+                "automation_ready": True,
+                "worker_ready": True,
+                "workspace": str(root / "project"),
+                "detail": "embedded ChatGPT session is active",
+            }), encoding="utf-8")
+            info = {"id": "chatgpt-normal", "provider": "chatgpt-web"}
+            server.AUTH_CACHE.clear()
+            with patch.object(server, "ROOT", root):
+                ready, detail = server.worker_auth_status(info, use_cache=False)
+            self.assertTrue(ready)
+            self.assertIn("ChatGPT", detail)
+
+    def test_explicit_chatgpt_worker_rejects_mismatched_selected_workspace(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            other = root / "other"
+            project.mkdir()
+            other.mkdir()
+            status_dir = root / "chatgpt"
+            status_dir.mkdir()
+            (status_dir / "status.json").write_text(json.dumps({
+                "workspace": str(other),
+                "heartbeat_at": time.time(),
+                "worker_ready": True,
+            }), encoding="utf-8")
+            registry = {
+                "chatgpt-normal": {
+                    "id": "chatgpt-normal",
+                    "provider": "chatgpt-web",
+                    "label": "ChatGPT Normal",
+                    "profile_id": "web",
+                    "native": True,
+                    "enabled": True,
+                }
+            }
+            with patch.object(server, "ROOT", root), \
+                 patch.object(server, "worker_registry", return_value=registry), \
+                 patch.object(server, "worker_auth_status", return_value=(True, "ready")):
+                with self.assertRaisesRegex(ValueError, "workspace does not match"):
+                    server.start_job("chatgpt-normal", "Inspect", project, auto_failover=False)
+
+    def test_auto_routing_skips_chatgpt_when_selected_workspace_differs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            other = root / "other"
+            project.mkdir()
+            other.mkdir()
+            status_dir = root / "chatgpt"
+            status_dir.mkdir()
+            (status_dir / "status.json").write_text(json.dumps({
+                "workspace": str(other),
+                "heartbeat_at": time.time(),
+                "worker_ready": True,
+            }), encoding="utf-8")
+            registry = {
+                "chatgpt-normal": {"id": "chatgpt-normal", "provider": "chatgpt-web", "enabled": True, "priority": 1},
+                "codex1": {"id": "codex1", "provider": "codex", "enabled": True, "priority": 2, "home": str(root / "codex")},
+            }
+            with patch.object(server, "ROOT", root), \
+                 patch.object(server, "worker_registry", return_value=registry), \
+                 patch.object(server, "worker_auth_status", return_value=(True, "ready")), \
+                 patch.object(server, "worker_settings", return_value={}), \
+                 patch.object(server, "cooldown_left", return_value=0), \
+                 patch.object(server, "running_jobs", return_value=[]), \
+                 patch.object(server, "config", return_value={"auto_order": []}), \
+                 patch.object(server, "git", return_value="head"), \
+                 patch.object(server, "codex_cmd", return_value=["codex"]), \
+                 patch.object(server.subprocess, "Popen") as popen:
+                popen.return_value.pid = 12345
+                job_id, worker = server.start_job("auto", "Inspect", project, auto_failover=False)
+            self.assertEqual(worker, "codex1")
+            popen.assert_called_once()
+
+    def test_chatgpt_job_queues_for_desktop_instead_of_spawning_cli_runner(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs"
+            jobs.mkdir()
+            project = Path(td) / "project"
+            project.mkdir()
+            registry = {
+                "chatgpt-normal": {
+                    "id": "chatgpt-normal",
+                    "provider": "chatgpt-web",
+                    "label": "ChatGPT Normal",
+                    "profile_id": "web",
+                    "native": True,
+                    "enabled": True,
+                }
+            }
+            with patch.object(server, "JOBS", jobs), \
+                 patch.object(server, "worker_registry", return_value=registry), \
+                 patch.object(server, "worker_auth_status", return_value=(True, "ready")), \
+                 patch.object(server, "worker_settings", return_value={}), \
+                 patch.object(server, "cooldown_left", return_value=0), \
+                 patch.object(server, "_chatgpt_workspace_matches", return_value=True), \
+                 patch.object(server, "git", return_value="head"), \
+                 patch.object(server, "config", return_value={"auto_resume": 2, "max_failovers": 2}), \
+                 patch.object(server.subprocess, "Popen") as popen:
+                job_id, worker = server.start_job(
+                    "chatgpt-normal", "Inspect the project", project, auto_failover=False
+                )
+            self.assertEqual(worker, "chatgpt-normal")
+            meta = json.loads((jobs / job_id / "meta.json").read_text(encoding="utf-8"))
+            spec = json.loads((jobs / job_id / "spec.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["state"], "waiting_for_desktop")
+            self.assertEqual(meta["provider"], "chatgpt-web")
+            self.assertEqual(spec["cmd"], [])
+            popen.assert_not_called()
+
     def test_auto_excludes_disabled_and_uses_priority(self):
         registry = {
             "disabled": {"id": "disabled", "provider": "codex", "enabled": False, "priority": 0},
