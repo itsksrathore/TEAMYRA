@@ -22,7 +22,7 @@ def _graph_path(root, graph_id):
 
 
 def _atomic_write(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -51,6 +51,7 @@ def _validate_nodes(nodes):
         if any(not isinstance(dep, str) for dep in deps):
             raise ValueError(f"node {node_id} has invalid dependencies")
 
+        timeout = max(1, min(int(raw.get("timeout_minutes") or 90), 360))
         normalized.append({
             "id": node_id,
             "label": str(raw.get("label") or node_id).strip()[:120] or node_id,
@@ -58,6 +59,7 @@ def _validate_nodes(nodes):
             "worker": str(raw.get("worker") or "auto"),
             "depends_on": deps,
             "write": raw.get("write", True) is not False,
+            "timeout_minutes": timeout,
             "status": "pending",
             "job_id": None,
             "started_at": None,
@@ -92,12 +94,13 @@ def _validate_nodes(nodes):
     return normalized
 
 
-def create_graph(root, title, project_path, nodes):
+def create_graph(root, title, project_path, nodes, objective=None):
     graph_id = "graph-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     now = time.time()
     graph = {
         "id": graph_id,
         "title": str(title or graph_id).strip()[:120] or graph_id,
+        "objective": str(objective or "").strip(),
         "project_path": str(Path(project_path).resolve()),
         "state": "draft",
         "created_at": now,
@@ -163,6 +166,7 @@ def graph_summary(graph):
     return {
         "id": graph["id"],
         "title": graph.get("title"),
+        "objective": graph.get("objective"),
         "project_path": graph.get("project_path"),
         "state": graph.get("state"),
         "active_node_id": graph.get("active_node_id"),
@@ -173,6 +177,8 @@ def graph_summary(graph):
                 "label": node.get("label"),
                 "worker": node.get("worker"),
                 "depends_on": node.get("depends_on", []),
+                "write": node.get("write", True),
+                "timeout_minutes": node.get("timeout_minutes", 90),
                 "status": node.get("status"),
                 "job_id": node.get("job_id"),
                 "error": node.get("error"),
@@ -180,3 +186,24 @@ def graph_summary(graph):
             for node in graph.get("nodes", [])
         ],
     }
+
+
+def graph_is_terminal(graph):
+    return graph.get("state") in {"done", "failed", "cancelled"}
+
+
+def terminalize_graph(graph):
+    mark_blocked_nodes(graph)
+    nodes = graph.get("nodes", [])
+    if graph.get("cancel_requested"):
+        if all(node.get("status") in {"done", "failed", "cancelled", "blocked"} for node in nodes):
+            graph["state"] = "cancelled"
+        else:
+            graph["state"] = "cancelling"
+    elif nodes and all(node.get("status") == "done" for node in nodes):
+        graph["state"] = "done"
+    elif nodes and all(node.get("status") in {"done", "failed", "cancelled", "blocked"} for node in nodes):
+        graph["state"] = "failed"
+    else:
+        graph["state"] = "running"
+    return graph
