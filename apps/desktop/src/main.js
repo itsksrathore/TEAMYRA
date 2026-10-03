@@ -38,6 +38,16 @@ function listJobs(limit = 30) {
     .slice(0, limit);
 }
 
+function readTranscript(jobId, offset = 0) {
+  if (!/^[A-Za-z0-9._-]+$/.test(jobId || '')) throw new Error('Invalid job id');
+  const file = path.join(JOBS, jobId, 'transcript.md');
+  if (!fs.existsSync(file)) return { text: '', next: 0 };
+  const data = fs.readFileSync(file);
+  const start = Math.max(0, Math.min(Number(offset) || 0, data.length));
+  const end = Math.min(data.length, start + 400000);
+  return { text: data.subarray(start, end).toString('utf8'), next: end };
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1480,
@@ -57,6 +67,7 @@ function createWindow() {
 
 ipcMain.handle('teamyra:providers', () => detectProviders());
 ipcMain.handle('teamyra:jobs', () => listJobs());
+ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
 
 ipcMain.handle('teamyra:add-account', async (_event, providerId) => {
   const provider = providerById(providerId);
