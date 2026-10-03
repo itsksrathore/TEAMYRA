@@ -78,6 +78,6 @@ This checklist is updated as implementation lands.
 ## Phase 7 — Distribution
 - [x] Tests — Python/unit/desktop contract suites run in CI on Linux and Windows.
 - [x] CI — GitHub Actions Linux + Windows matrix verifies Python compile/tests, desktop syntax, npm clean install, and renderer build.
-- [ ] Windows installer.
-- [ ] Auto-update.
-- [ ] Docs/examples.
+- [x] Windows installer — PyInstaller bundled core + Electron/NSIS installer; fresh build, install, packaged UI/core, provider detection, runtime location, and uninstall preservation verified on Windows.
+- [x] Auto-update — electron-updater GitHub release channel wired with update status/check/install IPC plus tag-based release workflow metadata publishing.
+- [x] Docs/examples — Windows distribution architecture, build/release flow, and packaged runtime behavior documented.

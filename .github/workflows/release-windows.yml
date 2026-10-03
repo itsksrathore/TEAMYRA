@@ -1,0 +1,71 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Python packager
+        run: python -m pip install "pyinstaller>=6.22,<7"
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Verify source
+        run: |
+          python -m compileall bridge
+          python -m unittest discover -s tests -p "test_*.py"
+          npm run desktop:check
+          npm --workspace @teamyra/desktop run build:renderer
+
+      - name: Build bundled core
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm teamyra-core.spec
+          if (!(Test-Path "dist/teamyra-core.exe")) { throw "core build missing" }
+          ./dist/teamyra-core.exe --help | Out-Null
+
+      - name: Build Windows installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+            npm version $version --workspace @teamyra/desktop --no-git-tag-version
+          }
+          Set-Location apps/desktop
+          if ("${{ github.ref_type }}" -eq "tag") {
+            npx electron-builder --win nsis --publish always
+          } else {
+            npx electron-builder --win nsis --publish never
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: teamyra-windows-${{ github.ref_name }}
+          path: |
+            apps/desktop/dist/TEAMYRA-Setup-*.exe
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/latest.yml
+          if-no-files-found: error

@@ -68,7 +68,7 @@ TEAMYRA is a local-first, provider-agnostic multi-agent engineering control plan
 
 ## Phase 7 — Distribution
 - [x] Automated tests and CI on Linux + Windows via GitHub Actions matrix.
-- [ ] Windows installer.
-- [ ] Update pipeline.
-- [ ] Documentation and examples.
-- [ ] Open-source release hardening.
+- [x] Windows installer with bundled standalone core and verified installed-app runtime.
+- [x] GitHub Release update pipeline with electron-updater wiring and generated NSIS update metadata.
+- [x] Documentation and examples for Windows packaging, runtime layout, and release acceptance.
+- [ ] Open-source release hardening (license, contribution/security policy, public release checklist, and signed stable channel).

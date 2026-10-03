@@ -11,6 +11,9 @@
     "desktop:check": "npm --workspace @teamyra/desktop run check",
     "teamyra": "python bridge/teamyra_cli.py",
     "mcp:stdio": "python bridge/teamyra_cli.py mcp stdio",
-    "mcp:http": "python bridge/teamyra_cli.py mcp http"
+    "mcp:http": "python bridge/teamyra_cli.py mcp http",
+    "core:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-core.ps1",
+    "desktop:dist:dir": "npm --workspace @teamyra/desktop run dist:dir",
+    "desktop:dist:win": "npm --workspace @teamyra/desktop run dist:win"
   }
 }

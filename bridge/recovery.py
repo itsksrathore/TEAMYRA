@@ -5,12 +5,27 @@ import ctypes
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 
 TERMINAL_GRAPH_STATES = {"done", "failed", "cancelled"}
-TERMINAL_REVIEW_STATES = {"done", "failed", "cancelled", "exhausted"}
+TERMINAL_REVIEW_STATES = {"done", "failed", "cancelled", "exhausted", "interrupted"}
+INTERNAL_PROCESS_MODES = {
+    "runner.py": "__runner",
+    "conductor_monitor.py": "__conductor-monitor",
+    "review_monitor.py": "__review-monitor",
+    "failover_monitor.py": "__failover-monitor",
+}
+
+
+def runtime_command(bridge, python_exe, script_name, *args):
+    mode = INTERNAL_PROCESS_MODES.get(str(script_name))
+    frozen_exe = os.environ.get("TEAMYRA_CORE_EXE")
+    if mode and (frozen_exe or getattr(sys, "frozen", False)):
+        return [str(frozen_exe or sys.executable), mode, *map(str, args)]
+    return [str(python_exe), str(Path(bridge) / str(script_name)), *map(str, args)]
 
 
 def process_alive(pid):
@@ -133,7 +148,7 @@ def recover_job(root, bridge, python_exe, job_dir):
         meta["recovered_at"] = time.time()
         _atomic_write(meta_path, meta)
         proc = _spawn_detached(
-            [str(python_exe), str(Path(bridge) / "runner.py"), str(job_dir)],
+            runtime_command(bridge, python_exe, "runner.py", job_dir),
             meta.get("cwd") or root,
             job_dir / "runner.log",
         )
@@ -188,7 +203,7 @@ def recover_graph(root, bridge, python_exe, graph_path):
         }
 
     proc = _spawn_detached(
-        [str(python_exe), str(Path(bridge) / "conductor_monitor.py"), str(graph_id)],
+        runtime_command(bridge, python_exe, "conductor_monitor.py", graph_id),
         root,
         Path(root) / "tasks" / f"{graph_id}.conductor.log",
     )
@@ -261,7 +276,7 @@ def recover_failover_monitor(root, bridge, python_exe, meta_path):
     if max_failovers <= 0:
         return None
     proc = _spawn_detached(
-        [str(python_exe), str(Path(bridge) / "failover_monitor.py"), str(job_id), str(max_failovers)],
+        runtime_command(bridge, python_exe, "failover_monitor.py", job_id, max_failovers),
         meta.get("cwd") or root,
         meta_path.parent / "failover-monitor.log",
     )

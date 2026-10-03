@@ -31,3 +31,5 @@ apps/desktop/out/
 # Generated desktop renderer bundles
 apps/desktop/renderer/bundle.js
 apps/desktop/renderer/bundle.css
+build/
+dist/

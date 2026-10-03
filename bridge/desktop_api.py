@@ -5,6 +5,7 @@ duplicating it inside Electron. One invocation handles one action and prints one
 JSON response to stdout.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -14,7 +15,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 BRIDGE = Path(__file__).resolve().parent
-ROOT = BRIDGE.parent
+ROOT = Path(os.environ.get("TEAMYRA_ROOT") or BRIDGE.parent).resolve()
 WORKTREES = ROOT / "worktrees"
 sys.path.insert(0, str(BRIDGE))
 

@@ -1,7 +1,20 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+
+const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
+const RUNTIME_ROOT = path.resolve(
+  process.env.TEAMYRA_ROOT ||
+  (app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : SOURCE_ROOT)
+);
+process.env.TEAMYRA_ROOT = RUNTIME_ROOT;
+if (app.isPackaged && !process.env.TEAMYRA_CORE_EXE) {
+  process.env.TEAMYRA_CORE_EXE = path.join(process.resourcesPath, 'teamyra-core', 'teamyra-core.exe');
+}
+fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
+
 const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary } = require('./provider-registry');
 const { callCore } = require('./core-api');
 
@@ -9,10 +22,69 @@ let pty = null;
 try { pty = require('@lydell/node-pty'); } catch {}
 const TERMINALS = new Map();
 
-const ROOT = path.resolve(__dirname, '..', '..', '..');
+const ROOT = RUNTIME_ROOT;
 const JOBS = path.join(ROOT, 'jobs');
 let PROVIDER_CACHE = { at: 0, data: null, pending: null };
 const PROVIDER_CACHE_MS = 30000;
+let UPDATE_STATE = {
+  status: app.isPackaged ? 'idle' : 'disabled-dev',
+  currentVersion: app.getVersion(),
+  availableVersion: null,
+  progress: null,
+  checkedAt: null,
+  error: null
+};
+
+function updateState(patch = {}) {
+  UPDATE_STATE = { ...UPDATE_STATE, ...patch };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.webContents.isDestroyed()) win.webContents.send('teamyra:update-state', { ...UPDATE_STATE });
+  }
+  return { ...UPDATE_STATE };
+}
+
+function setupAutoUpdates() {
+  if (!app.isPackaged || process.env.TEAMYRA_DISABLE_UPDATES === '1') {
+    return updateState({ status: app.isPackaged ? 'disabled' : 'disabled-dev' });
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => updateState({ status: 'checking', error: null }));
+  autoUpdater.on('update-available', info => updateState({
+    status: 'available',
+    availableVersion: info?.version || null,
+    checkedAt: Date.now()
+  }));
+  autoUpdater.on('update-not-available', info => updateState({
+    status: 'up-to-date',
+    availableVersion: info?.version || null,
+    checkedAt: Date.now(),
+    progress: null
+  }));
+  autoUpdater.on('download-progress', progress => updateState({
+    status: 'downloading',
+    progress: Math.max(0, Math.min(100, Number(progress?.percent) || 0))
+  }));
+  autoUpdater.on('update-downloaded', info => updateState({
+    status: 'downloaded',
+    availableVersion: info?.version || UPDATE_STATE.availableVersion,
+    progress: 100
+  }));
+  autoUpdater.on('error', error => updateState({
+    status: 'error',
+    error: String(error?.message || error || 'Update error')
+  }));
+
+  const timer = setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(error => updateState({
+      status: 'error',
+      error: String(error?.message || error)
+    }));
+  }, 5000);
+  timer.unref?.();
+  return updateState({ status: 'scheduled' });
+}
 
 async function providersCached(force = false) {
   const now = Date.now();
@@ -159,6 +231,23 @@ function createWindow() {
   const webContentsId = win.webContents.id;
   win.webContents.on('destroyed', () => killTerminalsFor(webContentsId));
 }
+
+ipcMain.handle('teamyra:update-status', () => ({ ...UPDATE_STATE }));
+ipcMain.handle('teamyra:update-check', async () => {
+  if (!app.isPackaged) return updateState({ status: 'disabled-dev' });
+  try {
+    updateState({ status: 'checking', error: null });
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    updateState({ status: 'error', error: String(error?.message || error) });
+  }
+  return { ...UPDATE_STATE };
+});
+ipcMain.handle('teamyra:update-install', () => {
+  if (UPDATE_STATE.status !== 'downloaded') return { ok: false, reason: 'update-not-downloaded' };
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  return { ok: true };
+});
 
 ipcMain.handle('teamyra:providers', () => providersCached(true));
 ipcMain.handle('teamyra:jobs', () => listJobs());
@@ -500,6 +589,7 @@ ipcMain.handle('teamyra:update-account', async (_event, providerId, profileId, p
 
 app.whenReady().then(() => {
   createWindow();
+  setupAutoUpdates();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

@@ -3,19 +3,65 @@
   "version": "0.1.0",
   "private": true,
   "description": "TEAMYRA multi-agent control desk",
+  "author": "TEAMYRA Contributors",
   "main": "src/main.js",
   "scripts": {
     "build:renderer": "esbuild renderer/app.mjs --bundle --platform=browser --format=iife --outfile=renderer/bundle.js",
     "start": "npm run build:renderer && electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check renderer/app.mjs"
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check renderer/app.mjs",
+    "build:core": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-core.ps1",
+    "dist:dir": "npm run build:renderer && npm run build:core && electron-builder --dir --win",
+    "dist:win": "npm run build:renderer && npm run build:core && electron-builder --win nsis"
   },
   "devDependencies": {
     "electron": "43.7.3",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2"
   },
   "dependencies": {
     "@lydell/node-pty": "^1.2.0-beta.14",
     "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0"
+    "@xterm/xterm": "^6.0.0",
+    "electron-updater": "^6.8.9"
+  },
+  "build": {
+    "appId": "com.teamyra.desktop",
+    "productName": "TEAMYRA",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../dist/teamyra-core.exe",
+        "to": "teamyra-core/teamyra-core.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "TEAMYRA-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TEAMYRA"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "itsksrathore",
+        "repo": "TEAMYRA",
+        "releaseType": "release"
+      }
+    ]
   }
 }

@@ -363,7 +363,9 @@ class Job:
         )
         (self.dir / "DONE").write_text(state, encoding="utf-8")
 
-if __name__ == "__main__":
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: runner.py <job_dir>")
     job = Job(sys.argv[1])
     try:
         job.run()
@@ -374,3 +376,7 @@ if __name__ == "__main__":
             runner_pid=None, worker_pid=None,
         )
         (job.dir / "DONE").write_text("failed", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
