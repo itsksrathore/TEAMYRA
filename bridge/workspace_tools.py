@@ -225,6 +225,9 @@ class WorkspaceToolService:
         inside = _is_relative_to(candidate, workspace)
         if not inside:
             raise PermissionError("path is outside the selected workspace")
+        relative = candidate.relative_to(workspace)
+        if relative.parts and relative.parts[0].lower() == ".git":
+            raise PermissionError("direct filesystem access to Git internals is blocked; use TEAMYRA git tools")
         for blocked in self._sensitive_roots():
             if candidate == blocked or _is_relative_to(candidate, blocked):
                 raise PermissionError("access to TEAMYRA runtime, system, or credential storage is blocked")
@@ -338,6 +341,8 @@ class WorkspaceToolService:
             for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
                 if len(items) >= limit:
                     break
+                if child.name.lower() == ".git":
+                    continue
                 try:
                     resolved_child = child.resolve(strict=True)
                     if not _is_relative_to(resolved_child, workspace):
