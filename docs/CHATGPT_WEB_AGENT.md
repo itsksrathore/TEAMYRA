@@ -46,7 +46,7 @@ A desktop heartbeat is written to runtime state. Core routing considers the work
 
 If TEAMYRA Desktop is closed, the worker becomes unavailable rather than pretending a headless browser worker exists.
 
-ChatGPT jobs use the normal TEAMYRA job store, transcripts, events, cancellation, failover lineage, observability, and worktree paths. The desktop provider consumes jobs in `waiting_for_desktop` state.
+ChatGPT jobs use the normal TEAMYRA job store, transcripts, events, cancellation, failover lineage, observability, and worktree paths. The desktop provider consumes jobs in `waiting_for_desktop` state. While a delegated job is running, manual input into the embedded page and workspace-changing controls are temporarily locked to prevent the user from accidentally switching the conversation underneath the automation. The Stop control writes the normal TEAMYRA job cancellation signal and also stops current web generation.
 
 ## Dedicated worker conversation
 
@@ -145,7 +145,7 @@ It prefers semantic selectors:
 
 No screen coordinates or pixel clicking are used.
 
-If ChatGPT's page structure changes, TEAMYRA reports prompt/send/stop failures and leaves the embedded page interactive for the user. It does not bypass authentication, CAPTCHAs, service limits or security controls.
+If ChatGPT's page structure changes, TEAMYRA reports prompt/send/stop failures and leaves the embedded page interactive for the user. Reconnect performs an actual in-view navigation reload without opening an external browser. It does not bypass authentication, CAPTCHAs, service limits or security controls.
 
 ## Remote-device direction
 
