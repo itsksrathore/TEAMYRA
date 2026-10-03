@@ -118,9 +118,9 @@
           <label><input type="checkbox" id="chatgptPermSearch" checked /> Search files</label>
           <label><input type="checkbox" id="chatgptPermCreate" checked /> Create files</label>
           <label><input type="checkbox" id="chatgptPermWrite" checked /> Edit files</label>
-          <label><input type="checkbox" id="chatgptPermTerminal" checked /> Terminal commands</label>
+          <label><input type="checkbox" id="chatgptPermTerminal" /> Terminal commands</label>
           <label><input type="checkbox" id="chatgptPermGit" checked /> Git access</label>
-          <label><input type="checkbox" id="chatgptPermOutside" /> Access outside workspace</label>
+          <label title="TEAMYRA keeps ChatGPT strictly workspace-scoped"><input type="checkbox" id="chatgptPermOutside" disabled /> Access outside workspace</label>
           <label><input type="checkbox" id="chatgptPermDestructive" /> Destructive operations without confirmation</label>
         </div>
         <div class="inline-actions">
@@ -130,7 +130,7 @@
           <button class="secondary" id="chatgptViewDiff">View Diff</button>
           <button class="secondary danger-soft" id="chatgptRevert">Revert Tracked Changes</button>
         </div>
-        <div id="chatgptPermissionHint" class="chatgpt-hint">Destructive operations remain confirmation-gated unless explicitly enabled.</div>
+        <div id="chatgptPermissionHint" class="chatgpt-hint">Outside-workspace access is intentionally disabled. Destructive operations remain confirmation-gated unless explicitly enabled.</div>
       </section>
 
       <section class="chatgpt-browser-shell">
