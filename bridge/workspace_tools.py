@@ -711,6 +711,16 @@ class WorkspaceToolService:
                 if path.exists() and path.is_dir():
                     raise PermissionError("git.add requires explicit file paths; directory-wide staging is blocked")
                 rel.append(os.path.relpath(path, workspace))
+            attr = run_git([*base, "check-attr", "-z", "filter", "--", *rel])
+            if attr.returncode != 0:
+                raise WorkspaceToolError((attr.stderr or attr.stdout or "git attribute check failed").strip())
+            fields = attr.stdout.split("\x00")
+            for index in range(0, max(0, len(fields) - 2), 3):
+                file_name, attribute, value = fields[index:index + 3]
+                if attribute == "filter" and value not in {"", "unspecified", "unset"}:
+                    raise PermissionError(
+                        f"git.add blocked for {file_name}: repository clean filters are not executed by TEAMYRA"
+                    )
             argv = [*base, "add", "--", *rel]
         elif tool == "git.commit":
             blocked_paths = []
