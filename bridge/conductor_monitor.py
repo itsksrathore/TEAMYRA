@@ -112,6 +112,26 @@ def main():
             return
 
         node = ready[0]
+
+        if node.get("requires_approval"):
+            approval = node.get("approval_status", "pending")
+            if approval == "denied":
+                node["status"] = "cancelled"
+                node["ended_at"] = time.time()
+                node["error"] = node.get("approval_note") or "approval denied"
+                graph["approval_pending_node_id"] = None
+                task_graph.mark_blocked_nodes(graph)
+                task_graph.save_graph(server.ROOT, graph)
+                continue
+            if approval != "approved":
+                graph["state"] = "waiting_approval"
+                graph["approval_pending_node_id"] = node["id"]
+                task_graph.save_graph(server.ROOT, graph)
+                time.sleep(2)
+                continue
+
+        graph["state"] = "running"
+        graph["approval_pending_node_id"] = None
         requested_worker = node.get("worker") or "auto"
         auto_failover = requested_worker == "auto"
         job_id, selected_worker = server.start_job(
