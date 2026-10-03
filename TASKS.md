@@ -76,8 +76,8 @@ This checklist is updated as implementation lands.
 - [x] Crash recovery - heartbeat/PID-aware startup reconciliation; same-job provider-session resume; graph/failover monitor restart; safe manual-resume preservation for non-terminal review loops.
 
 ## Phase 7 — Distribution
-- [ ] Tests.
-- [ ] CI.
+- [x] Tests — Python/unit/desktop contract suites run in CI on Linux and Windows.
+- [x] CI — GitHub Actions Linux + Windows matrix verifies Python compile/tests, desktop syntax, npm clean install, and renderer build.
 - [ ] Windows installer.
 - [ ] Auto-update.
 - [ ] Docs/examples.
