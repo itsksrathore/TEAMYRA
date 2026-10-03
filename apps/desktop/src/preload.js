@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('teamyra', {
   openChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-open'),
   closeChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-close'),
   reloadChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-reload'),
+  reconnectChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-reconnect'),
   newChatgptChat: () => ipcRenderer.invoke('teamyra:chatgpt-new-chat'),
   stopChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-stop'),
   sendChatgptTask: (text) => ipcRenderer.invoke('teamyra:chatgpt-send', text),
