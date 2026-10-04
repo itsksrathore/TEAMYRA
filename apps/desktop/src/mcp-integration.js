@@ -82,8 +82,12 @@ function mcpRequest(method, params = {}, timeout = 1200) {
 
 async function isTeamyraMcpReady() {
   try {
-    const response = await mcpRequest('ping');
-    return response && !response.error;
+    const response = await mcpRequest('initialize', {
+      protocolVersion: '2025-11-25',
+      capabilities: {},
+      clientInfo: { name: 'teamyra-desktop', version: '0.1.0' }
+    });
+    return response?.result?.serverInfo?.name === 'teamyra';
   } catch {
     return false;
   }
@@ -138,11 +142,11 @@ async function ensureTeamyraMcp() {
 
   startingMcp = (async () => {
     await spawnTeamyraMcp();
-    for (let attempt = 0; attempt < 35; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       if (await isTeamyraMcpReady()) {
         return { ok: true, running: true, endpoint: MCP_ENDPOINT, owned: true };
       }
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 250));
     }
     throw new Error('TEAMYRA MCP did not become ready on ' + MCP_ENDPOINT);
   })().finally(() => {
@@ -225,9 +229,9 @@ function mergeAntigravityConfigObject(config) {
 
 function writeAntigravityConfig(config) {
   fs.mkdirSync(path.dirname(ANTIGRAVITY_CONFIG), { recursive: true });
-  const temp = ANTIGRAVITY_CONFIG + '.teamyra-' + process.pid + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(config, null, 2) + '\n', 'utf8');
-  fs.renameSync(temp, ANTIGRAVITY_CONFIG);
+  // Direct replacement is more reliable than rename-over-existing on Windows.
+  // The complete JSON is prepared in memory before the single synchronous write.
+  fs.writeFileSync(ANTIGRAVITY_CONFIG, JSON.stringify(config, null, 2) + '\n', 'utf8');
 }
 
 async function antigravityConnectionStatus() {
