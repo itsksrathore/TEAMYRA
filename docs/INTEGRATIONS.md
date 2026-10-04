@@ -106,6 +106,18 @@ agy plugin uninstall teamyra
 
 The Antigravity MCP entry uses the current CLI's `serverUrl` format and points to the same localhost TEAMYRA endpoint.
 
+## Any MCP-compatible coding app
+
+TEAMYRA is not limited to the three provider CLIs above. Any local coding application, IDE extension, agent framework, or CLI that supports a custom **Streamable HTTP MCP server** can point at:
+
+```text
+http://127.0.0.1:8787/mcp
+```
+
+Use the client application's normal MCP configuration screen/file and add TEAMYRA as an HTTP MCP server. The exact configuration format belongs to that client, so TEAMYRA does not guess unsupported provider-specific settings.
+
+After connecting, call `teamyra.worker_status` first to inspect the workers TEAMYRA can actually use on this machine.
+
 ## Recommended agent workflow
 
 Once connected, agents should prefer the canonical `teamyra.*` tools:

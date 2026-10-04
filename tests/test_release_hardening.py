@@ -11,6 +11,12 @@ class ReleaseHardeningTests(unittest.TestCase):
             "LICENSE",
             "CONTRIBUTING.md",
             "SECURITY.md",
+            "CODE_OF_CONDUCT.md",
+            "SUPPORT.md",
+            "CHANGELOG.md",
+            ".github/pull_request_template.md",
+            ".github/ISSUE_TEMPLATE/bug_report.yml",
+            ".github/ISSUE_TEMPLATE/feature_request.yml",
             "docs/RELEASE_CHECKLIST.md",
             "docs/PROVIDER_CAPABILITIES.md",
         ):
@@ -23,6 +29,31 @@ class ReleaseHardeningTests(unittest.TestCase):
         )
         self.assertEqual(root_package.get("license"), "MIT")
         self.assertEqual(desktop_package.get("license"), "MIT")
+
+    def test_brand_assets_and_windows_icon_are_wired(self):
+        logo = ROOT / "apps" / "desktop" / "assets" / "teamyra-logo.png"
+        icon = ROOT / "apps" / "desktop" / "assets" / "teamyra-icon.ico"
+        self.assertTrue(logo.is_file())
+        self.assertTrue(icon.is_file())
+        html = (ROOT / "apps" / "desktop" / "renderer" / "index.html").read_text(encoding="utf-8")
+        main = (ROOT / "apps" / "desktop" / "src" / "main.js").read_text(encoding="utf-8")
+        desktop_package = json.loads(
+            (ROOT / "apps" / "desktop" / "package.json").read_text(encoding="utf-8")
+        )
+        self.assertIn('src="../assets/teamyra-logo.png"', html)
+        self.assertIn("teamyra-icon.ico", main)
+        self.assertEqual(desktop_package["build"]["win"]["icon"], "assets/teamyra-icon.ico")
+        self.assertEqual(desktop_package["build"]["nsis"]["installerIcon"], "assets/teamyra-icon.ico")
+        self.assertEqual(desktop_package["build"]["nsis"]["uninstallerIcon"], "assets/teamyra-icon.ico")
+        self.assertIn("assets/**/*", desktop_package["build"]["files"])
+
+    def test_release_version_is_1_0_0(self):
+        root_package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        desktop_package = json.loads(
+            (ROOT / "apps" / "desktop" / "package.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(root_package.get("version"), "1.0.0")
+        self.assertEqual(desktop_package.get("version"), "1.0.0")
 
     def test_stable_windows_release_requires_and_verifies_signing(self):
         workflow = (

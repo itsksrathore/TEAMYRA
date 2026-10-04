@@ -351,6 +351,7 @@ function createWindow() {
     ...windowChrome(),
     backgroundColor: '#e9e9ef',
     title: 'TEAMYRA',
+    icon: path.join(__dirname, '..', 'assets', 'teamyra-icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -880,6 +881,7 @@ if (!gotSingleInstanceLock) {
   app.on('second-instance', () => showMainWindow());
 
   app.whenReady().then(async () => {
+    if (process.platform === 'win32') app.setAppUserModelId('com.teamyra.desktop');
     try {
       await ensureTeamyraMcp();
       mcpBootError = null;
