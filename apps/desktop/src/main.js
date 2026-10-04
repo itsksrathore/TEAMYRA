@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -377,6 +377,8 @@ function createWindow(background = false) {
     return mainWindow;
   }
 
+  const windowIcon = nativeImage.createFromPath(APP_ICON);
+  if (windowIcon.isEmpty()) startupLog('window-icon-empty', { icon: APP_ICON });
   const win = new BrowserWindow({
     show: false,
     width: 1360,
@@ -386,7 +388,7 @@ function createWindow(background = false) {
     ...windowChrome(),
     backgroundColor: '#e9e9ef',
     title: 'TEAMYRA',
-    icon: APP_ICON,
+    icon: windowIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -955,7 +957,8 @@ if (!gotSingleInstanceLock) {
   app.on('second-instance', () => showMainWindow());
 
   app.whenReady().then(() => {
-    if (process.platform === 'win32') app.setAppUserModelId('com.teamyra.desktop');
+    if (shouldUseWindowsAppUserModelId()) app.setAppUserModelId('com.teamyra.desktop');
+    ensureWindowsShortcutIdentity();
     const background = process.argv.includes('--background');
     createWindow(background);
     if (background) scheduleDesktopIdleExit();
