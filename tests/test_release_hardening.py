@@ -49,7 +49,10 @@ class ReleaseHardeningTests(unittest.TestCase):
         resources = desktop_package["build"]["extraResources"]
         self.assertTrue(any(item.get("to") == "teamyra-icon.ico" for item in resources))
         self.assertIn("APP_ICON", main)
+        self.assertIn("nativeImage", main)
         self.assertIn("win.setIcon(APP_ICON)", main)
+        self.assertIn("win.setAppDetails({", main)
+        self.assertIn("ensureWindowsShortcutIdentity();", main)
 
     def test_release_version_is_1_0_0(self):
         root_package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
