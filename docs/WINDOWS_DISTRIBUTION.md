@@ -35,6 +35,8 @@ runtime/
 
 Provider credentials remain in the provider's normal native home or in TEAMYRA's isolated runtime profiles. They must never be bundled into the installer.
 
+The desktop process also owns the localhost TEAMYRA MCP lifecycle. On startup it ensures `http://127.0.0.1:8787/mcp` is available. Closing the main window hides the UI instead of terminating the process, so detached jobs, MCP access, and embedded-agent state continue in the background. Starting TEAMYRA again focuses the already-running single instance. Explicit application quit/update shutdowns stop the MCP child process that the desktop started.
+
 ## Packaged core
 
 `bridge/teamyra_entry.py` is the single executable entrypoint.
@@ -86,11 +88,14 @@ A Windows release build should run these gates in order:
 7. electron-builder unpacked build.
 8. Launch the unpacked desktop app and verify the renderer loads.
 9. Verify provider auto-detection still sees existing Claude/Codex/Antigravity native sessions.
-10. Verify one core-backed desktop action works without Python on PATH.
-11. Build NSIS installer.
-12. Install into a test directory and launch the installed app.
-13. Verify runtime data is written under Electron userData rather than Program Files.
-14. Uninstall and verify user runtime data is not silently destroyed.
+10. Verify one-click TEAMYRA MCP registration and connection verification for installed provider CLIs.
+11. Close the main window and verify the local MCP plus an active job continue while the UI is hidden.
+12. Relaunch TEAMYRA and verify the existing background instance is restored rather than duplicated.
+13. Verify one core-backed desktop action works without Python on PATH.
+14. Build NSIS installer.
+15. Install into a test directory and launch the installed app.
+16. Verify runtime data is written under Electron userData rather than Program Files.
+17. Uninstall and verify user runtime data is not silently destroyed.
 
 ## CI
 
