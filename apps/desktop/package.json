@@ -1,9 +1,9 @@
 {
   "name": "@teamyra/desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "license": "MIT",
-  "description": "TEAMYRA multi-agent control desk",
+  "description": "TEAMYRA local-first multi-agent coding desktop",
   "author": "TEAMYRA Contributors",
   "main": "src/main.js",
   "scripts": {
@@ -35,6 +35,7 @@
     "files": [
       "src/**/*",
       "renderer/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -47,14 +48,17 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "TEAMYRA-Setup-${version}-${arch}.${ext}"
+      "artifactName": "TEAMYRA-Setup-${version}-${arch}.${ext}",
+      "icon": "assets/teamyra-icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "TEAMYRA"
+      "shortcutName": "TEAMYRA",
+      "installerIcon": "assets/teamyra-icon.ico",
+      "uninstallerIcon": "assets/teamyra-icon.ico"
     },
     "publish": [
       {

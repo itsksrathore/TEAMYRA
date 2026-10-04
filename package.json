@@ -1,9 +1,9 @@
 {
   "name": "teamyra",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Provider-agnostic multi-agent engineering control plane",
+  "description": "Local-first multi-agent coding control plane for Claude Code, Codex, Antigravity and embedded ChatGPT",
   "workspaces": [
     "apps/*"
   ],
@@ -16,5 +16,27 @@
     "core:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-core.ps1",
     "desktop:dist:dir": "npm --workspace @teamyra/desktop run dist:dir",
     "desktop:dist:win": "npm --workspace @teamyra/desktop run dist:win"
-  }
+  },
+  "keywords": [
+    "multi-agent",
+    "coding-agent",
+    "ai-coding",
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "codex",
+    "antigravity",
+    "chatgpt",
+    "git-worktree",
+    "agent-orchestration",
+    "local-first"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsksrathore/TEAMYRA.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itsksrathore/TEAMYRA/issues"
+  },
+  "homepage": "https://github.com/itsksrathore/TEAMYRA#readme"
 }

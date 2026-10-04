@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible TEAMYRA problem
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include passwords, tokens, cookies, auth files or private user data."
+  - type: input
+    id: version
+    attributes:
+      label: TEAMYRA version or commit
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / integration
+      placeholder: Claude Code, Codex, Antigravity, ChatGPT, MCP client, etc.
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
