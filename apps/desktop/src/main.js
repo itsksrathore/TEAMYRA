@@ -61,6 +61,7 @@ fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
 const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary } = require('./provider-registry');
 const { callCore } = require('./core-api');
 const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
+const { GoogleMediaEngine } = require('./media/google-media-engine');
 const {
   ensureTeamyraMcp,
   stopOwnedMcp,
@@ -74,6 +75,7 @@ const TERMINALS = new Map();
 const chatgptProviders = new Map();
 let activeChatgptProfileId = 'web';
 let mainWindow = null;
+let googleMediaEngine = null;
 let isQuitting = false;
 let mcpBootError = null;
 let desktopIdleTimer = null;
@@ -188,6 +190,36 @@ async function providersCached(force = false) {
             : provider.signedIn
               ? 'Signed in; worker view will initialize on demand'
               : 'Open inside TEAMYRA to sign in';
+        }
+        const mediaProvider = data.find(item => item.id === 'google-media');
+        if (mediaProvider && googleMediaEngine) {
+          const profileStatuses = await Promise.all((mediaProvider.profiles || []).map(async profile => {
+            const status = await googleMediaEngine.profileStatus(profile.id).catch(() => ({
+              profile_id: profile.id, connected: false, busy: false
+            }));
+            return [profile.id, status];
+          }));
+          const mediaById = new Map(profileStatuses);
+          mediaProvider.profiles = (mediaProvider.profiles || []).map(profile => {
+            const status = mediaById.get(profile.id) || {};
+            return {
+              ...profile,
+              signedIn: status.connected === true,
+              workerReady: status.connected === true,
+              busy: status.busy === true,
+              challenged: status.challenged === true,
+              musicSignedIn: status.music_signed_in === true,
+              musicNeedsAuth: status.music_needs_user_auth === true,
+              detail: status.detail || ''
+            };
+          });
+          mediaProvider.signedIn = mediaProvider.profiles.some(profile => profile.signedIn);
+          mediaProvider.workerReady = mediaProvider.profiles.some(profile => profile.workerReady);
+          mediaProvider.busy = mediaProvider.profiles.some(profile => profile.busy);
+          mediaProvider.activeProfileId = googleMediaEngine.activeProfileId;
+          mediaProvider.status = mediaProvider.signedIn
+            ? mediaProvider.profiles.filter(profile => profile.signedIn).length + ' Google account(s) connected'
+            : 'Connect a Google account';
         }
       } catch {}
       PROVIDER_CACHE = { at: Date.now(), data, pending: null };
@@ -344,6 +376,7 @@ function hasActiveDesktopWork() {
   if (TERMINALS.size > 0) return true;
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
+  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumer?.busy === true || runtime.musicConsumer?.busy === true)) return true;
   return false;
 }
 
@@ -538,18 +571,30 @@ function createWindow(background = false) {
       startupLog('chatgpt-start-failed', { error: String(error?.stack || error) });
       destroyChatgptProviders();
     }
+    try {
+      googleMediaEngine?.destroy();
+      googleMediaEngine = new GoogleMediaEngine({ window: win });
+      googleMediaEngine.initialize();
+    } catch (error) {
+      startupLog('google-media-start-failed', { error: String(error?.stack || error) });
+      try { googleMediaEngine?.destroy(); } catch {}
+      googleMediaEngine = null;
+    }
   });
   const webContentsId = win.webContents.id;
   win.on('close', event => {
     if (isQuitting) return;
     event.preventDefault();
     for (const provider of chatgptProviders.values()) provider.setVisible(false);
+    googleMediaEngine?.setVisible(false).catch?.(() => {});
     win.hide();
     scheduleDesktopIdleExit();
   });
   win.webContents.on('destroyed', () => {
     killTerminalsFor(webContentsId);
     destroyChatgptProviders();
+    try { googleMediaEngine?.destroy(); } catch {}
+    googleMediaEngine = null;
     if (mainWindow === win) mainWindow = null;
   });
   return win;
@@ -574,6 +619,49 @@ ipcMain.handle('teamyra:update-install', () => {
 });
 
 ipcMain.handle('teamyra:providers', () => providersCached(true));
+ipcMain.handle('teamyra:browser-close', async () => {
+  for (const provider of chatgptProviders.values()) {
+    try { provider.closeEmbeddedPopup(); } catch {}
+    try { provider.setVisible(false); } catch {}
+  }
+  try { googleMediaEngine?.close(); } catch {}
+  return { ok: true };
+});
+ipcMain.handle('teamyra:media-status', (_event, profileId) => {
+  if (!googleMediaEngine) return callCore('media.connection-status', {});
+  return profileId ? googleMediaEngine.profileStatus(profileId) : googleMediaEngine.status();
+});
+ipcMain.handle('teamyra:media-open', async (_event, profileId = 'google') => {
+  if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+  const result = await googleMediaEngine.open(profileId);
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return result;
+});
+ipcMain.handle('teamyra:media-login', async (_event, profileId = 'google') => {
+  if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+  const result = await googleMediaEngine.login(profileId);
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return result;
+});
+ipcMain.handle('teamyra:media-music', async (_event, profileId = 'google') => {
+  if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+  const result = await googleMediaEngine.showMusic(profileId);
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return result;
+});
+ipcMain.handle('teamyra:media-close', () => googleMediaEngine?.close() || { connected: false });
+ipcMain.handle('teamyra:media-reconnect', async (_event, profileId) => {
+  if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+  return googleMediaEngine.reconnect(profileId);
+});
+ipcMain.handle('teamyra:media-visible', async (_event, visible) => {
+  if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+  return googleMediaEngine.setVisible(visible === true);
+});
+ipcMain.handle('teamyra:media-bounds', (_event, bounds = {}) => {
+  if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+  return googleMediaEngine.setBounds(bounds);
+});
 ipcMain.handle('teamyra:mcp-connections', async () => {
   const state = await getMcpConnections();
   if (state?.service?.running) mcpBootError = null;
@@ -979,8 +1067,9 @@ async function desktopCreateAccount(providerId, requestedName) {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
   const webProfile = provider.kind === 'web' && provider.managed?.webProfiles === true;
+  const mediaProfile = provider.kind === 'media' && provider.managed?.mediaProfiles === true;
   const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
-  if (!webProfile && !cliProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
+  if (!webProfile && !mediaProfile && !cliProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
 
   const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
   const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
@@ -991,6 +1080,7 @@ async function desktopCreateAccount(providerId, requestedName) {
   }, null, 2), 'utf8');
   PROVIDER_CACHE = { at: 0, data: null, pending: null };
   if (provider.id === 'chatgpt-web') await ensureChatgptProvider(profileId);
+  if (provider.id === 'google-media' && googleMediaEngine) googleMediaEngine.ensureProfile(profileId);
   return { ok: true, provider: provider.id, profileId, name, loginReady: true };
 }
 
@@ -1041,6 +1131,21 @@ async function dispatchDesktopControl(action, payload = {}) {
   if (action === 'provider.list') return providersCached(true);
   if (action === 'account.create') return desktopCreateAccount(payload.provider, payload.name);
   if (action === 'account.update') return desktopUpdateAccount(payload.provider, payload.profile_id, payload.patch || {});
+  if (action.startsWith('media.')) {
+    if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+    const mediaCmd = action.slice('media.'.length);
+    if (mediaCmd === 'status') return payload.profile_id
+      ? googleMediaEngine.profileStatus(payload.profile_id)
+      : googleMediaEngine.status();
+    if (mediaCmd === 'open') return googleMediaEngine.open(payload.profile_id || 'google');
+    if (mediaCmd === 'login') return googleMediaEngine.login(payload.profile_id || 'google');
+    if (mediaCmd === 'close') return googleMediaEngine.close();
+    if (mediaCmd === 'reconnect') return googleMediaEngine.reconnect(payload.profile_id);
+    if (mediaCmd === 'visible') return googleMediaEngine.setVisible(payload.visible === true);
+    if (mediaCmd === 'bounds') return googleMediaEngine.setBounds(payload.bounds || {});
+    if (mediaCmd === 'music') return googleMediaEngine.showMusic(payload.profile_id);
+    throw new Error('Unsupported Google Media control action');
+  }
   if (!action.startsWith('chatgpt.')) throw new Error('Unsupported desktop control action');
 
   const cmd = action.slice('chatgpt.'.length);
@@ -1112,37 +1217,7 @@ function startDesktopControlLoop() {
 }
 
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
-  const provider = providerById(providerId);
-  if (!provider) throw new Error('Unknown provider');
-  const webProfile = provider.kind === 'web' && provider.managed?.webProfiles === true;
-  const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
-  if (!webProfile && !cliProfile) {
-    return { ok: false, reason: 'profile-isolation-not-verified' };
-  }
-
-  const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
-  const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
-  const dir = path.join(profileRoot(provider.id), profileId);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, 'teamyra-profile.json'),
-    JSON.stringify({
-      name,
-      provider: provider.id,
-      enabled: true,
-      priority: 100,
-      createdAt: new Date().toISOString()
-    }, null, 2),
-    'utf8'
-  );
-
-  return {
-    ok: true,
-    provider: provider.id,
-    profileId,
-    name,
-    loginReady: true
-  };
+  return desktopCreateAccount(providerId, requestedName);
 });
 
 ipcMain.handle('teamyra:update-account', async (_event, providerId, profileId, patch = {}) => {
@@ -1242,10 +1317,12 @@ app.on('before-quit', () => {
   clearDesktopIdleExit();
   if (desktopControlTimer) clearInterval(desktopControlTimer);
   desktopControlTimer = null;
+  try { googleMediaEngine?.destroy(); } catch {}
+  googleMediaEngine = null;
   stopOwnedMcp();
 });
 
 app.on('window-all-closed', () => {
   // The lightweight wake gateway survives independently. The desktop UI exits
-  // after its hidden idle window once no local jobs/terminals/ChatGPT work remain.
+  // after its hidden idle window once no local jobs/terminals/ChatGPT/media work remain.
 });

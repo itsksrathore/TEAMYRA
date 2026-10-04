@@ -45,6 +45,16 @@ const PROVIDERS = [
     status: { kind: 'web' },
     managed: { verified: true, env: null, webProfiles: true },
     color: 'blue'
+  },
+  {
+    id: 'google-media',
+    name: 'Google Media',
+    kind: 'media',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'media' },
+    managed: { verified: true, env: null, mediaProfiles: true },
+    color: 'violet'
   }
 ];
 
@@ -190,6 +200,32 @@ function managedProfiles(provider) {
 
 async function detectProviders() {
   return Promise.all(PROVIDERS.map(async (provider) => {
+    if (provider.kind === 'media') {
+      return {
+        id: provider.id,
+        name: provider.name,
+        color: provider.color,
+        installed: true,
+        binary: 'Embedded Chromium · isolated Google sessions',
+        signedIn: false,
+        status: 'Connect a Google account',
+        managedProfilesVerified: true,
+        managedProfileEnv: null,
+        profiles: [{
+          id: 'google',
+          name: 'Google Account 1',
+          kind: 'media',
+          path: '',
+          signedIn: false,
+          editable: false,
+          enabled: true,
+          priority: 250,
+          model: '',
+          effort: '',
+          permissionMode: ''
+        }, ...managedProfiles(provider)]
+      };
+    }
     if (provider.kind === 'web') {
       return {
         id: provider.id,

@@ -16,6 +16,21 @@ let terminalSessionId = null;
 let terminalResizeObserver = null;
 let chatgptBoundsObserver = null;
 let activeChatgptProfileId = 'web';
+
+function setBrowserCloseVisible(visible) {
+  const button = $('#browserClose');
+  if (button) button.hidden = visible !== true;
+}
+
+async function closeAllEmbeddedBrowsers() {
+  await window.teamyra.closeEmbeddedBrowsers().catch(() => {});
+  setBrowserCloseVisible(false);
+  if (!$('#chatgptDetail').hidden) {
+    $('#chatgptDetail').hidden = true;
+    $('#agentsShelf').hidden = false;
+  }
+  if (activeView === 'agents') await refreshAgents().catch(() => {});
+}
 const transcriptState = new Map();
 
 const ACTIVE_STATES = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
@@ -24,6 +39,7 @@ const WORKER_META = {
   codex: { code: 'CX', icon: 'openai', cls: 'codex', label: 'Codex' },
   antigravity: { code: 'AG', icon: 'antigravity', cls: 'antigravity', label: 'Antigravity' },
   chatgpt: { code: 'GPT', icon: 'openai', cls: 'chatgpt', label: 'ChatGPT' },
+  googleMedia: { code: 'GM', icon: '', cls: 'antigravity', label: 'Google Media' },
   other: { code: 'AI', icon: '', cls: '', label: 'Agent' }
 };
 
@@ -65,6 +81,7 @@ function workerMeta(worker) {
 
 function providerMeta(providerId) {
   if (providerId === 'chatgpt-web') return WORKER_META.chatgpt;
+  if (providerId === 'google-media') return WORKER_META.googleMedia;
   return workerMeta(providerId);
 }
 
@@ -110,6 +127,10 @@ function setView(view) {
   if (activeView !== 'agents' || !$('#chatgptDetail').hidden) {
     const showChat = activeView === 'agents' && !$('#chatgptDetail').hidden;
     window.teamyra.setChatgptVisible(showChat).catch(() => {});
+  }
+  if (activeView !== 'agents') {
+    window.teamyra.setGoogleMediaVisible(false).catch(() => {});
+    setBrowserCloseVisible(false);
   }
 
   if (activeView === 'tasks') refreshJobs().catch(() => {});
@@ -236,7 +257,7 @@ function profileRows(provider) {
 }
 
 function profileActionLabel(provider, profile) {
-  if (provider.id === 'chatgpt-web') return 'Open';
+  if (provider.id === 'chatgpt-web' || provider.id === 'google-media') return profile.signedIn ? 'Open' : 'Connect';
   return profile.signedIn ? 'Open' : 'Connect';
 }
 
@@ -277,12 +298,17 @@ function agentCardHtml(provider) {
         <div class="profile-row">
           <div class="profile-name">
             <strong>${escapeHtml(profile.name || profile.id)}</strong>
-            <span>${profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : 'not connected'}</span>
+            <span>${profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
           </div>
-          <button class="profile-action" type="button"
-            data-provider="${escapeHtml(provider.id)}"
-            data-profile="${escapeHtml(profile.id)}"
-            data-signed-in="${profile.signedIn ? '1' : '0'}">${profileActionLabel(provider, profile)}</button>
+          <div class="profile-actions">
+            <button class="profile-action" type="button"
+              data-provider="${escapeHtml(provider.id)}"
+              data-profile="${escapeHtml(profile.id)}"
+              data-signed-in="${profile.signedIn ? '1' : '0'}">${profileActionLabel(provider, profile)}</button>
+            ${provider.id === 'google-media' && profile.signedIn
+              ? `<button class="profile-action" type="button" data-google-music="${escapeHtml(profile.id)}" title="${profile.musicSignedIn ? 'Open Flow Music' : 'Authorize Flow Music with Google'}">${profile.musicSignedIn ? 'Music' : 'Connect Music'}</button>`
+              : ''}
+          </div>
         </div>
       `).join('')
     : '<div class="profile-row"><div class="profile-name"><strong>No account available</strong><span>Install or connect this agent first</span></div></div>';
@@ -345,6 +371,31 @@ async function refreshAgents() {
     });
   });
 
+  $('#agentGrid').querySelectorAll('[data-google-music]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const profileId = button.dataset.googleMusic || 'google';
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Opening…';
+      try {
+        await window.teamyra.setChatgptVisible(false).catch(() => {});
+        setBrowserCloseVisible(true);
+        const result = await window.teamyra.openGoogleMusic(profileId);
+        if (result?.music_authorization?.needs_user_action) {
+          button.title = 'Complete Google authorization in the Flow Music window';
+        }
+        refreshAgents().catch(() => {});
+      } catch (error) {
+        alert('Could not open Flow Music: ' + String(error?.message || error));
+      } finally {
+        if (button.isConnected) {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      }
+    });
+  });
+
   $('#agentGrid').querySelectorAll('[data-connect-mcp]').forEach(button => {
     button.addEventListener('click', async () => {
       const providerId = button.dataset.connectMcp;
@@ -393,6 +444,11 @@ async function refreshAgents() {
 
         if (provider.id === 'chatgpt-web') {
           await openChatgptDetail(result.profileId);
+        } else if (provider.id === 'google-media') {
+          await window.teamyra.setChatgptVisible(false).catch(() => {});
+          setBrowserCloseVisible(true);
+          await window.teamyra.loginGoogleMedia(result.profileId);
+          refreshAgents().catch(() => {});
         } else {
           await openTerminal({
             providerId: provider.id,
@@ -418,6 +474,14 @@ async function refreshAgents() {
 }
 
 async function openProvider(provider, profile) {
+  if (provider.id === 'google-media') {
+    await window.teamyra.setChatgptVisible(false).catch(() => {});
+    setBrowserCloseVisible(true);
+    if (profile.signedIn) await window.teamyra.openGoogleMedia(profile.id || 'google');
+    else await window.teamyra.loginGoogleMedia(profile.id || 'google');
+    return;
+  }
+  await window.teamyra.setGoogleMediaVisible(false).catch(() => {});
   if (provider.id === 'chatgpt-web') {
     await openChatgptDetail(profile.id || 'web');
     return;
@@ -580,6 +644,7 @@ async function openChatgptDetail(profileId = 'web') {
   $('#agentsView').hidden = false;
   $('#tasksView').hidden = true;
 
+  setBrowserCloseVisible(true);
   await window.teamyra.setChatgptVisible(true);
   if (!chatgptBoundsObserver) {
     chatgptBoundsObserver = new ResizeObserver(syncChatgptBounds);
@@ -593,6 +658,7 @@ async function openChatgptDetail(profileId = 'web') {
 
 async function closeChatgptDetail() {
   await window.teamyra.setChatgptVisible(false).catch(() => {});
+  setBrowserCloseVisible(false);
   $('#chatgptDetail').hidden = true;
   $('#agentsShelf').hidden = false;
   await refreshAgents();
@@ -724,6 +790,7 @@ function updateUpdateNote(state) {
 
 $('#navTasks').addEventListener('click', () => setView('tasks'));
 $('#navAgents').addEventListener('click', () => setView('agents'));
+$('#browserClose').addEventListener('click', () => closeAllEmbeddedBrowsers().catch(() => {}));
 $('#refresh').addEventListener('click', () => {
   const action = activeView === 'agents'
     ? ($('#chatgptDetail').hidden ? refreshAgents() : refreshChatgptStatus())

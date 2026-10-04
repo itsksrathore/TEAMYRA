@@ -20,6 +20,7 @@ import project_memory
 import handoff_store
 import mcp_pool
 import recovery
+import media_engine
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -875,6 +876,28 @@ def desktop_control(action, payload=None, timeout_seconds=20):
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
+MEDIA_TYPE_ENUM = ["image", "video", "music", "background_music", "instrumental", "song", "sound_effect"]
+MEDIA_FORMAT_ENUM = ["png", "jpg", "jpeg", "webp", "mp4", "webm", "wav", "mp3", "m4a"]
+MEDIA_REQUEST_PROPERTIES = {
+    "type": {"type": "string", "enum": MEDIA_TYPE_ENUM},
+    "prompt": {"type": "string"},
+    "project_path": {"type": "string"},
+    "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": 1800},
+    "aspect_ratio": {"type": "string"},
+    "format": {"type": "string", "enum": MEDIA_FORMAT_ENUM},
+    "references": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+    "output_count": {"type": "integer", "minimum": 1, "maximum": 8, "default": 1},
+    "instrumental": {"type": "boolean"},
+    "vocals": {"type": "boolean"},
+    "lyrics": {"type": "string"},
+    "model_preference": {"type": "string"},
+    "first_frame": {"type": "string"},
+    "last_frame": {"type": "string"},
+    "character_reference": {"type": "string"},
+    "audio_reference": {"type": "string"},
+    "video_reference": {"type": "string"},
+    "generation_settings": {"type": "object"},
+}
 TOOLS = [
     {"name": "provider_list", "description": "List TEAMYRA providers/accounts as seen by the desktop app, including ChatGPT, Codex, Claude and Antigravity profiles.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -903,6 +926,51 @@ TOOLS = [
          "confirm": {"type": "boolean", "default": False},
          "file_path": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
+    {"name": "media_generate", "description": "Queue a durable TEAMYRA media job. TEAMYRA chooses the Google media surface internally and returns immediately with a media job id.",
+     "inputSchema": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
+                     "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
+    {"name": "media_batch", "description": "Queue multiple independent durable TEAMYRA media jobs without exposing browser/provider implementation details.",
+     "inputSchema": {"type": "object", "properties": {
+         "requests": {"type": "array", "minItems": 1, "maxItems": 50,
+                      "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
+                                "required": ["type", "prompt", "project_path"], "additionalProperties": False}}},
+         "required": ["requests"], "additionalProperties": False}},
+    {"name": "media_transform", "description": "Queue an edit/variation/extend/remix operation against an exact TEAMYRA asset id.",
+     "inputSchema": {"type": "object", "properties": {
+         "operation": {"type": "string", "enum": [
+             "image_edit", "image_variation", "video_extend", "video_edit", "video_to_video",
+             "music_remix", "music_extend", "music_replace_section"
+         ]},
+         "asset_id": {"type": "string"},
+         "prompt": {"type": "string"},
+         "project_path": {"type": "string"},
+         "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": 1800},
+         "aspect_ratio": {"type": "string"},
+         "format": {"type": "string", "enum": MEDIA_FORMAT_ENUM},
+         "references": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+         "instrumental": {"type": "boolean"},
+         "first_frame": {"type": "string"},
+         "last_frame": {"type": "string"},
+         "character_reference": {"type": "string"},
+         "audio_reference": {"type": "string"},
+         "video_reference": {"type": "string"},
+         "generation_settings": {"type": "object"}},
+         "required": ["operation", "asset_id"], "additionalProperties": False}},
+    {"name": "media_status", "description": "Read one TEAMYRA media job or recent media jobs, including durable state and completed asset metadata.",
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 30}},
+         "additionalProperties": False}},
+    {"name": "media_assets", "description": "Resolve/list TEAMYRA generated assets by persistent asset id, project, or media type.",
+     "inputSchema": {"type": "object", "properties": {
+         "asset_id": {"type": "string"},
+         "project_path": {"type": "string"},
+         "type": {"type": "string", "enum": MEDIA_TYPE_ENUM},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}},
+         "additionalProperties": False}},
+    {"name": "media_cancel", "description": "Request cancellation of a queued or in-progress TEAMYRA media job.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
+                     "required": ["job_id"], "additionalProperties": False}},
     {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
@@ -922,7 +990,7 @@ TOOLS = [
          "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
          "project_path": {"type": "string"},
          "worker": {"type": "string"},
-         "sources": {"type": "array", "items": {"type": "string", "enum": ["job", "graph", "review", "handoff", "worktree"]}},
+         "sources": {"type": "array", "items": {"type": "string", "enum": ["job", "graph", "review", "handoff", "worktree", "media"]}},
          "query": {"type": "string"},
          "since": {"type": "number"}},
          "additionalProperties": False}},
@@ -1210,6 +1278,20 @@ def tool_call(name, a):
         payload = dict(a)
         payload.pop("action", None)
         return desktop_control("chatgpt." + action, payload)
+    if name == "media_generate":
+        return media_engine.create_job(ROOT, a)
+    if name == "media_batch":
+        return media_engine.create_batch(ROOT, a["requests"])
+    if name == "media_transform":
+        return media_engine.create_transform_job(ROOT, a)
+    if name == "media_status":
+        return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30))
+    if name == "media_assets":
+        return media_engine.list_assets(
+            ROOT, a.get("project_path"), a.get("asset_id"), a.get("type"), a.get("limit", 100)
+        )
+    if name == "media_cancel":
+        return media_engine.cancel_job(ROOT, a["job_id"])
     if name == "timeline_list":
         return observability.timeline(
             ROOT,

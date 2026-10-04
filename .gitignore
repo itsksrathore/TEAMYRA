@@ -9,6 +9,7 @@ results/
 worktrees/
 tasks/
 memory/
+/media/
 
 # Python/runtime caches
 bridge/__pycache__/

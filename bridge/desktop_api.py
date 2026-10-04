@@ -23,6 +23,7 @@ import worktree_manager
 import observability
 import project_memory
 import workspace_tools
+import media_engine
 
 
 def _bridge_token(payload):
@@ -91,6 +92,45 @@ def handle(action, payload):
             payload.get("worker"),
             payload.get("kinds"),
         )
+    if action == "media.claim":
+        return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"))
+    if action == "media.status":
+        return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30))
+    if action == "media.prepare-output":
+        return media_engine.prepare_output(ROOT, payload["job_id"])
+    if action == "media.update-state":
+        return media_engine.update_job_state(
+            ROOT, payload["job_id"], payload["state"], payload.get("detail"), payload.get("extra")
+        )
+    if action == "media.patch":
+        return media_engine.append_job_metadata(ROOT, payload["job_id"], payload.get("patch") or {})
+    if action == "media.register-asset":
+        return media_engine.register_asset(
+            ROOT,
+            payload["job_id"],
+            payload["local_path"],
+            provider=payload.get("provider") or "google-flow",
+            provider_asset_id=payload.get("provider_asset_id"),
+            provider_project_id=payload.get("provider_project_id"),
+            provider_url=payload.get("provider_url"),
+            generation_settings=payload.get("generation_settings"),
+            metadata=payload.get("metadata"),
+        )
+    if action == "media.cleanup-staging":
+        return media_engine.cleanup_staging(ROOT, payload["job_id"])
+    if action == "media.connection-status":
+        return media_engine.connection_status(ROOT)
+    if action == "media.connection-update":
+        return media_engine.write_connection_status(ROOT, payload.get("patch") or {})
+    if action == "media.reconcile":
+        return media_engine.mark_reconciled(
+            ROOT,
+            payload["job_id"],
+            provider_submission=payload.get("provider_submission"),
+            resume_state=payload.get("resume_state") or "generating",
+        )
+    if action == "media.resume-auth":
+        return media_engine.resume_auth_jobs(ROOT)
     if action == "observability.usage":
         import server
         rows = []

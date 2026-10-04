@@ -356,6 +356,43 @@ def _worktree_timeline(root):
     return rows
 
 
+
+def _media_timeline(root):
+    directory = Path(root) / "media" / "jobs"
+    rows = []
+    if not directory.exists():
+        return rows
+    for path in directory.glob("media-*.json"):
+        job = _read_json(path)
+        if not isinstance(job, dict):
+            continue
+        job_id = job.get("job_id") or path.stem
+        request = job.get("request") or {}
+        base = {
+            "source": "media",
+            "source_id": job_id,
+            "media_job_id": job_id,
+            "label": f"{request.get('type') or 'media'} · {job_id}",
+            "state": job.get("state"),
+            "project_path": request.get("project_path"),
+            "provider": job.get("provider_surface"),
+            "asset_id": job.get("asset_id"),
+        }
+        history = job.get("history") or []
+        for event in history[-MAX_EVENTS_PER_JOB:]:
+            ts = event.get("ts")
+            if not isinstance(ts, (int, float)):
+                continue
+            state = str(event.get("state") or job.get("state") or "unknown")
+            rows.append({
+                **base,
+                "ts": float(ts),
+                "kind": "media." + state,
+                "message": _clip(event.get("detail") or state, 900),
+                "state": state,
+            })
+    return rows
+
 def timeline(root, limit=100, project_path=None, worker=None, sources=None, query=None, since=None):
     limit = max(1, min(int(limit or 100), MAX_TIMELINE_LIMIT))
     source_filter = {str(item) for item in (sources or []) if str(item).strip()}
@@ -365,6 +402,7 @@ def timeline(root, limit=100, project_path=None, worker=None, sources=None, quer
     rows.extend(_review_timeline(root))
     rows.extend(_handoff_timeline(root))
     rows.extend(_worktree_timeline(root))
+    rows.extend(_media_timeline(root))
 
     filtered = []
     for item in rows:

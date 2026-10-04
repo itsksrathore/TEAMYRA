@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import media_engine
+
 
 TERMINAL_GRAPH_STATES = {"done", "failed", "cancelled"}
 TERMINAL_REVIEW_STATES = {"done", "failed", "cancelled", "exhausted", "interrupted"}
@@ -295,6 +297,7 @@ def recover_all(root, bridge, python_exe):
         "graphs": [],
         "reviews": [],
         "failovers": [],
+        "media": [],
         "errors": [],
     }
 
@@ -338,10 +341,21 @@ def recover_all(root, bridge, python_exe):
             except Exception as exc:
                 report["errors"].append({"kind": "failover", "id": job_dir.name, "error": str(exc)})
 
+    try:
+        media_report = media_engine.recover_incomplete_jobs(root)
+        for job_id in media_report.get("requeued", []):
+            report["media"].append({"kind": "media", "id": job_id, "action": "requeued"})
+        for job_id in media_report.get("reconcile_required", []):
+            report["media"].append({"kind": "media", "id": job_id, "action": "reconcile_required"})
+        for error in media_report.get("errors", []):
+            report["errors"].append({"kind": "media", **error})
+    except Exception as exc:
+        report["errors"].append({"kind": "media", "id": "media", "error": str(exc)})
+
     report["ended_at"] = time.time()
     report["ok"] = not report["errors"]
     report["actions"] = {
         key: sum(1 for item in report[key] if item.get("action") not in {"unchanged", "alive"})
-        for key in ("jobs", "graphs", "reviews", "failovers")
+        for key in ("jobs", "graphs", "reviews", "failovers", "media")
     }
     return report

@@ -9,7 +9,7 @@
   "scripts": {
     "build:renderer": "esbuild renderer/app.mjs --bundle --platform=browser --format=iife --outfile=renderer/bundle.js",
     "start": "npm run build:renderer && electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check src/mcp-integration.js && node --check src/chatgpt-session-manager.js && node --check src/chatgpt-automation-adapter.js && node --check src/workspace-bridge.js && node --check src/chatgpt-web-provider.js && node --check renderer/agent-icons.mjs && node --check renderer/app.mjs && node tests/chatgpt-automation-adapter.test.js && node tests/mcp-integration.test.js && node tests/startup-diagnostics.test.js && node tests/workspace-status.test.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check src/mcp-integration.js && node --check src/chatgpt-session-manager.js && node --check src/chatgpt-automation-adapter.js && node --check src/workspace-bridge.js && node --check src/chatgpt-web-provider.js && node --check src/media/google-media-session-manager.js && node --check src/media/media-browser-controller.js && node --check src/media/media-download-manager.js && node --check src/media/media-audio-processor.js && node --check src/media/google-flow-automation-adapter.js && node --check src/media/google-flow-music-automation-adapter.js && node --check src/media/google-flow-provider.js && node --check src/media/google-flow-music-provider.js && node --check src/media/media-job-consumer.js && node --check src/media/google-media-engine.js && node --check renderer/agent-icons.mjs && node --check renderer/app.mjs && node tests/chatgpt-automation-adapter.test.js && node tests/media-automation.test.js && node tests/mcp-integration.test.js && node tests/startup-diagnostics.test.js && node tests/workspace-status.test.js",
     "build:core": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-core.ps1",
     "dist:dir": "npm run build:renderer && npm run build:core && electron-builder --dir --win",
     "dist:win": "npm run build:renderer && npm run build:core && electron-builder --win nsis",
@@ -24,7 +24,8 @@
     "@lydell/node-pty": "^1.2.0-beta.14",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "ffmpeg-static": "^5.2.0"
   },
   "build": {
     "appId": "com.teamyra.desktop",
@@ -39,6 +40,9 @@
       "renderer/**/*",
       "assets/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**/*"
     ],
     "extraResources": [
       {
