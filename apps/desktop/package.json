@@ -30,6 +30,7 @@
     "appId": "com.teamyra.desktop",
     "productName": "TEAMYRA",
     "asar": true,
+    "compression": "normal",
     "directories": {
       "output": "dist"
     },
@@ -41,8 +42,8 @@
     ],
     "extraResources": [
       {
-        "from": "../../dist/teamyra-core.exe",
-        "to": "teamyra-core/teamyra-core.exe"
+        "from": "../../dist/teamyra-core",
+        "to": "teamyra-core"
       }
     ],
     "win": {
@@ -59,7 +60,10 @@
       "createStartMenuShortcut": true,
       "shortcutName": "TEAMYRA",
       "installerIcon": "assets/teamyra-icon.ico",
-      "uninstallerIcon": "assets/teamyra-icon.ico"
+      "uninstallerIcon": "assets/teamyra-icon.ico",
+      "perMachine": false,
+      "allowElevation": false,
+      "packElevateHelper": false
     },
     "publish": [
       {

@@ -42,8 +42,8 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm teamyra-core.spec
-          if (!(Test-Path "dist/teamyra-core.exe")) { throw "core build missing" }
-          ./dist/teamyra-core.exe --help | Out-Null
+          if (!(Test-Path "dist/teamyra-core/teamyra-core.exe")) { throw "core build missing" }
+          ./dist/teamyra-core/teamyra-core.exe --help | Out-Null
 
       - name: Require signing credentials for stable tags
         if: github.ref_type == 'tag'
