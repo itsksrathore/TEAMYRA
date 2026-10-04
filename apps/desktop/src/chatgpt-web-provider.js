@@ -466,9 +466,18 @@ class ChatGPTWebProvider {
   async sendTask(text) {
     this.ensureView();
     if (!this.loaded) await this.open();
-    const probe = await this.automation.probe();
-    if (probe.challenged) throw new Error('ChatGPT requires user verification in the embedded view');
-    if (!probe.promptFound) throw new Error(probe.loginVisible ? 'ChatGPT sign-in is required' : 'ChatGPT prompt is unavailable');
+
+    let probe = null;
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      probe = await this.automation.probe();
+      if (probe.challenged) throw new Error('ChatGPT requires user verification in the embedded view');
+      if (probe.loginVisible) throw new Error('ChatGPT sign-in is required');
+      if (probe.promptFound) break;
+      await sleep(250);
+    }
+
+    if (!probe?.promptFound) throw new Error('ChatGPT prompt is unavailable');
     return this.automation.sendTask(text);
   }
 
