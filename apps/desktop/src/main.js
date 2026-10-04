@@ -340,10 +340,12 @@ ipcMain.handle('teamyra:update-install', () => {
 ipcMain.handle('teamyra:providers', () => providersCached(true));
 ipcMain.handle('teamyra:mcp-connections', async () => {
   const state = await getMcpConnections();
+  if (state?.service?.running) mcpBootError = null;
   return { ...state, bootError: mcpBootError };
 });
 ipcMain.handle('teamyra:mcp-connect', async (_event, providerId) => {
   const result = await connectTeamyraMcp(String(providerId || ''));
+  if (result?.ok) mcpBootError = null;
   PROVIDER_CACHE = { at: 0, data: null, pending: null };
   return result;
 });
