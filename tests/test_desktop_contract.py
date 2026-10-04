@@ -140,13 +140,12 @@ class DesktopContractTests(unittest.TestCase):
         self.assertNotIn("screenX", self.chatgpt_automation)
         self.assertNotIn("screenY", self.chatgpt_automation)
 
-    def test_chatgpt_tools_stay_secondary_and_safe_by_default(self):
-        self.assertIn('id="chatgptPermTerminal" type="checkbox"', self.html)
-        self.assertNotIn('id="chatgptPermTerminal" type="checkbox" checked', self.html)
+    def test_chatgpt_tools_are_full_workspace_access_but_keep_safety_boundaries(self):
+        self.assertIn('id="chatgptPermTerminal" type="checkbox" checked', self.html)
         self.assertIn("outside_workspace: false", self.renderer)
         self.assertIn("destructive_without_confirmation: false", self.renderer)
         tools = (ROOT / "bridge" / "workspace_tools.py").read_text(encoding="utf-8")
-        self.assertIn('"terminal": False', tools)
+        self.assertIn('"terminal": True', tools)
         self.assertIn('if not inside:', tools)
 
     def test_advanced_backend_capabilities_remain_available_without_primary_pages(self):

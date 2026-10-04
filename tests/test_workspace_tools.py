@@ -320,16 +320,18 @@ class WorkspaceToolTests(unittest.TestCase):
                     "terminal.run", {"argv": [sys.executable, "script.py"]}, token="x" * 64
                 )
 
-    def test_default_terminal_permission_is_off(self):
+    def test_default_terminal_permission_is_on_but_stays_guarded(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
             workspace = Path(td) / "project"
             workspace.mkdir()
             service = self.make_service(root, workspace)
-            with self.assertRaises(PermissionError):
-                service.execute("terminal.run", {"argv": ["git", "status"]}, token="x" * 64)
+            result = service.execute(
+                "terminal.run", {"argv": [sys.executable, "--version"]}, token="x" * 64
+            )
+            self.assertEqual(result["exit_code"], 0)
 
-    def test_switching_workspace_resets_high_risk_permissions(self):
+    def test_switching_workspace_keeps_full_tools_but_resets_destructive_bypass(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             root = base / "runtime"
@@ -347,7 +349,7 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertTrue(service.status(token=token)["permissions"]["terminal"])
             service.configure(second, {}, token=token)
             permissions = service.status(token=token)["permissions"]
-            self.assertFalse(permissions["terminal"])
+            self.assertTrue(permissions["terminal"])
             self.assertFalse(permissions["destructive_without_confirmation"])
 
     def test_explicit_workspace_execution_does_not_change_chatgpt_selection(self):

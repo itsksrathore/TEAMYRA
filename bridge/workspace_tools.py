@@ -22,7 +22,7 @@ DEFAULT_PERMISSIONS = {
     "create": True,
     "write": True,
     "git": True,
-    "terminal": False,
+    "terminal": True,
     "outside_workspace": False,
     "destructive_without_confirmation": False,
 }
