@@ -71,7 +71,7 @@ jobs:
             npm version $version --workspace @teamyra/desktop --no-git-tag-version
           }
           Set-Location apps/desktop
-          npx electron-builder --win nsis --publish never
+          npx electron-builder --win nsis portable --publish never
 
       - name: Verify stable signatures
         if: github.ref_type == 'tag'
@@ -88,6 +88,12 @@ jobs:
           $appSignature = Get-AuthenticodeSignature $appExe
           if ($appSignature.Status -ne "Valid") {
             throw "TEAMYRA.exe Authenticode signature is not valid: $($appSignature.Status)"
+          }
+          $portable = Get-ChildItem "apps/desktop/dist/TEAMYRA-*-Portable.exe" | Select-Object -First 1
+          if (-not $portable) { throw "portable TEAMYRA executable not found" }
+          $portableSignature = Get-AuthenticodeSignature $portable.FullName
+          if ($portableSignature.Status -ne "Valid") {
+            throw "portable TEAMYRA Authenticode signature is not valid: $($portableSignature.Status)"
           }
 
       - name: Publish verified stable artifacts
@@ -108,7 +114,9 @@ jobs:
             gh release create $tag --title "TEAMYRA $tag" --generate-notes
             if ($LASTEXITCODE -ne 0) { throw "failed to create GitHub Release" }
           }
-          $assets = @($installer.FullName, $blockmap.FullName, $latest.FullName)
+          $portable = Get-ChildItem "apps/desktop/dist/TEAMYRA-*-Portable.exe" | Select-Object -First 1
+          if (-not $portable) { throw "portable TEAMYRA executable not found" }
+          $assets = @($installer.FullName, $portable.FullName, $blockmap.FullName, $latest.FullName)
           gh release upload $tag $assets --clobber
           if ($LASTEXITCODE -ne 0) { throw "failed to upload verified release assets" }
 
@@ -118,6 +126,7 @@ jobs:
           name: teamyra-windows-${{ github.ref_name }}
           path: |
             apps/desktop/dist/TEAMYRA-Setup-*.exe
+            apps/desktop/dist/TEAMYRA-*-Portable.exe
             apps/desktop/dist/*.blockmap
             apps/desktop/dist/latest.yml
           if-no-files-found: error

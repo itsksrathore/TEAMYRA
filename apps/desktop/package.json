@@ -12,7 +12,8 @@
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check src/mcp-integration.js && node --check src/chatgpt-session-manager.js && node --check src/chatgpt-automation-adapter.js && node --check src/workspace-bridge.js && node --check src/chatgpt-web-provider.js && node --check renderer/agent-icons.mjs && node --check renderer/app.mjs && node tests/chatgpt-automation-adapter.test.js && node tests/mcp-integration.test.js",
     "build:core": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-core.ps1",
     "dist:dir": "npm run build:renderer && npm run build:core && electron-builder --dir --win",
-    "dist:win": "npm run build:renderer && npm run build:core && electron-builder --win nsis"
+    "dist:win": "npm run build:renderer && npm run build:core && electron-builder --win nsis",
+    "dist:portable": "npm run build:renderer && npm run build:core && electron-builder --win portable"
   },
   "devDependencies": {
     "electron": "43.7.3",
@@ -67,6 +68,9 @@
         "repo": "TEAMYRA",
         "releaseType": "release"
       }
-    ]
+    ],
+    "portable": {
+      "artifactName": "TEAMYRA-${version}-${arch}-Portable.${ext}"
+    }
   }
 }

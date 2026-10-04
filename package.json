@@ -15,7 +15,8 @@
     "mcp:http": "python bridge/teamyra_cli.py mcp http",
     "core:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-core.ps1",
     "desktop:dist:dir": "npm --workspace @teamyra/desktop run dist:dir",
-    "desktop:dist:win": "npm --workspace @teamyra/desktop run dist:win"
+    "desktop:dist:win": "npm --workspace @teamyra/desktop run dist:win",
+    "desktop:dist:portable": "npm --workspace @teamyra/desktop run dist:portable"
   },
   "keywords": [
     "multi-agent",

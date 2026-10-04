@@ -139,6 +139,7 @@ npm run mcp:stdio
 npm run mcp:http -- --port 8787
 npm run core:build
 npm run desktop:dist:win
+npm run desktop:dist:portable
 ```
 
 ## Windows builds
@@ -147,6 +148,7 @@ The packaged desktop includes `teamyra-core.exe`, so end users do not need to in
 
 Release artifacts include:
 - `TEAMYRA.exe` in the unpacked Windows application
+- `TEAMYRA-<version>-<arch>-Portable.exe` single-file portable build
 - `TEAMYRA-Setup-<version>-<arch>.exe` NSIS installer
 - update metadata for electron-updater
 
