@@ -224,17 +224,25 @@ class ChatGPTWebProvider {
     } catch {}
   }
 
-  async open() {
+  async ensureLoaded({ visible = false } = {}) {
     const view = this.ensureView();
-    this.visible = true;
-    view.setVisible(true);
-    view.setBounds(this.bounds);
+    this.visible = visible === true;
+    view.setVisible(this.visible);
+    if (this.visible) view.setBounds(this.bounds);
     const url = view.webContents.getURL();
     if (!url || url === 'about:blank') {
       await view.webContents.loadURL(CHATGPT_HOME);
     }
     await this.refreshStatus();
     return this.getStatus();
+  }
+
+  async open() {
+    return this.ensureLoaded({ visible: true });
+  }
+
+  async wakeBackground() {
+    return this.ensureLoaded({ visible: false });
   }
 
   close() {
@@ -448,7 +456,7 @@ class ChatGPTWebProvider {
 
   async sendTask(text) {
     this.ensureView();
-    if (!this.loaded) await this.open();
+    if (!this.loaded) await this.ensureLoaded({ visible: this.visible });
 
     let probe = null;
     const deadline = Date.now() + 15000;
@@ -529,7 +537,7 @@ class ChatGPTWebProvider {
     );
     if (!candidate) return;
     if (!this.view || this.view.webContents.isDestroyed()) {
-      await this.open();
+      await this.wakeBackground();
     }
     const status = await this.refreshStatus();
     if (!status.workerReady) return;

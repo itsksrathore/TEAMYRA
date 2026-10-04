@@ -33,6 +33,7 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Normal ChatGPT browsing and authentication stay inside the sandboxed embedded `WebContentsView`; TEAMYRA does not open an external browser for ChatGPT sign-in.
 - The default account keeps the backward-compatible `persist:teamyra-chatgpt-profile` partition. Extra ChatGPT accounts use their own persistent partitions derived from a safe profile ID, so cookies/local storage and logins remain isolated.
 - The Agents shelf can create additional ChatGPT accounts. Each account owns an isolated persistent Chromium partition and its own background worker view, so multiple Normal ChatGPT accounts can execute delegated jobs concurrently instead of waiting on one shared browser.
+- Delegated ChatGPT jobs wake/load their worker view hidden. Starting or routing a task never makes the ChatGPT surface visible; the user sees it only after explicitly opening that account from Agents (or an explicit `chatgpt_control` visibility/open command).
 - Every delegated job carries its own `project_path`/workspace assignment. TEAMYRA sandboxes that job's filesystem, Git, and terminal tools to the assigned project directory, so an agent may work in a different approved folder without changing the UI's default workspace first.
 - New delegated jobs start in a fresh ChatGPT conversation by default; only explicit resume/handoff jobs reuse a prior conversation session.
 - Credentials are entered directly into the ChatGPT/OpenAI authentication pages rendered by Chromium; TEAMYRA does not store passwords.
@@ -80,6 +81,12 @@ Supported tools:
 - `git.restore`
 
 MCP callers use the same implementation through `teamyra.workspace_tool`; they do not mutate the selected ChatGPT workspace. MCP callers cannot self-authorize destructive/per-command confirmations. Their terminal surface is limited to the same bounded automatic inspection commands unless a future user-approval subsystem grants a capability explicitly.
+
+Desktop-backed controls are also exposed through MCP without exposing browser cookies or provider credentials:
+- `provider_list` — provider/account inventory for ChatGPT, Codex, Claude and Antigravity.
+- `agent_account_create` / `agent_account_update` — managed account creation and routing/model/effort/permission settings where that provider supports isolated profiles.
+- `chatgpt_control` — explicit ChatGPT profile status, open/close, reload/reconnect, new chat, stop/send, conversation navigation, visibility/bounds, workspace status/configuration, changes/revert and file attachment.
+- Existing `start_task`, `job_*`, `worker_status`, `run_ai_parallel`, `review_*`, `handoff_*`, `worktree_*`, memory and observability tools remain the normal MCP control plane for all coding agents.
 
 ## Workspace sandbox
 

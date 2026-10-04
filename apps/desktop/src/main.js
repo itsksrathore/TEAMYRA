@@ -971,6 +971,146 @@ function safeSettingToken(value, field, maxLength = 120) {
   return text;
 }
 
+
+const DESKTOP_CONTROL_DIR = path.join(ROOT, '.teamyra-desktop', 'control');
+let desktopControlTimer = null;
+
+async function desktopCreateAccount(providerId, requestedName) {
+  const provider = providerById(providerId);
+  if (!provider) throw new Error('Unknown provider');
+  const webProfile = provider.kind === 'web' && provider.managed?.webProfiles === true;
+  const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
+  if (!webProfile && !cliProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
+
+  const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
+  const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
+  const dir = path.join(profileRoot(provider.id), profileId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'teamyra-profile.json'), JSON.stringify({
+    name, provider: provider.id, enabled: true, priority: 100, createdAt: new Date().toISOString()
+  }, null, 2), 'utf8');
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  if (provider.id === 'chatgpt-web') await ensureChatgptProvider(profileId);
+  return { ok: true, provider: provider.id, profileId, name, loginReady: true };
+}
+
+async function desktopUpdateAccount(providerId, profileId, patch = {}) {
+  const provider = providerById(providerId);
+  if (!provider) throw new Error('Unknown provider');
+  const dir = managedProfileDir(providerId, profileId);
+  if (!dir) return { ok: false, reason: 'managed-profile-not-found' };
+  const file = path.join(dir, 'teamyra-profile.json');
+  let meta = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) meta = parsed;
+  } catch {}
+  if ('name' in patch) {
+    const name = String(patch.name || '').trim();
+    if (!name || name.length > 80) throw new Error('Invalid account name');
+    meta.name = name;
+  }
+  if ('enabled' in patch) meta.enabled = patch.enabled !== false;
+  if ('priority' in patch) {
+    const priority = Number.parseInt(patch.priority, 10);
+    if (!Number.isFinite(priority) || priority < 0 || priority > 10000) throw new Error('Invalid priority');
+    meta.priority = priority;
+  }
+  for (const key of ['model', 'effort']) {
+    if (!(key in patch)) continue;
+    const value = safeSettingToken(patch[key], key, key === 'model' ? 120 : 32);
+    if (value) meta[key] = value;
+    else delete meta[key];
+  }
+  if ('permissionMode' in patch) {
+    const value = String(patch.permissionMode || '').trim();
+    const allowed = new Set(['', 'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']);
+    if (!allowed.has(value)) throw new Error('Invalid permission mode');
+    if (providerId !== 'claude' || !value) delete meta.permission_mode;
+    else meta.permission_mode = value;
+  }
+  meta.provider = providerId;
+  meta.updatedAt = new Date().toISOString();
+  if (!meta.createdAt) meta.createdAt = meta.updatedAt;
+  fs.writeFileSync(file, JSON.stringify(meta, null, 2), 'utf8');
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return { ok: true, provider: providerId, profileId, ...meta };
+}
+
+async function dispatchDesktopControl(action, payload = {}) {
+  if (action === 'provider.list') return providersCached(true);
+  if (action === 'account.create') return desktopCreateAccount(payload.provider, payload.name);
+  if (action === 'account.update') return desktopUpdateAccount(payload.provider, payload.profile_id, payload.patch || {});
+  if (!action.startsWith('chatgpt.')) throw new Error('Unsupported desktop control action');
+
+  const cmd = action.slice('chatgpt.'.length);
+  const profileId = String(payload.profile_id || 'web');
+  const provider = await ensureChatgptProvider(profileId);
+  if (cmd === 'status') return provider.refreshStatus();
+  if (cmd === 'open') {
+    activeChatgptProfileId = profileId;
+    for (const [id, other] of chatgptProviders) other.setVisible(id === profileId);
+    return provider.open();
+  }
+  if (cmd === 'close') return provider.close();
+  if (cmd === 'reload') return provider.reload();
+  if (cmd === 'reconnect') return provider.reconnect();
+  if (cmd === 'new_chat') return provider.createConversation();
+  if (cmd === 'stop') return provider.stopGeneration();
+  if (cmd === 'send') return provider.sendTask(String(payload.text || ''));
+  if (cmd === 'conversation') return provider.getCurrentConversation();
+  if (cmd === 'open_conversation') return provider.openConversation(payload.value);
+  if (cmd === 'visible') {
+    activeChatgptProfileId = profileId;
+    provider.setVisible(payload.visible === true);
+    if (payload.visible === true) {
+      for (const [id, other] of chatgptProviders) if (id !== profileId) other.setVisible(false);
+    }
+    return provider.getStatus();
+  }
+  if (cmd === 'bounds') return provider.setBounds(payload.bounds || {});
+  if (cmd === 'workspace_status') return provider.workspaceBridge.status();
+  if (cmd === 'workspace_configure') return provider.workspaceBridge.configure(String(payload.workspace || ''), payload.permissions || {});
+  if (cmd === 'changes') return provider.workspaceBridge.changes();
+  if (cmd === 'revert') {
+    if (payload.confirm !== true) throw new Error('Revert requires explicit confirmation');
+    return provider.workspaceBridge.execute('git.restore', {
+      paths: Array.isArray(payload.paths) ? payload.paths : ['.'], staged: true
+    }, true);
+  }
+  if (cmd === 'attach_file') return provider.attachFile(String(payload.file_path || ''));
+  throw new Error('Unsupported ChatGPT control action');
+}
+
+async function processDesktopControlRequests() {
+  fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
+  const files = fs.readdirSync(DESKTOP_CONTROL_DIR).filter(name => name.endsWith('.request.json')).slice(0, 20);
+  for (const name of files) {
+    const requestPath = path.join(DESKTOP_CONTROL_DIR, name);
+    const responsePath = requestPath.replace(/\.request\.json$/, '.response.json');
+    let req = null;
+    try { req = JSON.parse(fs.readFileSync(requestPath, 'utf8')); } catch {}
+    if (!req?.id || !req?.action) {
+      try { fs.unlinkSync(requestPath); } catch {}
+      continue;
+    }
+    try {
+      const result = await dispatchDesktopControl(String(req.action), req.payload || {});
+      fs.writeFileSync(responsePath, JSON.stringify({ id: req.id, ok: true, result }), 'utf8');
+    } catch (error) {
+      fs.writeFileSync(responsePath, JSON.stringify({ id: req.id, ok: false, error: String(error?.message || error) }), 'utf8');
+    }
+    try { fs.unlinkSync(requestPath); } catch {}
+  }
+}
+
+function startDesktopControlLoop() {
+  if (desktopControlTimer) return;
+  fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
+  desktopControlTimer = setInterval(() => processDesktopControlRequests().catch(() => {}), 150);
+  desktopControlTimer.unref?.();
+}
+
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
@@ -1079,6 +1219,7 @@ if (!gotSingleInstanceLock) {
     ensureWindowsShortcutIdentity();
     const background = process.argv.includes('--background');
     createWindow(background);
+    startDesktopControlLoop();
     if (background) scheduleDesktopIdleExit();
     ensureTeamyraMcp().then(() => {
       mcpBootError = null;
@@ -1099,6 +1240,8 @@ if (!gotSingleInstanceLock) {
 app.on('before-quit', () => {
   isQuitting = true;
   clearDesktopIdleExit();
+  if (desktopControlTimer) clearInterval(desktopControlTimer);
+  desktopControlTimer = null;
   stopOwnedMcp();
 });
 

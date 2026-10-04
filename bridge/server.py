@@ -846,10 +846,63 @@ def prepare_handoff_record(source_job_id, target_worker, payload):
     return record, source, terminal_id
 
 
+
+
+def desktop_control(action, payload=None, timeout_seconds=20):
+    control = ROOT / ".teamyra-desktop" / "control"
+    control.mkdir(parents=True, exist_ok=True)
+    request_id = uuid.uuid4().hex
+    request_file = control / f"{request_id}.request.json"
+    response_file = control / f"{request_id}.response.json"
+    body = {"id": request_id, "action": str(action), "payload": payload or {}, "created": time.time()}
+    request_file.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    deadline = time.time() + max(1, min(float(timeout_seconds or 20), 60))
+    try:
+        while time.time() < deadline:
+            if response_file.exists():
+                data = json.loads(response_file.read_text(encoding="utf-8"))
+                if data.get("ok") is not True:
+                    raise ValueError(str(data.get("error") or "desktop control failed"))
+                return data.get("result")
+            time.sleep(0.05)
+        raise TimeoutError("TEAMYRA Desktop did not answer the control request")
+    finally:
+        try: request_file.unlink(missing_ok=True)
+        except Exception: pass
+        try: response_file.unlink(missing_ok=True)
+        except Exception: pass
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
 TOOLS = [
+    {"name": "provider_list", "description": "List TEAMYRA providers/accounts as seen by the desktop app, including ChatGPT, Codex, Claude and Antigravity profiles.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
+     "inputSchema": {"type": "object", "properties": {
+         "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity"]},
+         "name": {"type": "string"}},
+         "required": ["provider"], "additionalProperties": False}},
+    {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode.",
+     "inputSchema": {"type": "object", "properties": {
+         "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity"]},
+         "profile_id": {"type": "string"},
+         "patch": {"type": "object"}},
+         "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},
+    {"name": "chatgpt_control", "description": "Control a Normal ChatGPT desktop profile explicitly. Delegated jobs stay background-only; use visible/open only when the user intentionally wants to inspect ChatGPT.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["status", "open", "close", "reload", "reconnect", "new_chat", "stop", "send", "conversation", "open_conversation", "visible", "bounds", "workspace_status", "workspace_configure", "changes", "revert", "attach_file"]},
+         "profile_id": {"type": "string", "default": "web"},
+         "text": {"type": "string"},
+         "value": {"type": "string"},
+         "visible": {"type": "boolean"},
+         "bounds": {"type": "object"},
+         "workspace": {"type": "string"},
+         "permissions": {"type": "object"},
+         "paths": {"type": "array", "items": {"type": "string"}},
+         "confirm": {"type": "boolean", "default": False},
+         "file_path": {"type": "string"}},
+         "required": ["action"], "additionalProperties": False}},
     {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
@@ -1139,6 +1192,24 @@ TOOLS = [
 
 
 def tool_call(name, a):
+    if name == "provider_list":
+        return desktop_control("provider.list", {})
+    if name == "agent_account_create":
+        return desktop_control("account.create", {
+            "provider": a["provider"],
+            "name": a.get("name"),
+        })
+    if name == "agent_account_update":
+        return desktop_control("account.update", {
+            "provider": a["provider"],
+            "profile_id": a["profile_id"],
+            "patch": a.get("patch") or {},
+        })
+    if name == "chatgpt_control":
+        action = str(a["action"])
+        payload = dict(a)
+        payload.pop("action", None)
+        return desktop_control("chatgpt." + action, payload)
     if name == "timeline_list":
         return observability.timeline(
             ROOT,
