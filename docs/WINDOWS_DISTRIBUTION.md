@@ -35,7 +35,7 @@ runtime/
 
 Provider credentials remain in the provider's normal native home or in TEAMYRA's isolated runtime profiles. They must never be bundled into the installer.
 
-The desktop process also owns the localhost TEAMYRA MCP lifecycle. On startup it ensures `http://127.0.0.1:8787/mcp` is available. Closing the main window hides the UI instead of terminating the process, so detached jobs, MCP access, and embedded-agent state continue in the background. Starting TEAMYRA again focuses the already-running single instance. Explicit application quit/update shutdowns stop the MCP child process that the desktop started.
+The desktop starts a tiny detached wake gateway on `http://127.0.0.1:8787/mcp`. The gateway lazily starts the heavy MCP core on internal port 8788 for real MCP requests, keeps it alive while TEAMYRA jobs are active, and cleanly shuts it down after 10 idle minutes. Closing the main window hides it first; if the UI remains hidden and there are no active jobs, terminals, or ChatGPT work for 10 minutes, Electron exits while the lightweight wake gateway remains available.
 
 ## Packaged core
 

@@ -323,8 +323,12 @@ async function refreshAgents() {
   const mcpConnected = serviceOnline
     ? ['claude', 'codex', 'antigravity'].filter(id => currentMcpConnections?.providers?.[id]?.connected === true).length
     : 0;
-  $('#agentSummary').textContent = connected + ' agents · ' + mcpConnected + ' MCP · ' + (serviceOnline ? 'Teamyra online' : 'MCP offline');
-  $('#agentSummary').title = currentMcpConnections?.bootError || currentMcpConnections?.endpoint || '';
+  const coreAwake = currentMcpConnections?.service?.backendRunning === true;
+  const runtimeLabel = !serviceOnline ? 'Wake offline' : coreAwake ? 'Core active' : 'Core sleeping';
+  $('#agentSummary').textContent = connected + ' agents · ' + mcpConnected + ' MCP · ' + runtimeLabel;
+  const idleSeconds = Number(currentMcpConnections?.service?.idleSeconds) || 600;
+  $('#agentSummary').title = currentMcpConnections?.bootError ||
+    (currentMcpConnections?.endpoint + ' · auto-sleep after ' + Math.round(idleSeconds / 60) + ' min idle');
   $('#agentGrid').innerHTML = currentProviders.map(agentCardHtml).join('');
 
   $('#agentGrid').querySelectorAll('[data-provider][data-profile]').forEach(button => {

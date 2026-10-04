@@ -6,7 +6,7 @@ TEAMYRA exposes one local MCP endpoint to supported coding agents:
 http://127.0.0.1:8787/mcp
 ```
 
-When the TEAMYRA desktop app starts, it now starts this local MCP endpoint automatically. Closing the desktop window hides the UI while TEAMYRA keeps running in the background, so active jobs and the MCP endpoint continue to work. Launching TEAMYRA again restores the existing process instead of starting a duplicate instance.
+When TEAMYRA Desktop starts, it ensures a lightweight localhost wake gateway is available at this endpoint. The heavy MCP core is not kept alive unnecessarily: the first real MCP POST from Claude/Codex/Antigravity wakes it, active jobs keep it awake, and after 10 minutes without MCP activity and without active TEAMYRA jobs the core shuts down cleanly. Health/status checks do not wake the core. The hidden Electron UI also exits after 10 quiet minutes when no task, terminal, or ChatGPT job is active; the wake gateway remains available so the next coding-agent call can start the core again.
 
 For development or manual troubleshooting, the endpoint can still be started directly:
 
@@ -119,3 +119,12 @@ Once connected, agents should prefer the canonical `teamyra.*` tools:
 7. TEAMYRA-managed worktree diff/rebase/merge/discard for isolated Git changes.
 
 Legacy un-namespaced MCP aliases remain available for compatibility, but new integrations should use `teamyra.*`.
+
+## Idle / wake policy
+
+- Public endpoint: `127.0.0.1:8787/mcp` (lightweight wake gateway).
+- Internal heavy core: `127.0.0.1:8788/mcp`, started on demand.
+- Default heavy-core idle timeout: 600 seconds (`TEAMYRA_IDLE_SECONDS`).
+- Default hidden-desktop idle timeout: 600 seconds (`TEAMYRA_DESKTOP_IDLE_SECONDS`).
+- Active TEAMYRA jobs prevent core sleep. Active desktop jobs, terminals, or ChatGPT work prevent hidden UI exit.
+- The gateway `/healthz` endpoint reports awake/sleep state without waking the core.
