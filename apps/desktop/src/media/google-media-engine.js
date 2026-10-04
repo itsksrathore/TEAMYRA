@@ -109,6 +109,8 @@ class GoogleMediaProfileRuntime {
       visual_busy: this.visualConsumer.busy,
       music_busy: this.musicConsumer.busy,
       current_url: visualStatus.url || musicStatus.url || '',
+      visual_url: visualStatus.url || '',
+      music_url: musicStatus.url || '',
       detail: connected ? 'Google Media account connected' : 'Google sign-in required'
     };
   }
@@ -137,15 +139,23 @@ class GoogleMediaProfileRuntime {
   async showMusic() {
     this.visual.setVisible(false);
     await this.music.open();
-    const musicStatus = await this.music.status().catch(() => ({ signedIn: false }));
+    const musicStatus = await this.music.status().catch(() => ({ signedIn: false, url: this.music.view?.webContents?.getURL?.() || '' }));
     let authorization = null;
     if (musicStatus.signedIn !== true) {
       authorization = await this.music.adapter?.beginGoogleAuthorization().catch(() => ({
         authorized: false, started: false, needs_user_action: true
       }));
     }
-    const status = await this.refreshConnection();
-    return { ...status, music_authorization: authorization };
+    const currentUrl = this.music.view?.webContents?.getURL?.() || musicStatus.url || '';
+    return {
+      profile_id: this.profileId,
+      connected: true,
+      music_signed_in: musicStatus.signedIn === true,
+      music_needs_user_auth: musicStatus.signedIn !== true,
+      music_authorization: authorization,
+      music_url: currentUrl,
+      visible: true
+    };
   }
 
   close() {
