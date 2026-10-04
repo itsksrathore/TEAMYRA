@@ -71,7 +71,8 @@ const {
 let pty = null;
 try { pty = require('@lydell/node-pty'); } catch (error) { startupLog('pty-unavailable', { error: String(error.message || error) }); }
 const TERMINALS = new Map();
-let chatgptProvider = null;
+const chatgptProviders = new Map();
+let activeChatgptProfileId = 'web';
 let mainWindow = null;
 let isQuitting = false;
 let mcpBootError = null;
@@ -155,36 +156,40 @@ async function providersCached(force = false) {
   if (PROVIDER_CACHE.pending) return PROVIDER_CACHE.pending;
   PROVIDER_CACHE.pending = detectProviders()
     .then(async data => {
-      if (chatgptProvider) {
-        try {
-          const chatStatus = await chatgptProvider.getStatus();
-          const provider = data.find(item => item.id === 'chatgpt-web');
-          if (provider) {
-            const statuses = await Promise.all((provider.profiles || []).map(profile =>
-              chatgptProvider.profileSessionStatus(profile.id).catch(() => ({ signedIn: false }))
-            ));
-            const signedById = new Map(statuses.map(item => [item.profileId, item.signedIn === true]));
-            provider.profiles = (provider.profiles || []).map(profile => ({
-              ...profile,
-              signedIn: profile.id === chatStatus.profileId
-                ? (chatStatus.automationReady === true || signedById.get(profile.id) === true)
-                : signedById.get(profile.id) === true
-            }));
-            provider.signedIn = provider.profiles.some(profile => profile.signedIn);
-            provider.workerReady = chatStatus.workerReady === true;
-            provider.activeProfileId = chatStatus.profileId || 'web';
-            provider.status = chatStatus.challenged
-              ? 'User verification required'
-              : chatStatus.automationReady
-                ? 'Embedded session active'
-                : chatStatus.loginVisible
-                  ? 'Sign-in required'
-                  : chatStatus.connected
-                    ? 'Embedded page connected'
-                    : 'Open inside TEAMYRA to connect';
-          }
-        } catch {}
-      }
+      try {
+        await syncChatgptProviders();
+        const provider = data.find(item => item.id === 'chatgpt-web');
+        if (provider) {
+          const statuses = await Promise.all((provider.profiles || []).map(async profile => {
+            const instance = await ensureChatgptProvider(profile.id);
+            const [sessionStatus, liveStatus] = await Promise.all([
+              instance.profileSessionStatus(profile.id).catch(() => ({ signedIn: false })),
+              instance.getStatus().catch(() => ({ automationReady: false, workerReady: false }))
+            ]);
+            return {
+              profileId: profile.id,
+              signedIn: sessionStatus.signedIn === true || liveStatus.automationReady === true,
+              workerReady: liveStatus.workerReady === true,
+              busy: liveStatus.busy === true
+            };
+          }));
+          const byId = new Map(statuses.map(item => [item.profileId, item]));
+          provider.profiles = (provider.profiles || []).map(profile => ({
+            ...profile,
+            signedIn: byId.get(profile.id)?.signedIn === true,
+            workerReady: byId.get(profile.id)?.workerReady === true,
+            busy: byId.get(profile.id)?.busy === true
+          }));
+          provider.signedIn = provider.profiles.some(profile => profile.signedIn);
+          provider.workerReady = provider.profiles.some(profile => profile.workerReady);
+          provider.activeProfileId = activeChatgptProfileId;
+          provider.status = provider.workerReady
+            ? 'ChatGPT workers ready'
+            : provider.signedIn
+              ? 'Signed in; worker view will initialize on demand'
+              : 'Open inside TEAMYRA to sign in';
+        }
+      } catch {}
       PROVIDER_CACHE = { at: Date.now(), data, pending: null };
       return data;
     })
@@ -193,6 +198,57 @@ async function providersCached(force = false) {
       throw error;
     });
   return PROVIDER_CACHE.pending;
+}
+
+function chatgptProfileIds() {
+  const ids = ['web'];
+  const root = path.join(PROFILES_ROOT, 'chatgpt-web');
+  try {
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (entry.isDirectory()) ids.push(entry.name);
+    }
+  } catch {}
+  return [...new Set(ids)];
+}
+
+async function ensureChatgptProvider(profileId = 'web') {
+  const id = String(profileId || 'web');
+  let provider = chatgptProviders.get(id);
+  if (provider) return provider;
+  if (!mainWindow || mainWindow.isDestroyed()) throw new Error('TEAMYRA window is unavailable');
+  provider = new ChatGPTWebProvider({ window: mainWindow, runtimeRoot: ROOT, profileId: id });
+  chatgptProviders.set(id, provider);
+  try {
+    await provider.initialize();
+    return provider;
+  } catch (error) {
+    chatgptProviders.delete(id);
+    try { provider.destroy(); } catch {}
+    throw error;
+  }
+}
+
+async function syncChatgptProviders() {
+  const wanted = new Set(chatgptProfileIds());
+  for (const id of wanted) await ensureChatgptProvider(id);
+  for (const [id, provider] of [...chatgptProviders.entries()]) {
+    if (wanted.has(id) || provider.busy) continue;
+    try { provider.destroy(); } catch {}
+    chatgptProviders.delete(id);
+  }
+  if (!chatgptProviders.has(activeChatgptProfileId)) activeChatgptProfileId = 'web';
+  return chatgptProviders;
+}
+
+function activeChatgptProvider() {
+  return chatgptProviders.get(activeChatgptProfileId) || chatgptProviders.get('web') || null;
+}
+
+function destroyChatgptProviders() {
+  for (const provider of chatgptProviders.values()) {
+    try { provider.destroy(); } catch {}
+  }
+  chatgptProviders.clear();
 }
 
 function safeWorkerPart(value) {
@@ -287,7 +343,7 @@ function jobBlocksDesktopSleep(job) {
 function hasActiveDesktopWork() {
   if (TERMINALS.size > 0) return true;
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
-  if (chatgptProvider?.busy === true) return true;
+  if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
   return false;
 }
 
@@ -476,27 +532,24 @@ function createWindow(background = false) {
   setImmediate(async () => {
     if (win.isDestroyed()) return;
     try {
-      chatgptProvider?.destroy();
-      chatgptProvider = new ChatGPTWebProvider({ window: win, runtimeRoot: ROOT });
-      await chatgptProvider.initialize();
+      destroyChatgptProviders();
+      await syncChatgptProviders();
     } catch (error) {
       startupLog('chatgpt-start-failed', { error: String(error?.stack || error) });
-      chatgptProvider?.destroy();
-      chatgptProvider = null;
+      destroyChatgptProviders();
     }
   });
   const webContentsId = win.webContents.id;
   win.on('close', event => {
     if (isQuitting) return;
     event.preventDefault();
-    chatgptProvider?.setVisible(false);
+    for (const provider of chatgptProviders.values()) provider.setVisible(false);
     win.hide();
     scheduleDesktopIdleExit();
   });
   win.webContents.on('destroyed', () => {
     killTerminalsFor(webContentsId);
-    chatgptProvider?.destroy();
-    chatgptProvider = null;
+    destroyChatgptProviders();
     if (mainWindow === win) mainWindow = null;
   });
   return win;
@@ -649,55 +702,72 @@ ipcMain.handle('teamyra:memory-context', (_event, options = {}) =>
   }, { maxBuffer: 12 * 1024 * 1024 })
 );
 
-ipcMain.handle('teamyra:chatgpt-status', () => chatgptProvider?.refreshStatus() || { connected: false });
-ipcMain.handle('teamyra:chatgpt-open', async (_event, profileId = 'web') => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  await chatgptProvider.switchProfile(String(profileId || 'web'));
-  return chatgptProvider.open();
+ipcMain.handle('teamyra:chatgpt-status', async () => {
+  const provider = activeChatgptProvider() || await ensureChatgptProvider(activeChatgptProfileId);
+  return provider.refreshStatus();
 });
-ipcMain.handle('teamyra:chatgpt-close', () => chatgptProvider?.close() || { connected: false });
+ipcMain.handle('teamyra:chatgpt-open', async (_event, profileId = 'web') => {
+  const id = String(profileId || 'web');
+  const provider = await ensureChatgptProvider(id);
+  activeChatgptProfileId = id;
+  for (const [otherId, other] of chatgptProviders) other.setVisible(otherId === id);
+  return provider.open();
+});
+ipcMain.handle('teamyra:chatgpt-close', () => activeChatgptProvider()?.close() || { connected: false });
 ipcMain.handle('teamyra:chatgpt-reload', () => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.reload();
+  const provider = activeChatgptProvider();
+  if (!provider) throw new Error('ChatGPT provider is unavailable');
+  return provider.reload();
 });
 ipcMain.handle('teamyra:chatgpt-reconnect', () => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.reconnect();
+  const provider = activeChatgptProvider();
+  if (!provider) throw new Error('ChatGPT provider is unavailable');
+  return provider.reconnect();
 });
 ipcMain.handle('teamyra:chatgpt-new-chat', () => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.createConversation();
+  const provider = activeChatgptProvider();
+  if (!provider) throw new Error('ChatGPT provider is unavailable');
+  return provider.createConversation();
 });
-ipcMain.handle('teamyra:chatgpt-stop', () => chatgptProvider?.stopGeneration() || { ok: false });
+ipcMain.handle('teamyra:chatgpt-stop', () => activeChatgptProvider()?.stopGeneration() || { ok: false });
 ipcMain.handle('teamyra:chatgpt-send', (_event, text) => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.sendTask(String(text || ''));
+  const provider = activeChatgptProvider();
+  if (!provider) throw new Error('ChatGPT provider is unavailable');
+  return provider.sendTask(String(text || ''));
 });
-ipcMain.handle('teamyra:chatgpt-conversation', () => chatgptProvider?.getCurrentConversation() || {});
+ipcMain.handle('teamyra:chatgpt-conversation', () => activeChatgptProvider()?.getCurrentConversation() || {});
 ipcMain.handle('teamyra:chatgpt-open-conversation', (_event, value) => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.openConversation(value);
+  const provider = activeChatgptProvider();
+  if (!provider) throw new Error('ChatGPT provider is unavailable');
+  return provider.openConversation(value);
 });
 ipcMain.handle('teamyra:chatgpt-visible', (_event, visible) => {
-  chatgptProvider?.setVisible(visible === true);
+  const provider = activeChatgptProvider();
+  if (provider) provider.setVisible(visible === true);
+  if (visible === true) {
+    for (const [id, other] of chatgptProviders) {
+      if (id !== activeChatgptProfileId) other.setVisible(false);
+    }
+  }
   return { ok: true };
 });
 ipcMain.handle('teamyra:chatgpt-bounds', (_event, bounds = {}) => {
-  if (!chatgptProvider) return null;
-  return chatgptProvider.setBounds(bounds);
+  const provider = activeChatgptProvider();
+  if (!provider) return null;
+  return provider.setBounds(bounds);
 });
-ipcMain.handle('teamyra:chatgpt-workspace-status', () => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.workspaceBridge.status();
+ipcMain.handle('teamyra:chatgpt-workspace-status', async () => {
+  const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
+  return provider.workspaceBridge.status();
 });
-ipcMain.handle('teamyra:chatgpt-workspace-configure', (_event, workspace, permissions = {}) => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.workspaceBridge.configure(String(workspace || ''), permissions || {});
+ipcMain.handle('teamyra:chatgpt-workspace-configure', async (_event, workspace, permissions = {}) => {
+  const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
+  return provider.workspaceBridge.configure(String(workspace || ''), permissions || {});
 });
 ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
+  const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
   const dialogOptions = {
-    title: 'Select ChatGPT workspace',
+    title: 'Select default ChatGPT workspace',
     properties: ['openDirectory', 'createDirectory']
   };
   const focused = BrowserWindow.getFocusedWindow();
@@ -705,27 +775,25 @@ ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
     ? await dialog.showOpenDialog(focused, dialogOptions)
     : await dialog.showOpenDialog(dialogOptions);
   if (result.canceled || !result.filePaths[0]) return { cancelled: true };
-  const configured = await chatgptProvider.workspaceBridge.configure(
-    result.filePaths[0],
-    {}
-  );
+  const configured = await provider.workspaceBridge.configure(result.filePaths[0], {});
   return { cancelled: false, ...configured };
 });
-ipcMain.handle('teamyra:chatgpt-changes', () => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.workspaceBridge.changes();
+ipcMain.handle('teamyra:chatgpt-changes', async () => {
+  const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
+  return provider.workspaceBridge.changes();
 });
-ipcMain.handle('teamyra:chatgpt-revert', (_event, paths = ['.'], confirm = false) => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
+ipcMain.handle('teamyra:chatgpt-revert', async (_event, paths = ['.'], confirm = false) => {
+  const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
   if (confirm !== true) throw new Error('Revert requires explicit confirmation');
-  return chatgptProvider.workspaceBridge.execute('git.restore', {
+  return provider.workspaceBridge.execute('git.restore', {
     paths: Array.isArray(paths) ? paths : ['.'],
     staged: true
   }, true);
 });
 ipcMain.handle('teamyra:chatgpt-attach-file', (_event, filePath) => {
-  if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
-  return chatgptProvider.attachFile(String(filePath || ''));
+  const provider = activeChatgptProvider();
+  if (!provider) throw new Error('ChatGPT provider is unavailable');
+  return provider.attachFile(String(filePath || ''));
 });
 
 ipcMain.handle('teamyra:worktrees', () => callCore('worktree.list'));

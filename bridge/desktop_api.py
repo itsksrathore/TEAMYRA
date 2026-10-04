@@ -164,6 +164,16 @@ def handle(action, payload):
             actor="chatgpt-normal",
             confirm=payload.get("confirm") is True,
         )
+    if action == "chatgpt.tool.execute-in-workspace":
+        return workspace_tools.WorkspaceToolService(ROOT).execute_in_workspace(
+            payload.get("workspace"),
+            payload.get("tool"),
+            payload.get("args"),
+            permissions=payload.get("permissions"),
+            token=_bridge_token(payload),
+            actor="chatgpt-normal",
+            confirm=payload.get("confirm") is True,
+        )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)
     if action == "worktree.status":

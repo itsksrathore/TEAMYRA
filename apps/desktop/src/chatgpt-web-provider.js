@@ -34,13 +34,14 @@ function safePopupUrl(url) {
 }
 
 class ChatGPTWebProvider {
-  constructor({ window, runtimeRoot }) {
+  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID }) {
     this.window = window;
     this.runtimeRoot = runtimeRoot;
     this.stateRoot = path.join(runtimeRoot, 'chatgpt');
     this.statusFile = path.join(this.stateRoot, 'status.json');
-    this.activeProfileId = DEFAULT_CHATGPT_PROFILE_ID;
-    this.workerConversationFile = path.join(this.stateRoot, 'worker-conversation.json');
+    this.activeProfileId = String(profileId || DEFAULT_CHATGPT_PROFILE_ID);
+    this.fixedProfileId = this.activeProfileId;
+    this.workerConversationFile = this.profileConversationFile(this.activeProfileId);
     this.sessionManager = new ChatGPTSessionManager(this.activeProfileId);
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
@@ -117,25 +118,7 @@ class ChatGPTWebProvider {
 
   async switchProfile(profileId = DEFAULT_CHATGPT_PROFILE_ID) {
     const next = String(profileId || DEFAULT_CHATGPT_PROFILE_ID).trim() || DEFAULT_CHATGPT_PROFILE_ID;
-    if (next === this.activeProfileId) return this.getStatus();
-    if (this.busy) throw new Error('Cannot switch ChatGPT account while a task is running');
-
-    this.closeEmbeddedPopup();
-    if (this.view && !this.view.webContents.isDestroyed()) {
-      try { this.window.contentView.removeChildView(this.view); } catch {}
-      try { this.view.webContents.close(); } catch {}
-    }
-    this.view = null;
-    this.automation = null;
-    this.interactionCssKey = null;
-    this.loaded = false;
-    this.lastProbe = null;
-    this.activeProfileId = next;
-    this.workerConversationFile = this.profileConversationFile(next);
-    this.sessionManager = new ChatGPTSessionManager(next);
-    this.sessionManager.initialize();
-    this.writeStatus({ active_profile_id: next, automation_ready: false, worker_ready: false, connected: false });
-    if (this.visible) await this.open();
+    if (next !== this.fixedProfileId) throw new Error('This ChatGPT worker is bound to a different account');
     return this.getStatus();
   }
 
@@ -335,7 +318,7 @@ class ChatGPTWebProvider {
       visible: this.visible,
       loaded: this.loaded,
       automationReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged),
-      workerReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged && workspace?.available),
+      workerReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged),
       loginVisible: Boolean(this.lastProbe?.loginVisible),
       challenged: Boolean(this.lastProbe?.challenged),
       url: this.view && !this.view.webContents.isDestroyed() ? this.view.webContents.getURL() : '',
@@ -541,11 +524,10 @@ class ChatGPTWebProvider {
     }
     candidates.sort((a, b) => (a.meta.created || 0) - (b.meta.created || 0));
     if (!candidates.length) return;
-    const candidate = candidates[0];
-    const profileId = String(candidate.meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID);
-    if (profileId !== this.activeProfileId) {
-      await this.switchProfile(profileId);
-    }
+    const candidate = candidates.find(item =>
+      String(item.meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) === this.activeProfileId
+    );
+    if (!candidate) return;
     if (!this.view || this.view.webContents.isDestroyed()) {
       await this.open();
     }
@@ -577,27 +559,24 @@ class ChatGPTWebProvider {
     try {
       const spec = JSON.parse(fs.readFileSync(path.join(jobDir, 'spec.json'), 'utf8'));
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
-      const workspaceState = await this.workspaceBridge.status();
-      if (!workspaceState?.available) throw new Error('ChatGPT worker has no selected workspace');
-      const canonical = value => {
-        const resolved = path.resolve(value || '');
-        return fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved);
-      };
-      const selected = canonical(workspaceState.workspace || '');
-      const requested = canonical(spec.cwd || '');
-      const sameWorkspace = process.platform === 'win32'
-        ? selected.toLowerCase() === requested.toLowerCase()
-        : selected === requested;
-      if (!sameWorkspace) {
-        throw new Error('Delegated task workspace does not match the selected ChatGPT workspace');
+      const workspaceState = await this.workspaceBridge.status().catch(() => null);
+      const assignedWorkspace = path.resolve(spec.cwd || '');
+      if (!assignedWorkspace || !fs.existsSync(assignedWorkspace) || !fs.statSync(assignedWorkspace).isDirectory()) {
+        throw new Error('Delegated task workspace is unavailable: ' + assignedWorkspace);
       }
+      const taskPermissions = workspaceState?.permissions || {
+        read: true, search: true, create: true, write: true, git: true, terminal: true,
+        outside_workspace: false, destructive_without_confirmation: false
+      };
 
       const requestedConversation = spec.session_id
         ? { conversationId: spec.session_id }
-        : this.loadWorkerConversation();
+        : null;
       if (requestedConversation?.conversationId || requestedConversation?.url) {
         await this.openConversation(requestedConversation.url || requestedConversation.conversationId);
       } else {
+        // New delegated jobs are isolated by default. Only an explicit resume
+        // session may reuse an earlier worker conversation.
         await this.createConversation();
       }
       await this.setInteractionLocked(true);
@@ -665,7 +644,13 @@ class ChatGPTWebProvider {
           if (spec.write === false && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
             throw new Error('This delegated job is read-only; write, terminal, and mutating Git tools are disabled');
           }
-          toolResult = await this.workspaceBridge.execute(request.tool, request.args, false);
+          toolResult = await this.workspaceBridge.executeInWorkspace(
+            assignedWorkspace,
+            request.tool,
+            request.args,
+            taskPermissions,
+            false
+          );
         } catch (error) {
           toolResult = { ok: false, error: String(error?.message || error) };
         }

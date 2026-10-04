@@ -334,6 +334,11 @@ class WorkspaceToolService:
         scoped = Path(str(workspace or "")).expanduser().resolve()
         if not scoped.exists() or not scoped.is_dir():
             raise WorkspaceToolError("workspace must be an existing directory")
+        if scoped == Path(scoped.anchor).resolve() or scoped == Path.home().resolve():
+            raise PermissionError("workspace is too broad; assign a project directory")
+        for blocked in self._sensitive_roots():
+            if scoped == blocked or _is_relative_to(scoped, blocked):
+                raise PermissionError("system or credential directories cannot be assigned as workspaces")
         scoped_permissions = _safe_permissions(permissions)
         scoped_permissions["outside_workspace"] = False
         return self._execute_scoped(

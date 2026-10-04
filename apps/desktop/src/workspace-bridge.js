@@ -73,6 +73,19 @@ class WorkspaceBridge {
     }));
   }
 
+  executeInWorkspace(workspace, tool, args = {}, permissions = null, confirm = false) {
+    return callCore('chatgpt.tool.execute-in-workspace', {
+      workspace: String(workspace || ''),
+      tool: String(tool || ''),
+      args: args || {},
+      permissions: permissions && typeof permissions === 'object' ? permissions : undefined,
+      confirm: confirm === true
+    }, this.coreOptions({
+      timeout: tool === 'terminal.run' ? 135000 : 45000,
+      maxBuffer: 12 * 1024 * 1024
+    }));
+  }
+
   async changes() {
     const [status, diff, stagedDiff] = await Promise.all([
       this.execute('git.status', {}),

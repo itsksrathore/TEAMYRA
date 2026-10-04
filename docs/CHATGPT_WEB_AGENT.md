@@ -32,29 +32,28 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled.
 - Normal ChatGPT browsing and authentication stay inside the sandboxed embedded `WebContentsView`; TEAMYRA does not open an external browser for ChatGPT sign-in.
 - The default account keeps the backward-compatible `persist:teamyra-chatgpt-profile` partition. Extra ChatGPT accounts use their own persistent partitions derived from a safe profile ID, so cookies/local storage and logins remain isolated.
-- The Agents shelf can create additional ChatGPT accounts. Opening an account switches the embedded view to that account's isolated partition, and delegated jobs use the job's `profile_id` to select the correct account automatically.
+- The Agents shelf can create additional ChatGPT accounts. Each account owns an isolated persistent Chromium partition and its own background worker view, so multiple Normal ChatGPT accounts can execute delegated jobs concurrently instead of waiting on one shared browser.
+- Every delegated job carries its own `project_path`/workspace assignment. TEAMYRA sandboxes that job's filesystem, Git, and terminal tools to the assigned project directory, so an agent may work in a different approved folder without changing the UI's default workspace first.
+- New delegated jobs start in a fresh ChatGPT conversation by default; only explicit resume/handoff jobs reuse a prior conversation session.
 - Credentials are entered directly into the ChatGPT/OpenAI authentication pages rendered by Chromium; TEAMYRA does not store passwords.
 - Unapproved popup/navigation destinations remain denied.
 - CAPTCHA/human-verification pages are surfaced to the user. TEAMYRA does not attempt to bypass them.
 
 ## Worker routing
 
-The core worker ID is `chatgpt-normal`, provider `chatgpt-web`.
+The default worker ID is `chatgpt-normal`, provider `chatgpt-web`. Extra accounts are discovered as separate `chatgpt-<profile-id>` workers.
 
-A desktop heartbeat is written to runtime state. Core routing considers the worker ready only while:
-1. the heartbeat is fresh;
-2. the embedded page exposes an interactive ChatGPT prompt; and
-3. a valid Teamyra workspace bridge is selected.
+Each profile writes its own readiness entry into shared runtime status. Core routing can queue work for any signed-in profile; its background view initializes on demand. The task's `project_path` is the assigned workspace for that job.
 
 If TEAMYRA Desktop is closed, the worker becomes unavailable rather than pretending a headless browser worker exists.
 
 ChatGPT jobs use the normal TEAMYRA job store, transcripts, events, cancellation, failover lineage, observability, and worktree paths. The desktop provider consumes jobs in `waiting_for_desktop` state. While a delegated job is running, manual input into the embedded page and workspace-changing controls are temporarily locked to prevent the user from accidentally switching the conversation underneath the automation. The Stop control writes the normal TEAMYRA job cancellation signal and also stops current web generation.
 
-## Dedicated worker conversation
+## Worker conversations
 
-TEAMYRA maintains one runtime-only worker conversation record. A new worker conversation is created when none exists; its ChatGPT conversation ID/URL is remembered after a successful response. Existing `job_message` follow-ups carry the session ID so the same ChatGPT conversation can be reopened.
+New delegated jobs start in fresh conversations so unrelated tasks and parallel agents do not inherit stale context. TEAMYRA records the successful conversation ID/URL as runtime metadata. Explicit resume/follow-up jobs carry a session ID and may reopen that exact conversation.
 
-The conversation record is runtime state only and contains no password.
+Conversation metadata is runtime state only and contains no password.
 
 ## Shared local tools
 
@@ -87,11 +86,12 @@ MCP callers use the same implementation through `teamyra.workspace_tool`; they d
 Every path is canonicalized before use.
 
 By default:
-- relative paths resolve against the selected workspace;
-- `..\..\` traversal outside the workspace is denied;
-- absolute paths outside the workspace are denied;
-- filesystem/drive roots and the user's home root cannot be selected as a workspace;
-- outside-workspace access is disabled in the current implementation;
+- delegated jobs resolve relative paths against that task's assigned `project_path`; interactive ChatGPT tools use the UI-selected default workspace;
+- an orchestrating agent can assign a different existing project directory when it starts a task;
+- `..\..\` traversal outside the assigned workspace is denied;
+- absolute paths outside the assigned workspace are denied;
+- filesystem/drive roots and the user's home root cannot be assigned as a workspace;
+- access beyond the assigned workspace requires assigning that other project location as the task workspace;
 - TEAMYRA runtime/profile stores and common credential/provider/browser stores remain blocked even when they are physically nested under the selected workspace;
 - credential-like files such as `.env`, provider auth JSON, private key/certificate files, and SSH private-key names are blocked (example/sample env templates remain usable).
 
