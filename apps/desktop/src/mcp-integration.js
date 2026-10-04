@@ -10,6 +10,7 @@ const { ROOT, SOURCE_ROOT, PACKAGED_CORE, resolvePython } = require('./core-api'
 const MCP_HOST = '127.0.0.1';
 const MCP_PORT = 8787;
 const MCP_ENDPOINT = `http://${MCP_HOST}:${MCP_PORT}/mcp`;
+const MCP_HEALTH_PATH = '/healthz';
 const ANTIGRAVITY_CONFIG = process.env.TEAMYRA_ANTIGRAVITY_MCP_CONFIG ||
   path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
 
@@ -39,24 +40,14 @@ function execFilePromise(file, args, options = {}) {
   });
 }
 
-function mcpRequest(method, params = {}, timeout = 1200) {
-  return new Promise((resolve, reject) => {
-    const payload = Buffer.from(JSON.stringify({
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method,
-      params
-    }));
+function gatewayHealth(timeout = 1000) {
+  return new Promise((resolve) => {
     const req = http.request({
       host: MCP_HOST,
       port: MCP_PORT,
-      path: '/mcp',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/event-stream',
-        'Content-Length': payload.length
-      },
+      path: MCP_HEALTH_PATH,
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
       timeout
     }, response => {
       const chunks = [];
@@ -64,33 +55,28 @@ function mcpRequest(method, params = {}, timeout = 1200) {
       response.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf8');
         if (response.statusCode !== 200) {
-          reject(new Error(`TEAMYRA MCP returned HTTP ${response.statusCode}: ${raw.slice(0, 300)}`));
+          resolve(null);
           return;
         }
         try {
-          resolve(JSON.parse(raw));
+          const data = JSON.parse(raw);
+          resolve(data?.service === 'teamyra-wake-gateway' ? data : null);
         } catch {
-          reject(new Error('TEAMYRA MCP returned invalid JSON'));
+          resolve(null);
         }
       });
     });
-    req.on('timeout', () => req.destroy(new Error('TEAMYRA MCP readiness timeout')));
-    req.on('error', reject);
-    req.end(payload);
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on('error', () => resolve(null));
+    req.end();
   });
 }
 
 async function isTeamyraMcpReady() {
-  try {
-    const response = await mcpRequest('initialize', {
-      protocolVersion: '2025-11-25',
-      capabilities: {},
-      clientInfo: { name: 'teamyra-desktop', version: '0.1.0' }
-    });
-    return response?.result?.serverInfo?.name === 'teamyra';
-  } catch {
-    return false;
-  }
+  return Boolean(await gatewayHealth());
 }
 
 async function spawnTeamyraMcp() {
@@ -99,28 +85,24 @@ async function spawnTeamyraMcp() {
 
   if (PACKAGED_CORE && fs.existsSync(PACKAGED_CORE)) {
     file = PACKAGED_CORE;
-    args = ['mcp', 'http', '--host', MCP_HOST, '--port', String(MCP_PORT)];
+    args = ['__wake-gateway'];
   } else {
     const python = await resolvePython();
     file = python.file;
     args = [
       ...python.prefix,
-      path.join(SOURCE_ROOT, 'bridge', 'teamyra_cli.py'),
-      'mcp',
-      'http',
-      '--host',
-      MCP_HOST,
-      '--port',
-      String(MCP_PORT)
+      path.join(SOURCE_ROOT, 'bridge', 'wake_gateway.py')
     ];
   }
 
   const child = spawn(file, args, {
     windowsHide: true,
     stdio: 'ignore',
+    detached: true,
     env: {
       ...process.env,
       TEAMYRA_ROOT: ROOT,
+      TEAMYRA_IDLE_SECONDS: process.env.TEAMYRA_IDLE_SECONDS || '600',
       ...(PACKAGED_CORE && fs.existsSync(PACKAGED_CORE) ? { TEAMYRA_CORE_EXE: PACKAGED_CORE } : {})
     }
   });
@@ -131,24 +113,41 @@ async function spawnTeamyraMcp() {
   child.once('error', () => {
     if (ownedMcpProcess === child) ownedMcpProcess = null;
   });
+  child.unref?.();
   return child;
 }
 
 async function ensureTeamyraMcp() {
-  if (await isTeamyraMcpReady()) {
-    return { ok: true, running: true, endpoint: MCP_ENDPOINT, owned: Boolean(ownedMcpProcess) };
+  const existing = await gatewayHealth();
+  if (existing) {
+    return {
+      ok: true,
+      running: true,
+      endpoint: MCP_ENDPOINT,
+      backendRunning: existing.backend_running === true,
+      idleSeconds: existing.idle_seconds || 600,
+      owned: Boolean(ownedMcpProcess)
+    };
   }
   if (startingMcp) return startingMcp;
 
   startingMcp = (async () => {
     await spawnTeamyraMcp();
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      if (await isTeamyraMcpReady()) {
-        return { ok: true, running: true, endpoint: MCP_ENDPOINT, owned: true };
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const health = await gatewayHealth();
+      if (health) {
+        return {
+          ok: true,
+          running: true,
+          endpoint: MCP_ENDPOINT,
+          backendRunning: health.backend_running === true,
+          idleSeconds: health.idle_seconds || 600,
+          owned: true
+        };
       }
-      await new Promise(resolve => setTimeout(resolve, 250));
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
-    throw new Error('TEAMYRA MCP did not become ready on ' + MCP_ENDPOINT);
+    throw new Error('TEAMYRA wake gateway did not become ready on ' + MCP_ENDPOINT);
   })().finally(() => {
     startingMcp = null;
   });
@@ -157,8 +156,8 @@ async function ensureTeamyraMcp() {
 }
 
 function stopOwnedMcp() {
-  if (!ownedMcpProcess) return;
-  try { ownedMcpProcess.kill(); } catch {}
+  // The tiny wake gateway intentionally survives desktop UI shutdown so Claude,
+  // Codex and Antigravity can wake TEAMYRA again without the GUI running.
   ownedMcpProcess = null;
 }
 
@@ -272,15 +271,21 @@ async function getProviderMcpStatus(providerId) {
 }
 
 async function getMcpConnections() {
-  const [serviceRunning, claude, codex, antigravity] = await Promise.all([
-    isTeamyraMcpReady(),
+  const [health, claude, codex, antigravity] = await Promise.all([
+    gatewayHealth(),
     getProviderMcpStatus('claude'),
     getProviderMcpStatus('codex'),
     getProviderMcpStatus('antigravity')
   ]);
   return {
     endpoint: MCP_ENDPOINT,
-    service: { running: serviceRunning },
+    service: {
+      running: Boolean(health),
+      backendRunning: health?.backend_running === true,
+      idleSeconds: Number(health?.idle_seconds) || 600,
+      idleForSeconds: Number(health?.idle_for_seconds) || 0,
+      activeJobs: health?.active_jobs === true
+    },
     providers: { claude, codex, antigravity }
   };
 }
@@ -334,6 +339,7 @@ module.exports = {
   ensureTeamyraMcp,
   stopOwnedMcp,
   isTeamyraMcpReady,
+  gatewayHealth,
   getMcpConnections,
   getProviderMcpStatus,
   connectTeamyraMcp,

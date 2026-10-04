@@ -32,7 +32,9 @@ let chatgptProvider = null;
 let mainWindow = null;
 let isQuitting = false;
 let mcpBootError = null;
+let desktopIdleTimer = null;
 
+const DESKTOP_IDLE_SECONDS = Math.max(30, Number(process.env.TEAMYRA_DESKTOP_IDLE_SECONDS) || 600);
 const ROOT = RUNTIME_ROOT;
 const JOBS = path.join(ROOT, 'jobs');
 let PROVIDER_CACHE = { at: 0, data: null, pending: null };
@@ -193,6 +195,10 @@ function listJobs(limit = 30) {
           created: data.created || 0,
           started: data.started || 0,
           ended: data.ended || 0,
+          updated: data.updated || 0,
+          heartbeatAt: data.heartbeat_at || 0,
+          runnerPid: data.runner_pid || 0,
+          workerPid: data.worker_pid || 0,
           lastEvent: data.last_event || ''
         };
       } catch {
@@ -202,6 +208,57 @@ function listJobs(limit = 30) {
     .filter(Boolean)
     .sort((a, b) => (b.created || b.started || 0) - (a.created || a.started || 0))
     .slice(0, limit);
+}
+
+function pidAlive(pid) {
+  const value = Number(pid) || 0;
+  if (value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function jobBlocksDesktopSleep(job) {
+  const activeStates = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
+  if (!activeStates.has(job?.state)) return false;
+  if (pidAlive(job.runnerPid) || pidAlive(job.workerPid)) return true;
+  const stamp = Number(job.heartbeatAt || job.updated || job.started || job.created) || 0;
+  return stamp > 0 && (Date.now() / 1000 - stamp) <= DESKTOP_IDLE_SECONDS;
+}
+
+function hasActiveDesktopWork() {
+  if (TERMINALS.size > 0) return true;
+  if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
+  if (chatgptProvider?.busy === true) return true;
+  return false;
+}
+
+function currentJobsSafe() {
+  try { return listJobs(100); } catch { return []; }
+}
+
+function clearDesktopIdleExit() {
+  if (desktopIdleTimer) clearTimeout(desktopIdleTimer);
+  desktopIdleTimer = null;
+}
+
+function scheduleDesktopIdleExit(delayMs = DESKTOP_IDLE_SECONDS * 1000) {
+  clearDesktopIdleExit();
+  desktopIdleTimer = setTimeout(() => {
+    desktopIdleTimer = null;
+    if (isQuitting) return;
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) return;
+    if (hasActiveDesktopWork()) {
+      scheduleDesktopIdleExit(30000);
+      return;
+    }
+    isQuitting = true;
+    app.quit();
+  }, Math.max(1000, Number(delayMs) || DESKTOP_IDLE_SECONDS * 1000));
+  desktopIdleTimer.unref?.();
 }
 
 function readTranscript(jobId, offset = 0) {
@@ -270,6 +327,7 @@ function windowChrome() {
 }
 
 function showMainWindow() {
+  clearDesktopIdleExit();
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
@@ -310,6 +368,7 @@ function createWindow() {
     event.preventDefault();
     chatgptProvider?.setVisible(false);
     win.hide();
+    scheduleDesktopIdleExit();
   });
   win.webContents.on('destroyed', () => {
     killTerminalsFor(webContentsId);
@@ -832,6 +891,7 @@ if (!gotSingleInstanceLock) {
     if (process.argv.includes('--background')) {
       chatgptProvider?.setVisible(false);
       win.hide();
+      scheduleDesktopIdleExit();
     }
     setupAutoUpdates();
     app.on('activate', () => showMainWindow());
@@ -840,9 +900,11 @@ if (!gotSingleInstanceLock) {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  clearDesktopIdleExit();
   stopOwnedMcp();
 });
 
 app.on('window-all-closed', () => {
-  // Closing the UI keeps TEAMYRA running so jobs, MCP and embedded agents can continue.
+  // The lightweight wake gateway survives independently. The desktop UI exits
+  // after its hidden idle window once no local jobs/terminals/ChatGPT work remain.
 });

@@ -4,6 +4,7 @@ This transport intentionally uses JSON response mode and reuses server.handle()
 so stdio and HTTP expose the exact same TEAMYRA tool surface.
 """
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -13,6 +14,7 @@ import server
 
 MAX_BODY = 4 * 1024 * 1024
 MCP_PATH = "/mcp"
+SHUTDOWN_PATH = "/__teamyra_shutdown"
 
 
 def _json_bytes(value):
@@ -39,6 +41,14 @@ def _accepts_mcp(value):
     if not raw or raw.strip() == "*/*":
         return True
     return "application/json" in raw and "text/event-stream" in raw
+
+
+def secrets_compare(expected, supplied):
+    import hmac
+    try:
+        return hmac.compare_digest(str(expected), str(supplied))
+    except Exception:
+        return False
 
 
 def _json_error(req_id, code, message, data=None):
@@ -119,6 +129,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.path == SHUTDOWN_PATH:
+            if self._reject_host():
+                return
+            expected = str(os.environ.get("TEAMYRA_INTERNAL_SHUTDOWN_TOKEN") or "")
+            supplied = str(self.headers.get("X-Teamyra-Shutdown-Token") or "")
+            if not expected or not secrets_compare(expected, supplied):
+                self._send_json(403, _json_error(None, -32000, "Forbidden"))
+                return
+            self._send_json(202, {"ok": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         if self.path != MCP_PATH:
             self._send_json(404, _json_error(None, -32601, "Not found"))
             return
@@ -210,6 +231,10 @@ def serve(host="127.0.0.1", port=8787):
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            server.mcp_pool.shutdown(server.ROOT)
+        except Exception:
+            pass
         httpd.server_close()
 
 

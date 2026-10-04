@@ -25,6 +25,7 @@ hiddenimports = [
     "mcp_pool",
     "recovery",
     "http_mcp",
+    "wake_gateway",
 ]
 
 datas = []
