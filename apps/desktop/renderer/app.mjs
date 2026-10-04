@@ -319,7 +319,9 @@ async function refreshAgents() {
   const mcpConnected = ['claude', 'codex', 'antigravity']
     .filter(id => currentMcpConnections?.providers?.[id]?.connected === true).length;
 
-  $('#agentSummary').textContent = connected + ' agents · ' + mcpConnected + ' MCP';
+  const serviceOnline = currentMcpConnections?.service?.running === true;
+  $('#agentSummary').textContent = connected + ' agents · ' + mcpConnected + ' MCP · ' + (serviceOnline ? 'Teamyra online' : 'MCP offline');
+  $('#agentSummary').title = currentMcpConnections?.bootError || currentMcpConnections?.endpoint || '';
   $('#agentGrid').innerHTML = currentProviders.map(agentCardHtml).join('');
 
   $('#agentGrid').querySelectorAll('[data-provider][data-profile]').forEach(button => {
