@@ -674,12 +674,22 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   letter-spacing: .07em;
   text-transform: uppercase;
 }
+.profile-action:disabled {
+  opacity: .46;
+  cursor: not-allowed;
+}
+.mcp-action.connected {
+  color: var(--green);
+  border-color: rgba(46,125,79,.28);
+  background: rgba(46,125,79,.08);
+}
 
 .agent-card-foot {
   min-height: 42px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 6px;
   padding: 7px 10px;
   border-top: 1px solid rgba(29,29,34,.06);
 }
