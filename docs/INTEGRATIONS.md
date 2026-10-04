@@ -6,13 +6,28 @@ TEAMYRA exposes one local MCP endpoint to supported coding agents:
 http://127.0.0.1:8787/mcp
 ```
 
-Start it with:
+When the TEAMYRA desktop app starts, it now starts this local MCP endpoint automatically. Closing the desktop window hides the UI while TEAMYRA keeps running in the background, so active jobs and the MCP endpoint continue to work. Launching TEAMYRA again restores the existing process instead of starting a duplicate instance.
+
+For development or manual troubleshooting, the endpoint can still be started directly:
 
 ```powershell
 npm run mcp:http
 ```
 
 The HTTP server is localhost-only in this build. Provider account credentials stay in the provider's own native storage; TEAMYRA integration files contain no account secrets.
+
+## One-click desktop connection
+
+Open **Agents** in TEAMYRA. Claude Code, Codex, and Antigravity each expose a **Connect Teamyra** action when their local CLI is installed.
+
+The button:
+- makes sure the local TEAMYRA MCP is running,
+- installs a user-level TEAMYRA MCP entry for Claude Code or Codex,
+- merges the TEAMYRA entry into Antigravity's global MCP config without deleting other servers,
+- verifies that the provider now points at `http://127.0.0.1:8787/mcp`,
+- shows **MCP Connected** after verification.
+
+Existing provider login/account controls remain separate from MCP registration. TEAMYRA will not silently replace a Claude/Codex MCP entry named `teamyra` if it already points somewhere else.
 
 ## Claude Code
 
