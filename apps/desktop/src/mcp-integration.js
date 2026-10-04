@@ -185,7 +185,10 @@ async function cliConnectionStatus(providerId) {
     return { providerId, installed: false, connected: false, endpoint: MCP_ENDPOINT, detail: 'CLI not installed' };
   }
   try {
-    const { stdout, stderr } = await execFilePromise(binary, ['mcp', 'list'], { timeout: 15000 });
+    const { stdout, stderr } = await execFilePromise(binary, ['mcp', 'list'], {
+      timeout: 15000,
+      cwd: os.homedir()
+    });
     const parsed = parseCliConnectionOutput(stdout + '\n' + stderr);
     return {
       providerId,
@@ -307,7 +310,10 @@ async function connectTeamyraMcp(providerId) {
       ? ['mcp', 'add', '--transport', 'http', '--scope', 'user', 'teamyra', MCP_ENDPOINT]
       : ['mcp', 'add', 'teamyra', '--url', MCP_ENDPOINT];
     try {
-      await execFilePromise(binary, args, { timeout: 30000 });
+      await execFilePromise(binary, args, {
+        timeout: 30000,
+        cwd: os.homedir()
+      });
     } catch (error) {
       return {
         ok: false,
