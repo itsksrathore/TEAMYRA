@@ -16,7 +16,7 @@
     "dist:portable": "npm run build:renderer && npm run build:core && electron-builder --win portable"
   },
   "devDependencies": {
-    "electron": "43.7.3",
+    "electron": "44.5.1",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2"
   },
