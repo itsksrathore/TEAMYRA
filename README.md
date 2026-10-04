@@ -19,6 +19,8 @@ It is evolving from the existing AI worker bridge into a full desktop system tha
 - live local job dashboard.
 - canonical `teamyra.*` MCP tools with legacy aliases.
 - local stdio MCP and localhost Streamable HTTP MCP.
+- one-click TEAMYRA MCP registration for Claude Code, Codex, and Antigravity.
+- close-to-background desktop runtime: hiding the UI keeps jobs and local MCP alive.
 - TEAMYRA CLI for workers, jobs, tests, graphs, and worktrees.
 
 ## Quick start
@@ -31,7 +33,7 @@ npm run mcp:stdio
 npm run mcp:http -- --port 8787
 ```
 
-The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally localhost-only in this build.
+The HTTP endpoint is `http://127.0.0.1:8787/mcp` by default and is intentionally localhost-only in this build. The desktop app starts it automatically; `npm run mcp:http` remains useful for development and troubleshooting.
 
 Provider-specific Claude Code, Codex, and Antigravity setup is documented in [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 The embedded normal ChatGPT web worker, workspace tool bridge, permissions, and security model are documented in [docs/CHATGPT_WEB_AGENT.md](docs/CHATGPT_WEB_AGENT.md).

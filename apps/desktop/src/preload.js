@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('teamyra', {
   installUpdate: () => ipcRenderer.invoke('teamyra:update-install'),
   onUpdateState: (callback) => ipcRenderer.on('teamyra:update-state', (_event, payload) => callback(payload)),
   providers: () => ipcRenderer.invoke('teamyra:providers'),
+  mcpConnections: () => ipcRenderer.invoke('teamyra:mcp-connections'),
+  connectMcp: (providerId) => ipcRenderer.invoke('teamyra:mcp-connect', providerId),
   jobs: () => ipcRenderer.invoke('teamyra:jobs'),
   transcript: (jobId, offset = 0) => ipcRenderer.invoke('teamyra:transcript', jobId, offset),
   startTask: (options) => ipcRenderer.invoke('teamyra:task-start', options || {}),
