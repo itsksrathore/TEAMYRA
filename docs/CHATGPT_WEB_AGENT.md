@@ -30,9 +30,11 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Cookies/session storage are owned by Chromium. TEAMYRA does not store ChatGPT usernames or passwords.
 - `nodeIntegration=false`, `contextIsolation=true`, and `sandbox=true`.
 - Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled.
-- New-window requests never create a visible external BrowserWindow. Approved HTTPS authentication popups are hosted in a sibling WebContentsView overlay inside the same TEAMYRA window; unapproved destinations are denied.
-- No Chrome/Edge process is launched as a user-visible external browser.
-- If login expires, the normal ChatGPT login experience is shown in the embedded panel.
+- Normal ChatGPT browsing stays in the sandboxed embedded `WebContentsView`.
+- When ChatGPT authentication navigates to an approved sign-in endpoint, TEAMYRA opens the installed Google Chrome executable with a dedicated TEAMYRA-only browser profile. Credentials are entered directly in Chrome, never into TEAMYRA UI or logs.
+- After Chrome reaches an authenticated ChatGPT prompt, TEAMYRA imports only ChatGPT/OpenAI-domain session cookies into the persistent embedded partition, closes the temporary Chrome login window, and reloads the embedded ChatGPT page.
+- TEAMYRA never reads or modifies the user's normal Chrome profile; each login bridge uses an ephemeral `chatgpt/chrome-login-*` profile under TEAMYRA runtime state, binds DevTools to loopback only, and removes that temporary profile when the handoff ends.
+- Unapproved popup/navigation destinations remain denied.
 - CAPTCHA/human-verification pages are surfaced to the user. TEAMYRA does not attempt to bypass them.
 
 ## Worker routing
@@ -145,7 +147,7 @@ It prefers semantic selectors:
 
 No screen coordinates or pixel clicking are used.
 
-If ChatGPT's page structure changes, TEAMYRA reports prompt/send/stop failures and leaves the embedded page interactive for the user. Reconnect performs an actual in-view navigation reload without opening an external browser. It does not bypass authentication, CAPTCHAs, service limits or security controls.
+If ChatGPT's page structure changes, TEAMYRA reports prompt/send/stop failures and leaves the embedded page interactive for the user. Reconnect performs an in-view navigation reload. External Chrome is used only for an approved authentication handoff when sign-in is required; it does not bypass authentication, CAPTCHAs, service limits or security controls.
 
 ## Remote-device direction
 

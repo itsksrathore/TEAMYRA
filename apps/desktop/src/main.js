@@ -317,7 +317,9 @@ function killTerminalsFor(owner) {
 }
 
 function shouldUseWindowsAppUserModelId() {
-  return process.platform === 'win32' && app.isPackaged;
+  if (process.platform !== 'win32' || !app.isPackaged) return false;
+  const exe = String(process.execPath || '').replace(/\//g, '\\').toLowerCase();
+  return exe.includes('\\programs\\teamyra') || exe.includes('\\program files\\teamyra');
 }
 
 function ensureWindowsShortcutIdentity() {
@@ -330,7 +332,7 @@ function ensureWindowsShortcutIdentity() {
       target: process.execPath,
       cwd: path.dirname(process.execPath),
       description: 'TEAMYRA',
-      icon: process.execPath,
+      icon: fs.existsSync(APP_ICON) ? APP_ICON : process.execPath,
       iconIndex: 0,
       appUserModelId: 'com.teamyra.desktop'
     });
