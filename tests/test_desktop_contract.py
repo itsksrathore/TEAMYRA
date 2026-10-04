@@ -172,6 +172,25 @@ class DesktopContractTests(unittest.TestCase):
         self.assertIn('worktree.merge requires confirm=true', self.desktop_api)
         self.assertIn('worktree.discard requires confirm=true', self.desktop_api)
 
+    def test_local_mcp_one_click_and_background_contract(self):
+        mcp_integration = (ROOT / "apps" / "desktop" / "src" / "mcp-integration.js").read_text(encoding="utf-8")
+        self.assertIn("teamyra:mcp-connections", self.preload)
+        self.assertIn("teamyra:mcp-connect", self.preload)
+        self.assertIn("teamyra:mcp-connections", self.main)
+        self.assertIn("teamyra:mcp-connect", self.main)
+        self.assertIn("data-connect-mcp", self.renderer)
+        self.assertIn("ensureTeamyraMcp", self.main)
+        self.assertIn("requestSingleInstanceLock", self.main)
+        self.assertIn("event.preventDefault()", self.main)
+        self.assertIn("win.hide()", self.main)
+        self.assertIn("Closing the UI keeps TEAMYRA running", self.main)
+        self.assertIn("mcp', 'add', '--transport', 'http', '--scope', 'user'", mcp_integration)
+        self.assertIn("mcp', 'add', 'teamyra', '--url'", mcp_integration)
+        self.assertIn("mcp_config.json", mcp_integration)
+        self.assertIn("serverUrl", mcp_integration)
+        self.assertIn("127.0.0.1", mcp_integration)
+        self.assertIn("8787", mcp_integration)
+
     def test_auto_update_contract_is_preserved(self):
         contracts = {
             "updateStatus": "teamyra:update-status",
