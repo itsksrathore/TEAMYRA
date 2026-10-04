@@ -2,7 +2,8 @@ const { WebContentsView } = require('electron');
 const { GoogleFlowMusicAutomationAdapter, FLOW_MUSIC_HOME } = require('./google-flow-music-automation-adapter');
 
 const ALLOWED_MUSIC_HOSTS = new Set([
-  'flowmusic.google', 'www.flowmusic.google', 'flowmusic.app', 'www.flowmusic.app', 'labs.google', 'accounts.google.com', 'myaccount.google.com'
+  'flowmusic.google', 'www.flowmusic.google', 'flowmusic.app', 'www.flowmusic.app',
+  'sb.flowmusic.app', 'labs.google', 'accounts.google.com', 'myaccount.google.com'
 ]);
 
 function safeMusicUrl(value) {
@@ -59,7 +60,13 @@ class GoogleFlowMusicProvider {
         const parsed = new URL(url);
         authPopup = parsed.protocol === 'https:' && ['accounts.google.com', 'myaccount.google.com'].includes(parsed.hostname);
       } catch {}
-      if (!authPopup) return { action: 'deny' };
+      if (!authPopup) {
+        try {
+          const parsed = new URL(url);
+          console.warn('[google-media] blocked Flow Music popup', parsed.protocol + '//' + parsed.hostname + parsed.pathname);
+        } catch {}
+        return { action: 'deny' };
+      }
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
@@ -87,7 +94,7 @@ class GoogleFlowMusicProvider {
         try {
           const parsed = new URL(url);
           allowed = parsed.protocol === 'https:' && [
-            'accounts.google.com', 'myaccount.google.com', 'flowmusic.app', 'www.flowmusic.app'
+            'accounts.google.com', 'myaccount.google.com', 'flowmusic.app', 'www.flowmusic.app', 'sb.flowmusic.app'
           ].includes(parsed.hostname);
         } catch {}
         if (!allowed) event.preventDefault();

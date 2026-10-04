@@ -15,10 +15,21 @@ class GoogleFlowMusicAutomationAdapter {
       const text = (document.body?.innerText || '').slice(0, 30000);
       const lower = text.toLowerCase();
       const controls = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"]')];
+      const controlDetails = controls.map(el => {
+        const label = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')).trim();
+        return {
+          label,
+          tag: el.tagName,
+          role: el.getAttribute('role') || '',
+          cls: String(el.className || '').slice(0, 180),
+          type: el.getAttribute('type') || ''
+        };
+      }).filter(item => item.label).slice(0, 160);
       return {
         url: location.href, title: document.title, text: text.slice(0, 10000), lower,
         promptFound: !!document.querySelector('textarea, [contenteditable="true"], input[type="text"]'),
-        labels: controls.map(el => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')).trim()).filter(Boolean).slice(0, 160)
+        labels: controlDetails.map(item => item.label),
+        controlDetails
       };
     })()`, true);
   }
@@ -46,7 +57,8 @@ class GoogleFlowMusicAutomationAdapter {
       remix: /remix/.test(joined),
       extend: /extend|continue/.test(joined),
       replace_section: /replace|section/.test(joined),
-      discovered_controls: (probe.labels || []).slice(0, 80)
+      discovered_controls: (probe.labels || []).slice(0, 80),
+      google_auth_control: (probe.controlDetails || []).find(item => /continue with google/i.test(item.label || '')) || null
     };
   }
 
