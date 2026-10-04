@@ -211,7 +211,8 @@ class DesktopContractTests(unittest.TestCase):
             self.assertIn(channel, self.preload)
             self.assertIn(channel, self.main)
         self.assertIn("autoUpdater.autoDownload = true", self.main)
-        self.assertIn("autoUpdater.autoInstallOnAppQuit = true", self.main)
+        self.assertIn("autoUpdater.autoInstallOnAppQuit = false", self.main)
+        self.assertIn("autoUpdater.quitAndInstall(false, true)", self.main)
 
     def test_packaged_core_does_not_silently_fall_back_to_python(self):
         self.assertIn("Bundled TEAMYRA Core is missing", self.core_api)

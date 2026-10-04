@@ -9,7 +9,7 @@
   "scripts": {
     "build:renderer": "esbuild renderer/app.mjs --bundle --platform=browser --format=iife --outfile=renderer/bundle.js",
     "start": "npm run build:renderer && electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check src/mcp-integration.js && node --check src/chatgpt-session-manager.js && node --check src/chatgpt-automation-adapter.js && node --check src/workspace-bridge.js && node --check src/chatgpt-web-provider.js && node --check renderer/agent-icons.mjs && node --check renderer/app.mjs && node tests/chatgpt-automation-adapter.test.js && node tests/mcp-integration.test.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/provider-registry.js && node --check src/core-api.js && node --check src/mcp-integration.js && node --check src/chatgpt-session-manager.js && node --check src/chatgpt-automation-adapter.js && node --check src/workspace-bridge.js && node --check src/chatgpt-web-provider.js && node --check renderer/agent-icons.mjs && node --check renderer/app.mjs && node tests/chatgpt-automation-adapter.test.js && node tests/mcp-integration.test.js && node tests/startup-diagnostics.test.js && node tests/workspace-status.test.js",
     "build:core": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/build-core.ps1",
     "dist:dir": "npm run build:renderer && npm run build:core && electron-builder --dir --win",
     "dist:win": "npm run build:renderer && npm run build:core && electron-builder --win nsis",
@@ -44,6 +44,10 @@
       {
         "from": "../../dist/teamyra-core",
         "to": "teamyra-core"
+      },
+      {
+        "from": "assets/teamyra-icon.ico",
+        "to": "teamyra-icon.ico"
       }
     ],
     "win": {
@@ -63,7 +67,8 @@
       "uninstallerIcon": "assets/teamyra-icon.ico",
       "perMachine": false,
       "allowElevation": false,
-      "packElevateHelper": false
+      "packElevateHelper": false,
+      "include": "packaging/installer.nsh"
     },
     "publish": [
       {
@@ -75,6 +80,7 @@
     ],
     "portable": {
       "artifactName": "TEAMYRA-${version}-${arch}-Portable.${ext}"
-    }
+    },
+    "afterPack": "packaging/after-pack.cjs"
   }
 }

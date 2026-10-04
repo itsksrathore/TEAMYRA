@@ -72,6 +72,7 @@ INTERNAL_PROCESS_MODES = {
     "conductor_monitor.py": "__conductor-monitor",
     "review_monitor.py": "__review-monitor",
     "failover_monitor.py": "__failover-monitor",
+    "follow.py": "__follow",
 }
 
 
@@ -530,7 +531,7 @@ def summary(m, events=True):
 
 
 def follow_info(job_id):
-    return {"follow_command": f'"{PYTHON}" "{BRIDGE / "follow.py"}" {job_id}',
+    return {"follow_command": " ".join('"' + part + '"' for part in bridge_process_command("follow.py", job_id, "--runtime-root", ROOT)),
             "dashboard": f"http://127.0.0.1:{config().get('dashboard_port', 8765)}/",
             "transcript": str(JOBS / job_id / "transcript.md")}
 

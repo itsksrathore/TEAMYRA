@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 
 const {
   MCP_ENDPOINT,
+  gatewayIdentityError,
   mergeAntigravityConfigObject,
   parseCliConnectionOutput
 } = require('../src/mcp-integration');
@@ -33,3 +34,7 @@ assert.equal(
 );
 
 console.log('mcp integration helper tests passed');
+const { ROOT, PACKAGED_CORE } = require('../src/core-api');
+assert.equal(gatewayIdentityError({ runtime_root: ROOT, core_exe: PACKAGED_CORE }), null);
+assert.match(gatewayIdentityError({ runtime_root: '/another-teamyra' }), /another or older/);
+assert.match(gatewayIdentityError({ service: 'teamyra-wake-gateway' }), /another or older/);

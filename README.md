@@ -160,7 +160,7 @@ TEAMYRA reuses provider-native authentication. It does not intentionally copy pr
 
 Destructive filesystem and Git actions are confirmation-gated where appropriate. Unsupported authentication, quota, context-window or account-isolation capabilities are reported as unavailable rather than guessed.
 
-See [SECURITY.md](SECURITY.md).
+See [.github/SECURITY.md](.github/SECURITY.md).
 
 ## Project structure
 
@@ -177,9 +177,9 @@ tests/               Python regression and contract tests
 
 TEAMYRA is released under the [MIT License](LICENSE).
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [SECURITY.md](SECURITY.md) before contributing.
+Contributions are welcome. Read [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md), [.github/CODE_OF_CONDUCT.md](.github/CODE_OF_CONDUCT.md) and [.github/SECURITY.md](.github/SECURITY.md) before contributing.
 
-Third-party notices required by retained third-party components are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Third-party notices required by retained third-party components are documented in [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).
 
 ## Search terms
 

@@ -54,6 +54,7 @@ class ChatGPTWebProvider {
     this.lastProbe = null;
     this.jobTimer = null;
     this.heartbeatTimer = null;
+    this.statusRefresh = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
     this.writeStatus({ detail: 'Embedded ChatGPT available; open it to initialize the session.' });
   }
@@ -61,7 +62,11 @@ class ChatGPTWebProvider {
   initialize() {
     this.sessionManager.initialize();
     if (!this.heartbeatTimer) {
-      this.heartbeatTimer = setInterval(() => this.refreshStatus().catch(() => {}), 5000);
+      this.heartbeatTimer = setInterval(() => {
+        // An unopened web session cannot be ready for jobs. Do not launch a
+        // Python core every five seconds merely to publish that same status.
+        if (this.view || this.busy) this.refreshStatus().catch(() => {});
+      }, 5000);
       this.heartbeatTimer.unref?.();
     }
     if (!this.jobTimer) {
@@ -276,7 +281,13 @@ class ChatGPTWebProvider {
     };
   }
 
-  async refreshStatus() {
+  refreshStatus() {
+    if (this.statusRefresh) return this.statusRefresh;
+    this.statusRefresh = this.refreshStatusOnce().finally(() => { this.statusRefresh = null; });
+    return this.statusRefresh;
+  }
+
+  async refreshStatusOnce() {
     if (this.view && !this.view.webContents.isDestroyed() && this.loaded && this.automation) {
       try {
         this.lastProbe = await this.automation.probe();

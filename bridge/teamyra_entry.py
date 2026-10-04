@@ -22,6 +22,9 @@ def _run_internal(mode, argv):
     if mode == "__wake-gateway":
         import wake_gateway
         return wake_gateway.serve()
+    if mode == "__follow":
+        import follow
+        return follow.cli(argv)
     raise SystemExit(f"unknown internal mode: {mode}")
 
 

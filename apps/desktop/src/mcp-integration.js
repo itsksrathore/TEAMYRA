@@ -76,12 +76,30 @@ function gatewayHealth(timeout = 1000) {
 }
 
 async function isTeamyraMcpReady() {
-  return Boolean(await gatewayHealth());
+  const health = await gatewayHealth();
+  return Boolean(health && !gatewayIdentityError(health));
+}
+
+function gatewayIdentityError(health) {
+  if (!health) return null;
+  const samePath = (a, b) => {
+    if (!a || !b) return false;
+    const normalize = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    return normalize(a) === normalize(b);
+  };
+  if (!samePath(health.runtime_root, ROOT) || (PACKAGED_CORE && !samePath(health.core_exe, PACKAGED_CORE))) {
+    return 'Port 8787 is owned by another or older TEAMYRA runtime. Close that runtime before reconnecting this installation.';
+  }
+  return null;
 }
 
 async function spawnTeamyraMcp() {
   let file;
   let args;
+
+  if (process.env.TEAMYRA_CORE_EXE && !fs.existsSync(PACKAGED_CORE)) {
+    throw new Error('Bundled TEAMYRA Core is missing: ' + PACKAGED_CORE);
+  }
 
   if (PACKAGED_CORE && fs.existsSync(PACKAGED_CORE)) {
     file = PACKAGED_CORE;
@@ -96,6 +114,7 @@ async function spawnTeamyraMcp() {
   }
 
   const child = spawn(file, args, {
+    cwd: ROOT,
     windowsHide: true,
     stdio: 'ignore',
     detached: true,
@@ -120,6 +139,8 @@ async function spawnTeamyraMcp() {
 async function ensureTeamyraMcp() {
   const existing = await gatewayHealth();
   if (existing) {
+    const identityError = gatewayIdentityError(existing);
+    if (identityError) throw new Error(identityError);
     return {
       ok: true,
       running: true,
@@ -136,6 +157,8 @@ async function ensureTeamyraMcp() {
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const health = await gatewayHealth();
       if (health) {
+        const identityError = gatewayIdentityError(health);
+        if (identityError) throw new Error(identityError);
         return {
           ok: true,
           running: true,
@@ -280,7 +303,8 @@ async function getMcpConnections() {
   return {
     endpoint: MCP_ENDPOINT,
     service: {
-      running: Boolean(health),
+      running: Boolean(health && !gatewayIdentityError(health)),
+      error: gatewayIdentityError(health),
       backendRunning: health?.backend_running === true,
       idleSeconds: Number(health?.idle_seconds) || 600,
       idleForSeconds: Number(health?.idle_for_seconds) || 0,
@@ -340,6 +364,7 @@ module.exports = {
   stopOwnedMcp,
   isTeamyraMcpReady,
   gatewayHealth,
+  gatewayIdentityError,
   getMcpConnections,
   getProviderMcpStatus,
   connectTeamyraMcp,
