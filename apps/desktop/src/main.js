@@ -1,8 +1,13 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { createStartupLog, loadDesktopWindow } = require('./startup-diagnostics');
+const startupLog = createStartupLog(path.join(app.getPath('userData'), 'logs'));
+process.on('uncaughtExceptionMonitor', error => startupLog('uncaught-exception', { error: String(error.stack || error) }));
+process.on('unhandledRejection', error => startupLog('unhandled-rejection', { error: String(error?.stack || error) }));
+startupLog('starting', { packaged: app.isPackaged, resources: process.resourcesPath, version: app.getVersion() });
 
 const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const RUNTIME_ROOT = path.resolve(
@@ -26,7 +31,7 @@ const {
 } = require('./mcp-integration');
 
 let pty = null;
-try { pty = require('@lydell/node-pty'); } catch {}
+try { pty = require('@lydell/node-pty'); } catch (error) { startupLog('pty-unavailable', { error: String(error.message || error) }); }
 const TERMINALS = new Map();
 let chatgptProvider = null;
 let mainWindow = null;
@@ -37,6 +42,9 @@ let desktopIdleTimer = null;
 const DESKTOP_IDLE_SECONDS = Math.max(30, Number(process.env.TEAMYRA_DESKTOP_IDLE_SECONDS) || 600);
 const ROOT = RUNTIME_ROOT;
 const JOBS = path.join(ROOT, 'jobs');
+const APP_ICON = app.isPackaged
+  ? path.join(process.resourcesPath, 'teamyra-icon.ico')
+  : path.join(__dirname, '..', 'assets', 'teamyra-icon.ico');
 let PROVIDER_CACHE = { at: 0, data: null, pending: null };
 const PROVIDER_CACHE_MS = 30000;
 let UPDATE_STATE = {
@@ -62,7 +70,9 @@ function setupAutoUpdates() {
   }
 
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Idle sleep is not consent to replace files used by a wake gateway or jobs.
+  // The existing Update ready action installs after checking active work.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on('checking-for-update', () => updateState({ status: 'checking', error: null }));
   autoUpdater.on('update-available', info => updateState({
     status: 'available',
@@ -306,6 +316,30 @@ function killTerminalsFor(owner) {
   }
 }
 
+function shouldUseWindowsAppUserModelId() {
+  return process.platform === 'win32' && app.isPackaged;
+}
+
+function ensureWindowsShortcutIdentity() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  const appData = process.env.APPDATA || app.getPath('appData');
+  const shortcut = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'TEAMYRA.lnk');
+  try {
+    fs.mkdirSync(path.dirname(shortcut), { recursive: true });
+    shell.writeShortcutLink(shortcut, 'replace', {
+      target: process.execPath,
+      cwd: path.dirname(process.execPath),
+      description: 'TEAMYRA',
+      icon: process.execPath,
+      iconIndex: 0,
+      appUserModelId: 'com.teamyra.desktop'
+    });
+    startupLog('windows-shortcut-ready', { shortcut, target: process.execPath });
+  } catch (error) {
+    startupLog('windows-shortcut-failed', { shortcut, error: String(error?.message || error) });
+  }
+}
+
 function windowChrome() {
   if (process.platform === 'win32') {
     return {
@@ -337,13 +371,14 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
-function createWindow() {
+function createWindow(background = false) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     showMainWindow();
     return mainWindow;
   }
 
   const win = new BrowserWindow({
+    show: false,
     width: 1360,
     height: 900,
     minWidth: 560,
@@ -351,7 +386,7 @@ function createWindow() {
     ...windowChrome(),
     backgroundColor: '#e9e9ef',
     title: 'TEAMYRA',
-    icon: path.join(__dirname, '..', 'assets', 'teamyra-icon.ico'),
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -359,10 +394,48 @@ function createWindow() {
     }
   });
   mainWindow = win;
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-  chatgptProvider?.destroy();
-  chatgptProvider = new ChatGPTWebProvider({ window: win, runtimeRoot: ROOT });
-  chatgptProvider.initialize();
+  if (process.platform === 'win32' && fs.existsSync(APP_ICON)) {
+    try {
+      win.setIcon(APP_ICON);
+      win.setAppDetails({
+        appId: 'com.teamyra.desktop',
+        appIconPath: APP_ICON,
+        appIconIndex: 0,
+        relaunchCommand: '"' + process.execPath + '"',
+        relaunchDisplayName: 'TEAMYRA'
+      });
+    } catch (error) {
+      startupLog('window-icon-failed', { icon: APP_ICON, error: String(error?.message || error) });
+    }
+  }
+  loadDesktopWindow(win, {
+    entry: path.join(__dirname, '..', 'renderer', 'index.html'),
+    log: startupLog,
+    show: !background,
+    onFailure: async reason => {
+      const { response } = await dialog.showMessageBox({
+        type: 'error', title: 'TEAMYRA could not load',
+        message: reason,
+        detail: 'See desktop-startup.log in the application user data logs folder. Restart TEAMYRA or reinstall if a resource is missing.',
+        buttons: ['Restart', 'Quit'], defaultId: 0, cancelId: 1
+      });
+      if (response === 0) app.relaunch();
+      app.quit();
+    }
+  });
+  // Optional providers must never gate creation/loading of the desktop shell.
+  setImmediate(async () => {
+    if (win.isDestroyed()) return;
+    try {
+      chatgptProvider?.destroy();
+      chatgptProvider = new ChatGPTWebProvider({ window: win, runtimeRoot: ROOT });
+      await chatgptProvider.initialize();
+    } catch (error) {
+      startupLog('chatgpt-start-failed', { error: String(error?.stack || error) });
+      chatgptProvider?.destroy();
+      chatgptProvider = null;
+    }
+  });
   const webContentsId = win.webContents.id;
   win.on('close', event => {
     if (isQuitting) return;
@@ -393,6 +466,7 @@ ipcMain.handle('teamyra:update-check', async () => {
 });
 ipcMain.handle('teamyra:update-install', () => {
   if (UPDATE_STATE.status !== 'downloaded') return { ok: false, reason: 'update-not-downloaded' };
+  if (hasActiveDesktopWork()) return { ok: false, reason: 'active-work' };
   setImmediate(() => autoUpdater.quitAndInstall(false, true));
   return { ok: true };
 });
@@ -880,23 +954,24 @@ if (!gotSingleInstanceLock) {
 } else {
   app.on('second-instance', () => showMainWindow());
 
-  app.whenReady().then(async () => {
+  app.whenReady().then(() => {
     if (process.platform === 'win32') app.setAppUserModelId('com.teamyra.desktop');
-    try {
-      await ensureTeamyraMcp();
+    const background = process.argv.includes('--background');
+    createWindow(background);
+    if (background) scheduleDesktopIdleExit();
+    ensureTeamyraMcp().then(() => {
       mcpBootError = null;
-    } catch (error) {
+      startupLog('mcp-ready');
+    }).catch(error => {
       mcpBootError = String(error?.message || error || 'TEAMYRA MCP failed to start');
-    }
-
-    const win = createWindow();
-    if (process.argv.includes('--background')) {
-      chatgptProvider?.setVisible(false);
-      win.hide();
-      scheduleDesktopIdleExit();
-    }
+      startupLog('mcp-start-failed', { error: mcpBootError });
+    });
     setupAutoUpdates();
     app.on('activate', () => showMainWindow());
+  }).catch(error => {
+    startupLog('startup-failed', { error: String(error.stack || error) });
+    dialog.showErrorBox('TEAMYRA could not start', String(error.message || error));
+    app.quit();
   });
 }
 

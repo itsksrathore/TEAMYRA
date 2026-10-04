@@ -9,11 +9,11 @@ class ReleaseHardeningTests(unittest.TestCase):
     def test_public_policy_files_exist(self):
         for relative in (
             "LICENSE",
-            "CONTRIBUTING.md",
-            "SECURITY.md",
-            "CODE_OF_CONDUCT.md",
-            "SUPPORT.md",
-            "CHANGELOG.md",
+            ".github/CONTRIBUTING.md",
+            ".github/SECURITY.md",
+            ".github/CODE_OF_CONDUCT.md",
+            ".github/SUPPORT.md",
+            "docs/CHANGELOG.md",
             ".github/pull_request_template.md",
             ".github/ISSUE_TEMPLATE/bug_report.yml",
             ".github/ISSUE_TEMPLATE/feature_request.yml",
@@ -46,6 +46,10 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertEqual(desktop_package["build"]["nsis"]["installerIcon"], "assets/teamyra-icon.ico")
         self.assertEqual(desktop_package["build"]["nsis"]["uninstallerIcon"], "assets/teamyra-icon.ico")
         self.assertIn("assets/**/*", desktop_package["build"]["files"])
+        resources = desktop_package["build"]["extraResources"]
+        self.assertTrue(any(item.get("to") == "teamyra-icon.ico" for item in resources))
+        self.assertIn("APP_ICON", main)
+        self.assertIn("win.setIcon(APP_ICON)", main)
 
     def test_release_version_is_1_0_0(self):
         root_package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))

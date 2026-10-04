@@ -77,7 +77,7 @@ function findOnDisk(bin) {
 function whereBinary(bin) {
   return new Promise((resolve) => {
     const resolver = process.platform === 'win32' ? 'where.exe' : 'which';
-    execFile(resolver, [bin], { timeout: 4000 }, (err, stdout) => {
+    execFile(resolver, [bin], { timeout: 4000, windowsHide: true }, (err, stdout) => {
       const found = !err
         ? String(stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean)
         : [];

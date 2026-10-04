@@ -439,7 +439,8 @@ def continue_rebase_resolution(storage_root, worktree_id):
         raise ValueError("resolve all conflict files before continuing rebase")
 
     staged_rc, _, _ = _git(path, "diff", "--cached", "--quiet", check=False)
-    command = ("rebase", "--skip") if staged_rc == 0 else ("-c", "core.editor=true", "rebase", "--continue")
+    # ':' is Git's cross-platform no-op editor; Windows need not provide true.exe.
+    command = ("rebase", "--skip") if staged_rc == 0 else ("-c", "core.editor=:", "rebase", "--continue")
     rc, out, err = _git(path, *command, check=False)
     current = status(storage_root, worktree_id)
     if rc != 0:

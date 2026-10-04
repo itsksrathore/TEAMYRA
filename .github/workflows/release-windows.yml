@@ -33,17 +33,23 @@ jobs:
       - name: Verify source
         run: |
           python -m compileall bridge
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p "test_*.py"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm audit --omit=dev --audit-level=high
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run desktop:check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm --workspace @teamyra/desktop run build:renderer
 
       - name: Build bundled core
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm teamyra-core.spec
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if (!(Test-Path "dist/teamyra-core/teamyra-core.exe")) { throw "core build missing" }
           ./dist/teamyra-core/teamyra-core.exe --help | Out-Null
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Require signing credentials for stable tags
         if: github.ref_type == 'tag'
@@ -69,6 +75,7 @@ jobs:
           if ("${{ github.ref_type }}" -eq "tag") {
             $version = "${{ github.ref_name }}".TrimStart("v")
             npm version $version --workspace @teamyra/desktop --no-git-tag-version
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           Set-Location apps/desktop
           npx electron-builder --win nsis portable --publish never
@@ -88,6 +95,10 @@ jobs:
           $appSignature = Get-AuthenticodeSignature $appExe
           if ($appSignature.Status -ne "Valid") {
             throw "TEAMYRA.exe Authenticode signature is not valid: $($appSignature.Status)"
+          }
+          $coreSignature = Get-AuthenticodeSignature "apps/desktop/dist/win-unpacked/resources/teamyra-core/teamyra-core.exe"
+          if ($coreSignature.Status -ne "Valid") {
+            throw "TEAMYRA core Authenticode signature is not valid: $($coreSignature.Status)"
           }
           $portable = Get-ChildItem "apps/desktop/dist/TEAMYRA-*-Portable.exe" | Select-Object -First 1
           if (-not $portable) { throw "portable TEAMYRA executable not found" }

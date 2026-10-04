@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -138,6 +139,9 @@ class BackendManager:
         return {
             "service": "teamyra-wake-gateway",
             "gateway_running": True,
+            "gateway_pid": os.getpid(),
+            "runtime_root": str(self.runtime_root.resolve()),
+            "core_exe": str(Path(os.environ.get("TEAMYRA_CORE_EXE") or sys.executable).resolve()),
             "backend_running": running,
             "backend_pid": pid,
             "idle_seconds": self.idle_seconds,
@@ -210,7 +214,7 @@ class BackendManager:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             proc = subprocess.Popen(
                 self._backend_command(),
-                cwd=str(self.bridge_dir.parent),
+                cwd=str(self.runtime_root),
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -325,7 +329,12 @@ class BackendManager:
 
 class WakeServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def __init__(self, address, handler, manager):
         super().__init__(address, handler)

@@ -755,6 +755,8 @@ async function boot() {
   }, 5000);
 }
 
+// Event bindings are ready; background provider/core calls must not gate paint.
+window.teamyra.rendererReady();
 boot().catch(error => {
   console.error('TEAMYRA renderer boot failed', error);
 });

@@ -6,14 +6,14 @@ Prints transcript.md as it grows and exits when DONE appears: exit 0 if the job
 finished, 1 if it failed or was cancelled. Run it as a background task so the
 task view shows the worker's live process and its exit signals completion.
 """
-import sys, time
+import argparse, os, sys, time
 from pathlib import Path
 
-JOBS = Path(__file__).resolve().parent.parent / "jobs"
+JOBS = Path(os.environ.get("TEAMYRA_ROOT") or Path(__file__).resolve().parent.parent) / "jobs"
 
 
-def main(job_id):
-    job = JOBS / job_id
+def main(job_id, runtime_root=None):
+    job = (Path(runtime_root) / "jobs" if runtime_root else JOBS) / job_id
     if not job.exists():
         print(f"no such job: {job_id}")
         return 2
@@ -37,5 +37,13 @@ def main(job_id):
         time.sleep(2)
 
 
+def cli(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("job_id")
+    parser.add_argument("--runtime-root")
+    args = parser.parse_args(argv)
+    return main(args.job_id, args.runtime_root)
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(cli())
