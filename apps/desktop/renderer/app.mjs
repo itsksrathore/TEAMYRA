@@ -508,7 +508,7 @@ async function refreshChatgptStatus() {
     : status.automationReady
       ? 'Connected'
       : status.loginVisible
-        ? 'Sign in inside the panel'
+        ? 'Sign in with Chrome'
         : status.connected
           ? 'Loaded'
           : 'Not opened';

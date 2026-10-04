@@ -33,6 +33,26 @@ function safePopupUrl(url) {
   return url === 'about:blank' || safeHttps(url);
 }
 
+function externalLoginUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'www.chatgpt.com') {
+      return /^\/auth(?:\/|$)/.test(parsed.pathname);
+    }
+    return [
+      'auth.openai.com',
+      'auth0.openai.com',
+      'accounts.google.com',
+      'login.microsoftonline.com',
+      'login.live.com',
+      'appleid.apple.com'
+    ].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 class ChatGPTWebProvider {
   constructor({ window, runtimeRoot }) {
     this.window = window;
@@ -40,7 +60,7 @@ class ChatGPTWebProvider {
     this.stateRoot = path.join(runtimeRoot, 'chatgpt');
     this.statusFile = path.join(this.stateRoot, 'status.json');
     this.workerConversationFile = path.join(this.stateRoot, 'worker-conversation.json');
-    this.sessionManager = new ChatGPTSessionManager();
+    this.sessionManager = new ChatGPTSessionManager(this.stateRoot);
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
     this.popupView = null;
@@ -55,6 +75,7 @@ class ChatGPTWebProvider {
     this.jobTimer = null;
     this.heartbeatTimer = null;
     this.statusRefresh = null;
+    this.externalLoginPromise = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
     this.writeStatus({ detail: 'Embedded ChatGPT available; open it to initialize the session.' });
   }
@@ -96,12 +117,21 @@ class ChatGPTWebProvider {
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
       if (!safePopupUrl(url)) return { action: 'deny' };
+      if (externalLoginUrl(url)) {
+        setImmediate(() => this.loginInChrome(url).catch(() => {}));
+        return { action: 'deny' };
+      }
       return {
         action: 'allow',
         createWindow: options => this.createEmbeddedPopup(options)
       };
     });
     const guardTopLevelNavigation = event => {
+      if (externalLoginUrl(event.url)) {
+        event.preventDefault();
+        this.loginInChrome(event.url).catch(() => {});
+        return;
+      }
       if (!safeHttps(event.url)) event.preventDefault();
     };
     this.view.webContents.on('will-navigate', guardTopLevelNavigation);
@@ -144,11 +174,20 @@ class ChatGPTWebProvider {
     this.window.contentView.addChildView(popup);
 
     const guardTopLevelNavigation = event => {
+      if (externalLoginUrl(event.url)) {
+        event.preventDefault();
+        this.loginInChrome(event.url).catch(() => {});
+        return;
+      }
       if (!safeHttps(event.url)) event.preventDefault();
     };
     popup.webContents.on('will-navigate', guardTopLevelNavigation);
     popup.webContents.on('will-redirect', guardTopLevelNavigation);
     popup.webContents.setWindowOpenHandler(({ url }) => {
+      if (externalLoginUrl(url)) {
+        setImmediate(() => this.loginInChrome(url).catch(() => {}));
+        return { action: 'deny' };
+      }
       if (safePopupUrl(url)) {
         setImmediate(() => {
           if (this.popupView === popup && !popup.webContents.isDestroyed()) {
@@ -176,6 +215,30 @@ class ChatGPTWebProvider {
     try {
       if (!popup.webContents.isDestroyed()) popup.webContents.close();
     } catch {}
+  }
+
+  async loginInChrome(url = 'https://chatgpt.com/auth/login') {
+    if (this.externalLoginPromise) return this.externalLoginPromise;
+    this.writeStatus({
+      detail: 'Finish ChatGPT sign-in in the Chrome window. TEAMYRA will return to the embedded session automatically.'
+    });
+    this.externalLoginPromise = this.sessionManager.loginWithChrome(url)
+      .then(async result => {
+        this.loaded = false;
+        this.lastProbe = null;
+        const view = this.ensureView();
+        await view.webContents.loadURL(CHATGPT_HOME);
+        await this.refreshStatus();
+        return result;
+      })
+      .catch(error => {
+        this.writeStatus({ detail: 'Chrome sign-in failed: ' + String(error?.message || error) });
+        throw error;
+      })
+      .finally(() => {
+        this.externalLoginPromise = null;
+      });
+    return this.externalLoginPromise;
   }
 
   async open() {
@@ -312,7 +375,7 @@ class ChatGPTWebProvider {
           : status.automationReady
             ? 'Embedded ChatGPT session is active.'
           : status.loginVisible
-            ? 'ChatGPT sign-in is required in the embedded view.'
+            ? 'ChatGPT sign-in is required. Starting sign-in opens the local Chrome browser and returns the authenticated session to TEAMYRA.'
             : status.connected
               ? 'ChatGPT page loaded; waiting for an interactive prompt.'
               : 'Embedded ChatGPT is not currently loaded.'
@@ -616,6 +679,7 @@ class ChatGPTWebProvider {
     this.jobTimer = null;
     this.heartbeatTimer = null;
     this.closeEmbeddedPopup();
+    this.sessionManager.destroy();
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.window.contentView.removeChildView(this.view);
       this.view.webContents.close();
