@@ -18,11 +18,20 @@ fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
 const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary } = require('./provider-registry');
 const { callCore } = require('./core-api');
 const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
+const {
+  ensureTeamyraMcp,
+  stopOwnedMcp,
+  getMcpConnections,
+  connectTeamyraMcp
+} = require('./mcp-integration');
 
 let pty = null;
 try { pty = require('@lydell/node-pty'); } catch {}
 const TERMINALS = new Map();
 let chatgptProvider = null;
+let mainWindow = null;
+let isQuitting = false;
+let mcpBootError = null;
 
 const ROOT = RUNTIME_ROOT;
 const JOBS = path.join(ROOT, 'jobs');
@@ -260,7 +269,22 @@ function windowChrome() {
   return {};
 }
 
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    showMainWindow();
+    return mainWindow;
+  }
+
   const win = new BrowserWindow({
     width: 1360,
     height: 900,
@@ -275,16 +299,25 @@ function createWindow() {
       nodeIntegration: false
     }
   });
+  mainWindow = win;
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   chatgptProvider?.destroy();
   chatgptProvider = new ChatGPTWebProvider({ window: win, runtimeRoot: ROOT });
   chatgptProvider.initialize();
   const webContentsId = win.webContents.id;
+  win.on('close', event => {
+    if (isQuitting) return;
+    event.preventDefault();
+    chatgptProvider?.setVisible(false);
+    win.hide();
+  });
   win.webContents.on('destroyed', () => {
     killTerminalsFor(webContentsId);
     chatgptProvider?.destroy();
     chatgptProvider = null;
+    if (mainWindow === win) mainWindow = null;
   });
+  return win;
 }
 
 ipcMain.handle('teamyra:update-status', () => ({ ...UPDATE_STATE }));
@@ -305,6 +338,15 @@ ipcMain.handle('teamyra:update-install', () => {
 });
 
 ipcMain.handle('teamyra:providers', () => providersCached(true));
+ipcMain.handle('teamyra:mcp-connections', async () => {
+  const state = await getMcpConnections();
+  return { ...state, bootError: mcpBootError };
+});
+ipcMain.handle('teamyra:mcp-connect', async (_event, providerId) => {
+  const result = await connectTeamyraMcp(String(providerId || ''));
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return result;
+});
 ipcMain.handle('teamyra:jobs', () => listJobs());
 ipcMain.handle('teamyra:transcript', (_event, jobId, offset) => readTranscript(jobId, offset));
 ipcMain.handle('teamyra:task-start', (_event, options = {}) =>
@@ -770,14 +812,35 @@ ipcMain.handle('teamyra:update-account', async (_event, providerId, profileId, p
   };
 });
 
-app.whenReady().then(() => {
-  createWindow();
-  setupAutoUpdates();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => showMainWindow());
+
+  app.whenReady().then(async () => {
+    try {
+      await ensureTeamyraMcp();
+      mcpBootError = null;
+    } catch (error) {
+      mcpBootError = String(error?.message || error || 'TEAMYRA MCP failed to start');
+    }
+
+    const win = createWindow();
+    if (process.argv.includes('--background')) {
+      chatgptProvider?.setVisible(false);
+      win.hide();
+    }
+    setupAutoUpdates();
+    app.on('activate', () => showMainWindow());
   });
+}
+
+app.on('before-quit', () => {
+  isQuitting = true;
+  stopOwnedMcp();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Closing the UI keeps TEAMYRA running so jobs, MCP and embedded agents can continue.
 });
