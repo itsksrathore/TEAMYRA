@@ -9,6 +9,7 @@ let activeView = 'tasks';
 let taskFilter = 'active';
 let currentJobs = [];
 let currentProviders = [];
+let currentMcpConnections = { endpoint: '', service: { running: false }, providers: {} };
 let terminal = null;
 let fitAddon = null;
 let terminalSessionId = null;
@@ -238,6 +239,21 @@ function profileActionLabel(provider, profile) {
   return profile.signedIn ? 'Open' : 'Connect';
 }
 
+function mcpConnectionFor(providerId) {
+  return currentMcpConnections?.providers?.[providerId] || null;
+}
+
+function mcpButtonHtml(provider) {
+  if (!['claude', 'codex', 'antigravity'].includes(provider.id)) return '';
+  const state = mcpConnectionFor(provider.id);
+  const connected = state?.connected === true;
+  const disabled = provider.installed !== true;
+  const title = state?.detail || (disabled ? 'Install this provider CLI first' : 'Connect this provider to the local TEAMYRA MCP');
+  return `<button class="profile-action mcp-action ${connected ? 'connected' : ''}" type="button"
+    data-connect-mcp="${escapeHtml(provider.id)}" ${disabled ? 'disabled' : ''}
+    title="${escapeHtml(title)}">${connected ? 'MCP Connected' : 'Connect Teamyra'}</button>`;
+}
+
 function agentCardHtml(provider) {
   const meta = providerMeta(provider.id);
   const profiles = profileRows(provider);
@@ -279,6 +295,7 @@ function agentCardHtml(provider) {
       </div>
       <div class="profile-list">${rows}</div>
       <div class="agent-card-foot">
+        ${mcpButtonHtml(provider)}
         ${provider.managedProfilesVerified && provider.installed
           ? `<button class="profile-action" type="button" data-add-account="${escapeHtml(provider.id)}">+ Account</button>`
           : ''}
@@ -288,14 +305,21 @@ function agentCardHtml(provider) {
 }
 
 async function refreshAgents() {
-  currentProviders = await window.teamyra.providers();
+  const [providers, mcpConnections] = await Promise.all([
+    window.teamyra.providers(),
+    window.teamyra.mcpConnections()
+  ]);
+  currentProviders = providers;
+  currentMcpConnections = mcpConnections || { endpoint: '', service: { running: false }, providers: {} };
   const connected = currentProviders.filter(provider =>
     provider.id === 'chatgpt-web'
       ? provider.signedIn === true
       : profileRows(provider).some(profile => profile.signedIn)
   ).length;
+  const mcpConnected = ['claude', 'codex', 'antigravity']
+    .filter(id => currentMcpConnections?.providers?.[id]?.connected === true).length;
 
-  $('#agentSummary').textContent = connected + ' connected · ' + currentProviders.length + ' available';
+  $('#agentSummary').textContent = connected + ' agents · ' + mcpConnected + ' MCP';
   $('#agentGrid').innerHTML = currentProviders.map(agentCardHtml).join('');
 
   $('#agentGrid').querySelectorAll('[data-provider][data-profile]').forEach(button => {
@@ -308,6 +332,28 @@ async function refreshAgents() {
         signedIn: button.dataset.signedIn === '1'
       };
       openProvider(provider, profile).catch(error => alert(String(error?.message || error)));
+    });
+  });
+
+  $('#agentGrid').querySelectorAll('[data-connect-mcp]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const providerId = button.dataset.connectMcp;
+      if (!providerId || button.disabled) return;
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Connecting…';
+      try {
+        const result = await window.teamyra.connectMcp(providerId);
+        if (!result?.ok) {
+          const detail = result?.error || result?.status?.detail || result?.reason || 'TEAMYRA MCP connection failed';
+          throw new Error(detail);
+        }
+        await refreshAgents();
+      } catch (error) {
+        alert('Could not connect TEAMYRA MCP: ' + String(error?.message || error));
+        button.disabled = false;
+        button.textContent = original;
+      }
     });
   });
 
