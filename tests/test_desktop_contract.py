@@ -188,6 +188,7 @@ class DesktopContractTests(unittest.TestCase):
         self.assertIn("mcp', 'add', 'teamyra', '--url'", mcp_integration)
         self.assertIn("mcp_config.json", mcp_integration)
         self.assertIn("serverUrl", mcp_integration)
+        self.assertIn("cwd: os.homedir()", mcp_integration)
         self.assertIn("127.0.0.1", mcp_integration)
         self.assertIn("8787", mcp_integration)
 
