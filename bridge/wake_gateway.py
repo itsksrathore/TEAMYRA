@@ -49,16 +49,54 @@ def _allowed_host(value):
     return _host_name(value) in {"127.0.0.1", "localhost", "::1"}
 
 
-def active_jobs(runtime_root):
+def process_alive(pid):
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return False
+                return code.value == 259
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def active_jobs(runtime_root, max_age=600):
     jobs = Path(runtime_root) / "jobs"
     if not jobs.exists():
         return False
+    now = time.time()
     for meta in jobs.glob("*/meta.json"):
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(data.get("state") or "").lower() in ACTIVE_JOB_STATES:
+        if str(data.get("state") or "").lower() not in ACTIVE_JOB_STATES:
+            continue
+        if process_alive(data.get("runner_pid")) or process_alive(data.get("worker_pid")):
+            return True
+        try:
+            heartbeat = float(data.get("heartbeat_at") or data.get("updated") or data.get("started") or data.get("created") or 0)
+        except Exception:
+            heartbeat = 0
+        if heartbeat > 0 and now - heartbeat <= max(30, int(max_age)):
             return True
     return False
 
@@ -104,7 +142,7 @@ class BackendManager:
             "backend_pid": pid,
             "idle_seconds": self.idle_seconds,
             "idle_for_seconds": idle_for,
-            "active_jobs": active_jobs(self.runtime_root),
+            "active_jobs": active_jobs(self.runtime_root, self.idle_seconds),
         }
 
     def _backend_command(self):
@@ -275,7 +313,7 @@ class BackendManager:
                 continue
             if active_requests or idle_for < self.idle_seconds:
                 continue
-            if active_jobs(self.runtime_root):
+            if active_jobs(self.runtime_root, self.idle_seconds):
                 self.touch()
                 continue
             self.stop_backend()

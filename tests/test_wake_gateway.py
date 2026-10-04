@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -22,8 +23,11 @@ class WakeGatewayTests(unittest.TestCase):
             self.assertFalse(wake_gateway.active_jobs(root))
 
             (jobs / "live").mkdir(parents=True)
-            (jobs / "live" / "meta.json").write_text(json.dumps({"state": "running"}), encoding="utf-8")
+            (jobs / "live" / "meta.json").write_text(json.dumps({"state": "running", "updated": time.time()}), encoding="utf-8")
             self.assertTrue(wake_gateway.active_jobs(root))
+
+            (jobs / "live" / "meta.json").write_text(json.dumps({"state": "running", "updated": time.time() - 3600}), encoding="utf-8")
+            self.assertFalse(wake_gateway.active_jobs(root, max_age=60))
 
     def test_health_check_does_not_wake_backend(self):
         with tempfile.TemporaryDirectory() as td:

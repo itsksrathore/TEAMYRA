@@ -195,6 +195,10 @@ function listJobs(limit = 30) {
           created: data.created || 0,
           started: data.started || 0,
           ended: data.ended || 0,
+          updated: data.updated || 0,
+          heartbeatAt: data.heartbeat_at || 0,
+          runnerPid: data.runner_pid || 0,
+          workerPid: data.worker_pid || 0,
           lastEvent: data.last_event || ''
         };
       } catch {
@@ -206,10 +210,28 @@ function listJobs(limit = 30) {
     .slice(0, limit);
 }
 
-function hasActiveDesktopWork() {
+function pidAlive(pid) {
+  const value = Number(pid) || 0;
+  if (value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function jobBlocksDesktopSleep(job) {
   const activeStates = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
+  if (!activeStates.has(job?.state)) return false;
+  if (pidAlive(job.runnerPid) || pidAlive(job.workerPid)) return true;
+  const stamp = Number(job.heartbeatAt || job.updated || job.started || job.created) || 0;
+  return stamp > 0 && (Date.now() / 1000 - stamp) <= DESKTOP_IDLE_SECONDS;
+}
+
+function hasActiveDesktopWork() {
   if (TERMINALS.size > 0) return true;
-  if (currentJobsSafe().some(job => activeStates.has(job.state))) return true;
+  if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if (chatgptProvider?.busy === true) return true;
   return false;
 }
