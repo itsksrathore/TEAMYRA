@@ -15,6 +15,7 @@ let fitAddon = null;
 let terminalSessionId = null;
 let terminalResizeObserver = null;
 let chatgptBoundsObserver = null;
+let activeChatgptProfileId = 'web';
 const transcriptState = new Map();
 
 const ACTIVE_STATES = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
@@ -49,7 +50,7 @@ function workerIdForProfile(providerId, profileId) {
     return 'codex-' + safeSlug(profileId);
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
-  if (providerId === 'chatgpt-web') return 'chatgpt-normal';
+  if (providerId === 'chatgpt-web') return profileId === 'web' ? 'chatgpt-normal' : 'chatgpt-' + safeSlug(profileId);
   return '';
 }
 
@@ -369,22 +370,46 @@ async function refreshAgents() {
   $('#agentGrid').querySelectorAll('[data-add-account]').forEach(button => {
     button.addEventListener('click', async () => {
       const provider = currentProviders.find(item => item.id === button.dataset.addAccount);
-      if (!provider) return;
-      const name = prompt('Account name:', provider.name + ' 2');
-      if (!name) return;
+      if (!provider || button.disabled) return;
+
+      const existingNames = new Set(
+        profileRows(provider)
+          .map(profile => String(profile.name || '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+      let suffix = 2;
+      let name = provider.name + ' ' + suffix;
+      while (existingNames.has(name.toLowerCase())) {
+        suffix += 1;
+        name = provider.name + ' ' + suffix;
+      }
+
+      const originalText = button.textContent;
       button.disabled = true;
+      button.textContent = 'Adding…';
       try {
         const result = await window.teamyra.addAccount(provider.id, name);
         if (!result?.ok) throw new Error(result?.reason || 'Could not create account');
-        await openTerminal({
-          providerId: provider.id,
-          profileId: result.profileId,
-          login: true,
-          label: provider.name + ' · ' + result.name
-        });
+
+        if (provider.id === 'chatgpt-web') {
+          await openChatgptDetail(result.profileId);
+        } else {
+          await openTerminal({
+            providerId: provider.id,
+            profileId: result.profileId,
+            login: true,
+            label: provider.name + ' · ' + result.name
+          });
+          refreshAgents().catch(() => {});
+        }
+      } catch (error) {
+        alert('Could not add account: ' + String(error?.message || error));
+        await refreshAgents().catch(() => {});
       } finally {
-        button.disabled = false;
-        refreshAgents().catch(() => {});
+        if (button.isConnected) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
       }
     });
   });
@@ -394,7 +419,7 @@ async function refreshAgents() {
 
 async function openProvider(provider, profile) {
   if (provider.id === 'chatgpt-web') {
-    await openChatgptDetail();
+    await openChatgptDetail(profile.id || 'web');
     return;
   }
   if (!provider.installed) {
@@ -508,7 +533,7 @@ async function refreshChatgptStatus() {
     : status.automationReady
       ? 'Connected'
       : status.loginVisible
-        ? 'Sign in with Chrome'
+        ? 'Sign in required'
         : status.connected
           ? 'Loaded'
           : 'Not opened';
@@ -545,7 +570,8 @@ function syncChatgptBounds() {
   }).catch(() => {});
 }
 
-async function openChatgptDetail() {
+async function openChatgptDetail(profileId = 'web') {
+  activeChatgptProfileId = profileId || 'web';
   activeView = 'agents';
   $('#agentsShelf').hidden = true;
   $('#chatgptDetail').hidden = false;
@@ -561,7 +587,7 @@ async function openChatgptDetail() {
     window.addEventListener('resize', syncChatgptBounds);
   }
   syncChatgptBounds();
-  await window.teamyra.openChatgpt();
+  await window.teamyra.openChatgpt(activeChatgptProfileId);
   await refreshChatgptStatus();
 }
 

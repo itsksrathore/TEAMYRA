@@ -81,6 +81,23 @@ class WorkerRegistryTests(unittest.TestCase):
             self.assertEqual(item["provider"], "claude")
             self.assertEqual(item["label"], "Claude Work")
 
+    def test_managed_chatgpt_profiles_are_discovered_as_desktop_web_workers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile = root / "profiles" / "chatgpt-web" / "personal-bb22"
+            profile.mkdir(parents=True)
+            (profile / "teamyra-profile.json").write_text(
+                json.dumps({"name": "ChatGPT Personal", "priority": 175}), encoding="utf-8"
+            )
+            workers = build_worker_registry(root, home=root / "home")
+            self.assertIn("chatgpt-personal-bb22", workers)
+            item = workers["chatgpt-personal-bb22"]
+            self.assertEqual(item["provider"], "chatgpt-web")
+            self.assertEqual(item["profile_id"], "personal-bb22")
+            self.assertEqual(item["execution"], "desktop-web")
+            self.assertEqual(item["label"], "ChatGPT Personal")
+            self.assertEqual(item["priority"], 175)
+
     def test_worker_parts_are_path_safe(self):
         self.assertEqual(safe_worker_part("My Account / #2"), "My-Account-2")
 

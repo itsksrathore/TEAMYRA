@@ -30,10 +30,10 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Cookies/session storage are owned by Chromium. TEAMYRA does not store ChatGPT usernames or passwords.
 - `nodeIntegration=false`, `contextIsolation=true`, and `sandbox=true`.
 - Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled.
-- Normal ChatGPT browsing stays in the sandboxed embedded `WebContentsView`.
-- When ChatGPT authentication navigates to an approved sign-in endpoint, TEAMYRA opens the installed Google Chrome executable with a dedicated TEAMYRA-only browser profile. Credentials are entered directly in Chrome, never into TEAMYRA UI or logs.
-- After Chrome reaches an authenticated ChatGPT prompt, TEAMYRA imports only ChatGPT/OpenAI-domain session cookies into the persistent embedded partition, closes the temporary Chrome login window, and reloads the embedded ChatGPT page.
-- TEAMYRA never reads or modifies the user's normal Chrome profile; each login bridge uses an ephemeral `chatgpt/chrome-login-*` profile under TEAMYRA runtime state, binds DevTools to loopback only, and removes that temporary profile when the handoff ends.
+- Normal ChatGPT browsing and authentication stay inside the sandboxed embedded `WebContentsView`; TEAMYRA does not open an external browser for ChatGPT sign-in.
+- The default account keeps the backward-compatible `persist:teamyra-chatgpt-profile` partition. Extra ChatGPT accounts use their own persistent partitions derived from a safe profile ID, so cookies/local storage and logins remain isolated.
+- The Agents shelf can create additional ChatGPT accounts. Opening an account switches the embedded view to that account's isolated partition, and delegated jobs use the job's `profile_id` to select the correct account automatically.
+- Credentials are entered directly into the ChatGPT/OpenAI authentication pages rendered by Chromium; TEAMYRA does not store passwords.
 - Unapproved popup/navigation destinations remain denied.
 - CAPTCHA/human-verification pages are surfaced to the user. TEAMYRA does not attempt to bypass them.
 

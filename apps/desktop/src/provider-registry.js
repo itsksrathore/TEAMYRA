@@ -43,7 +43,7 @@ const PROVIDERS = [
     bin: null,
     nativeHome: null,
     status: { kind: 'web' },
-    managed: { verified: false, env: null },
+    managed: { verified: true, env: null, webProfiles: true },
     color: 'blue'
   }
 ];
@@ -199,7 +199,7 @@ async function detectProviders() {
         binary: 'Embedded Chromium · persistent session',
         signedIn: false,
         status: 'Open inside TEAMYRA to connect',
-        managedProfilesVerified: false,
+        managedProfilesVerified: true,
         managedProfileEnv: null,
         profiles: [{
           id: 'web',
@@ -213,7 +213,7 @@ async function detectProviders() {
           model: '',
           effort: '',
           permissionMode: ''
-        }]
+        }, ...managedProfiles(provider)]
       };
     }
     const binary = await whereBinary(provider.bin);

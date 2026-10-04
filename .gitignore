@@ -1,6 +1,7 @@
 # TEAMYRA / AI-Orchestrator runtime and credentials
 .env
 .env.*
+.teamyra-desktop/
 profiles/
 jobs/
 logs/

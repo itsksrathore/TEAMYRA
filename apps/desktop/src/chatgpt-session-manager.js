@@ -1,10 +1,28 @@
 const { session } = require('electron');
 
-const PARTITION = 'persist:teamyra-chatgpt-profile';
+const DEFAULT_PROFILE_ID = 'web';
+const DEFAULT_PARTITION = 'persist:teamyra-chatgpt-profile';
+
+function safeProfileId(value) {
+  return String(value || DEFAULT_PROFILE_ID)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || DEFAULT_PROFILE_ID;
+}
+
+function partitionForProfile(profileId = DEFAULT_PROFILE_ID) {
+  const id = safeProfileId(profileId);
+  return id === DEFAULT_PROFILE_ID
+    ? DEFAULT_PARTITION
+    : DEFAULT_PARTITION + '-' + id;
+}
 
 class ChatGPTSessionManager {
-  constructor() {
-    this.partition = PARTITION;
+  constructor(profileId = DEFAULT_PROFILE_ID) {
+    this.profileId = safeProfileId(profileId);
+    this.partition = partitionForProfile(this.profileId);
     this.session = null;
   }
 
@@ -31,4 +49,9 @@ class ChatGPTSessionManager {
   }
 }
 
-module.exports = { ChatGPTSessionManager, CHATGPT_PARTITION: PARTITION };
+module.exports = {
+  ChatGPTSessionManager,
+  CHATGPT_PARTITION: DEFAULT_PARTITION,
+  DEFAULT_CHATGPT_PROFILE_ID: DEFAULT_PROFILE_ID,
+  partitionForProfile
+};

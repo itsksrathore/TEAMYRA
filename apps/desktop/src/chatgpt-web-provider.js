@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { WebContentsView } = require('electron');
-const { ChatGPTSessionManager } = require('./chatgpt-session-manager');
+const { ChatGPTSessionManager, DEFAULT_CHATGPT_PROFILE_ID } = require('./chatgpt-session-manager');
 const { ChatGPTAutomationAdapter } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
 
@@ -39,8 +39,9 @@ class ChatGPTWebProvider {
     this.runtimeRoot = runtimeRoot;
     this.stateRoot = path.join(runtimeRoot, 'chatgpt');
     this.statusFile = path.join(this.stateRoot, 'status.json');
+    this.activeProfileId = DEFAULT_CHATGPT_PROFILE_ID;
     this.workerConversationFile = path.join(this.stateRoot, 'worker-conversation.json');
-    this.sessionManager = new ChatGPTSessionManager();
+    this.sessionManager = new ChatGPTSessionManager(this.activeProfileId);
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
     this.popupView = null;
@@ -56,16 +57,36 @@ class ChatGPTWebProvider {
     this.heartbeatTimer = null;
     this.statusRefresh = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
-    this.writeStatus({ detail: 'Embedded ChatGPT available; open it to initialize the session.' });
+    this.writeStatus({
+      profile_update: false,
+      detail: 'Embedded ChatGPT available; open it to initialize the session.',
+      automation_ready: false,
+      worker_ready: false,
+      connected: false,
+      login_visible: false,
+      challenged: false,
+      busy: false,
+      url: ''
+    });
   }
 
   initialize() {
     this.sessionManager.initialize();
+    this.profileSessionStatus(this.activeProfileId).then(profile => {
+      this.writeStatus({
+        session_present: profile.signedIn === true,
+        profile_update: true
+      });
+    }).catch(() => {});
     if (!this.heartbeatTimer) {
       this.heartbeatTimer = setInterval(() => {
-        // An unopened web session cannot be ready for jobs. Do not launch a
-        // Python core every five seconds merely to publish that same status.
-        if (this.view || this.busy) this.refreshStatus().catch(() => {});
+        if (this.view || this.busy) {
+          this.refreshStatus().catch(() => {});
+        } else {
+          // Keep only the desktop heartbeat fresh while the heavy web view is
+          // asleep. A queued job will lazy-open the correct profile.
+          this.writeStatus({ profile_update: false });
+        }
       }, 5000);
       this.heartbeatTimer.unref?.();
     }
@@ -73,6 +94,48 @@ class ChatGPTWebProvider {
       this.jobTimer = setInterval(() => this.processPendingJobs().catch(() => {}), 2000);
       this.jobTimer.unref?.();
     }
+    return this.getStatus();
+  }
+
+  profileConversationFile(profileId = this.activeProfileId) {
+    return profileId === DEFAULT_CHATGPT_PROFILE_ID
+      ? path.join(this.stateRoot, 'worker-conversation.json')
+      : path.join(this.stateRoot, 'worker-conversation-' + profileId + '.json');
+  }
+
+  async profileSessionStatus(profileId) {
+    const manager = profileId === this.activeProfileId
+      ? this.sessionManager
+      : new ChatGPTSessionManager(profileId);
+    const summary = await manager.cookieSummary().catch(() => ({ count: 0, hasSessionCookies: false }));
+    return {
+      profileId,
+      signedIn: summary.hasSessionCookies === true,
+      cookieCount: summary.count
+    };
+  }
+
+  async switchProfile(profileId = DEFAULT_CHATGPT_PROFILE_ID) {
+    const next = String(profileId || DEFAULT_CHATGPT_PROFILE_ID).trim() || DEFAULT_CHATGPT_PROFILE_ID;
+    if (next === this.activeProfileId) return this.getStatus();
+    if (this.busy) throw new Error('Cannot switch ChatGPT account while a task is running');
+
+    this.closeEmbeddedPopup();
+    if (this.view && !this.view.webContents.isDestroyed()) {
+      try { this.window.contentView.removeChildView(this.view); } catch {}
+      try { this.view.webContents.close(); } catch {}
+    }
+    this.view = null;
+    this.automation = null;
+    this.interactionCssKey = null;
+    this.loaded = false;
+    this.lastProbe = null;
+    this.activeProfileId = next;
+    this.workerConversationFile = this.profileConversationFile(next);
+    this.sessionManager = new ChatGPTSessionManager(next);
+    this.sessionManager.initialize();
+    this.writeStatus({ active_profile_id: next, automation_ready: false, worker_ready: false, connected: false });
+    if (this.visible) await this.open();
     return this.getStatus();
   }
 
@@ -265,8 +328,9 @@ class ChatGPTWebProvider {
     let workspace = null;
     try { workspace = await this.workspaceBridge.status(); } catch {}
     return {
-      id: 'chatgpt-normal',
+      id: this.activeProfileId === DEFAULT_CHATGPT_PROFILE_ID ? 'chatgpt-normal' : 'chatgpt-' + this.activeProfileId,
       provider: 'chatgpt-web',
+      profileId: this.activeProfileId,
       connected: Boolean(this.view && !this.view.webContents.isDestroyed() && this.loaded),
       visible: this.visible,
       loaded: this.loaded,
@@ -323,12 +387,32 @@ class ChatGPTWebProvider {
   writeStatus(patch = {}) {
     let current = {};
     try { current = JSON.parse(fs.readFileSync(this.statusFile, 'utf8')); } catch {}
+    const profileId = patch.active_profile_id || this.activeProfileId || DEFAULT_CHATGPT_PROFILE_ID;
+    const workerId = profileId === DEFAULT_CHATGPT_PROFILE_ID ? 'chatgpt-normal' : 'chatgpt-' + profileId;
+    const statusPatch = { ...patch };
+    const updateProfile = statusPatch.profile_update !== false;
+    delete statusPatch.profile_update;
+
+    const profilePatch = { heartbeat_at: Date.now() / 1000 };
+    for (const key of [
+      'automation_ready', 'worker_ready', 'connected', 'login_visible',
+      'challenged', 'busy', 'url', 'detail', 'session_present'
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(statusPatch, key)) profilePatch[key] = statusPatch[key];
+    }
+
+    const profiles = { ...(current.profiles || {}) };
+    if (updateProfile) {
+      profiles[profileId] = { ...(profiles[profileId] || {}), ...profilePatch };
+    }
     const data = {
       ...current,
       provider: 'chatgpt-web',
-      worker: 'chatgpt-normal',
+      worker: workerId,
+      active_profile_id: profileId,
       heartbeat_at: Date.now() / 1000,
-      ...patch
+      profiles,
+      ...statusPatch
     };
     const temp = this.statusFile + '.tmp-' + process.pid;
     fs.writeFileSync(temp, JSON.stringify(data, null, 2), 'utf8');
@@ -448,9 +532,17 @@ class ChatGPTWebProvider {
     }
     candidates.sort((a, b) => (a.meta.created || 0) - (b.meta.created || 0));
     if (!candidates.length) return;
+    const candidate = candidates[0];
+    const profileId = String(candidate.meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID);
+    if (profileId !== this.activeProfileId) {
+      await this.switchProfile(profileId);
+    }
+    if (!this.view || this.view.webContents.isDestroyed()) {
+      await this.open();
+    }
     const status = await this.refreshStatus();
     if (!status.workerReady) return;
-    await this.runDelegatedJob(candidates[0].dir);
+    await this.runDelegatedJob(candidate.dir);
   }
 
   writeJobMeta(jobDir, patch) {

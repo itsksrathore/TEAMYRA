@@ -4,17 +4,55 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createStartupLog, loadDesktopWindow } = require('./startup-diagnostics');
+
+const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
+
+function looksLikeTeamyraRoot(candidate) {
+  try {
+    return fs.existsSync(path.join(candidate, 'bridge')) &&
+      fs.existsSync(path.join(candidate, 'apps', 'desktop', 'package.json'));
+  } catch {
+    return false;
+  }
+}
+
+function resolveTeamyraRoot() {
+  if (process.env.TEAMYRA_ROOT) return path.resolve(process.env.TEAMYRA_ROOT);
+  if (!app.isPackaged && looksLikeTeamyraRoot(SOURCE_ROOT)) return SOURCE_ROOT;
+
+  let cursor = path.dirname(process.execPath);
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (looksLikeTeamyraRoot(cursor)) return cursor;
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+
+  // Keep packaged state beside the app instead of scattering TEAMYRA runtime
+  // data through AppData. Installed/portable builds can override TEAMYRA_ROOT.
+  return app.isPackaged
+    ? path.join(path.dirname(process.execPath), 'teamyra-data')
+    : SOURCE_ROOT;
+}
+
+const RUNTIME_ROOT = path.resolve(resolveTeamyraRoot());
+process.env.TEAMYRA_ROOT = RUNTIME_ROOT;
+fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
+
+const DESKTOP_USER_DATA = path.join(RUNTIME_ROOT, '.teamyra-desktop');
+fs.mkdirSync(DESKTOP_USER_DATA, { recursive: true });
+app.setPath('userData', DESKTOP_USER_DATA);
+
 const startupLog = createStartupLog(path.join(app.getPath('userData'), 'logs'));
 process.on('uncaughtExceptionMonitor', error => startupLog('uncaught-exception', { error: String(error.stack || error) }));
 process.on('unhandledRejection', error => startupLog('unhandled-rejection', { error: String(error?.stack || error) }));
-startupLog('starting', { packaged: app.isPackaged, resources: process.resourcesPath, version: app.getVersion() });
-
-const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
-const RUNTIME_ROOT = path.resolve(
-  process.env.TEAMYRA_ROOT ||
-  (app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : SOURCE_ROOT)
-);
-process.env.TEAMYRA_ROOT = RUNTIME_ROOT;
+startupLog('starting', {
+  packaged: app.isPackaged,
+  resources: process.resourcesPath,
+  version: app.getVersion(),
+  runtimeRoot: RUNTIME_ROOT,
+  userData: app.getPath('userData')
+});
 if (app.isPackaged && !process.env.TEAMYRA_CORE_EXE) {
   process.env.TEAMYRA_CORE_EXE = path.join(process.resourcesPath, 'teamyra-core', 'teamyra-core.exe');
 }
@@ -122,8 +160,19 @@ async function providersCached(force = false) {
           const chatStatus = await chatgptProvider.getStatus();
           const provider = data.find(item => item.id === 'chatgpt-web');
           if (provider) {
-            provider.signedIn = chatStatus.automationReady === true;
+            const statuses = await Promise.all((provider.profiles || []).map(profile =>
+              chatgptProvider.profileSessionStatus(profile.id).catch(() => ({ signedIn: false }))
+            ));
+            const signedById = new Map(statuses.map(item => [item.profileId, item.signedIn === true]));
+            provider.profiles = (provider.profiles || []).map(profile => ({
+              ...profile,
+              signedIn: profile.id === chatStatus.profileId
+                ? (chatStatus.automationReady === true || signedById.get(profile.id) === true)
+                : signedById.get(profile.id) === true
+            }));
+            provider.signedIn = provider.profiles.some(profile => profile.signedIn);
             provider.workerReady = chatStatus.workerReady === true;
+            provider.activeProfileId = chatStatus.profileId || 'web';
             provider.status = chatStatus.challenged
               ? 'User verification required'
               : chatStatus.automationReady
@@ -133,10 +182,6 @@ async function providersCached(force = false) {
                   : chatStatus.connected
                     ? 'Embedded page connected'
                     : 'Open inside TEAMYRA to connect';
-            provider.profiles = (provider.profiles || []).map(profile => ({
-              ...profile,
-              signedIn: provider.signedIn
-            }));
           }
         } catch {}
       }
@@ -163,7 +208,7 @@ function workerIdForProfile(providerId, profileId) {
     return 'codex-' + safeWorkerPart(profileId);
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
-  if (providerId === 'chatgpt-web' && profileId === 'web') return 'chatgpt-normal';
+  if (providerId === 'chatgpt-web') return profileId === 'web' ? 'chatgpt-normal' : 'chatgpt-' + safeWorkerPart(profileId);
   return '';
 }
 
@@ -605,8 +650,9 @@ ipcMain.handle('teamyra:memory-context', (_event, options = {}) =>
 );
 
 ipcMain.handle('teamyra:chatgpt-status', () => chatgptProvider?.refreshStatus() || { connected: false });
-ipcMain.handle('teamyra:chatgpt-open', () => {
+ipcMain.handle('teamyra:chatgpt-open', async (_event, profileId = 'web') => {
   if (!chatgptProvider) throw new Error('ChatGPT provider is unavailable');
+  await chatgptProvider.switchProfile(String(profileId || 'web'));
   return chatgptProvider.open();
 });
 ipcMain.handle('teamyra:chatgpt-close', () => chatgptProvider?.close() || { connected: false });
@@ -860,7 +906,9 @@ function safeSettingToken(value, field, maxLength = 120) {
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
-  if (!provider.managed?.verified || !provider.managed.env || !provider.managed.loginArgv) {
+  const webProfile = provider.kind === 'web' && provider.managed?.webProfiles === true;
+  const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
+  if (!webProfile && !cliProfile) {
     return { ok: false, reason: 'profile-isolation-not-verified' };
   }
 

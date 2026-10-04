@@ -140,9 +140,25 @@ def worker_auth_status(info, use_cache=True):
             except Exception:
                 status = {}
             age = now - float(status.get("heartbeat_at") or 0)
-            ready = age <= 20 and status.get("worker_ready") is True
-            detail = str(status.get("detail") or (
-                "embedded ChatGPT session ready" if ready else "open ChatGPT in TEAMYRA and sign in"
+            profile_id = str(info.get("profile_id") or "web")
+            profile_status = (status.get("profiles") or {}).get(profile_id) or {}
+            workspace_ready = bool(status.get("workspace"))
+            if profile_id == str(status.get("active_profile_id") or "web"):
+                profile_ready = (
+                    status.get("worker_ready") is True or
+                    profile_status.get("automation_ready") is True or
+                    profile_status.get("session_present") is True
+                ) and workspace_ready
+                profile_detail = status.get("detail") or profile_status.get("detail")
+            else:
+                profile_ready = (
+                    profile_status.get("automation_ready") is True or
+                    profile_status.get("session_present") is True
+                ) and workspace_ready
+                profile_detail = profile_status.get("detail")
+            ready = age <= 20 and profile_ready
+            detail = str(profile_detail or (
+                "embedded ChatGPT session ready" if ready else "open this ChatGPT account in TEAMYRA and sign in"
             ))
         else:
             ready, detail = False, "unsupported provider"

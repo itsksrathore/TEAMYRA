@@ -122,13 +122,14 @@ class DesktopContractTests(unittest.TestCase):
         self.assertIn("setWindowOpenHandler", self.chatgpt_provider)
         self.assertNotIn("shell.openExternal", self.chatgpt_provider)
 
-    def test_chatgpt_external_chrome_login_handoff_is_local_and_scoped(self):
-        self.assertIn("loginWithChrome", self.chatgpt_session)
-        self.assertIn("--remote-debugging-port=0", self.chatgpt_session)
-        self.assertIn("chrome-login-", self.chatgpt_session)
-        self.assertIn("ALLOWED_COOKIE_DOMAINS", self.chatgpt_session)
-        self.assertIn("externalLoginUrl", self.chatgpt_provider)
-        self.assertIn("this.loginInChrome", self.chatgpt_provider)
+    def test_chatgpt_login_stays_embedded_and_profiles_are_isolated(self):
+        self.assertIn("partitionForProfile", self.chatgpt_session)
+        self.assertIn("DEFAULT_CHATGPT_PROFILE_ID", self.chatgpt_session)
+        self.assertIn("persist:teamyra-chatgpt-profile", self.chatgpt_session)
+        self.assertIn("switchProfile", self.chatgpt_provider)
+        self.assertIn("profileSessionStatus", self.chatgpt_provider)
+        self.assertNotIn("loginWithChrome", self.chatgpt_session)
+        self.assertNotIn("shell.openExternal", self.chatgpt_provider)
         self.assertNotIn("password", self.chatgpt_session.lower())
 
     def test_chatgpt_automation_is_semantic_not_coordinate_based(self):

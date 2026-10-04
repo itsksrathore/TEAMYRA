@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld('teamyra', {
   searchLogs: (options) => ipcRenderer.invoke('teamyra:logs-search', options || {}),
   usage: (options) => ipcRenderer.invoke('teamyra:usage', options || {}),
   chatgptStatus: () => ipcRenderer.invoke('teamyra:chatgpt-status'),
-  openChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-open'),
+  openChatgpt: (profileId = 'web') => ipcRenderer.invoke('teamyra:chatgpt-open', profileId),
   closeChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-close'),
   reloadChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-reload'),
   reconnectChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-reconnect'),
