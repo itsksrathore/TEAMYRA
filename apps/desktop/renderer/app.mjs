@@ -246,9 +246,12 @@ function mcpConnectionFor(providerId) {
 function mcpButtonHtml(provider) {
   if (!['claude', 'codex', 'antigravity'].includes(provider.id)) return '';
   const state = mcpConnectionFor(provider.id);
-  const connected = state?.connected === true;
+  const serviceOnline = currentMcpConnections?.service?.running === true;
+  const connected = state?.connected === true && serviceOnline;
   const disabled = provider.installed !== true;
-  const title = state?.detail || (disabled ? 'Install this provider CLI first' : 'Connect this provider to the local TEAMYRA MCP');
+  const title = !serviceOnline && state?.connected
+    ? 'TEAMYRA MCP is configured but the local service is offline'
+    : state?.detail || (disabled ? 'Install this provider CLI first' : 'Connect this provider to the local TEAMYRA MCP');
   return `<button class="profile-action mcp-action ${connected ? 'connected' : ''}" type="button"
     data-connect-mcp="${escapeHtml(provider.id)}" ${disabled ? 'disabled' : ''}
     title="${escapeHtml(title)}">${connected ? 'MCP Connected' : 'Connect Teamyra'}</button>`;
@@ -316,10 +319,10 @@ async function refreshAgents() {
       ? provider.signedIn === true
       : profileRows(provider).some(profile => profile.signedIn)
   ).length;
-  const mcpConnected = ['claude', 'codex', 'antigravity']
-    .filter(id => currentMcpConnections?.providers?.[id]?.connected === true).length;
-
   const serviceOnline = currentMcpConnections?.service?.running === true;
+  const mcpConnected = serviceOnline
+    ? ['claude', 'codex', 'antigravity'].filter(id => currentMcpConnections?.providers?.[id]?.connected === true).length
+    : 0;
   $('#agentSummary').textContent = connected + ' agents · ' + mcpConnected + ' MCP · ' + (serviceOnline ? 'Teamyra online' : 'MCP offline');
   $('#agentSummary').title = currentMcpConnections?.bootError || currentMcpConnections?.endpoint || '';
   $('#agentGrid').innerHTML = currentProviders.map(agentCardHtml).join('');
