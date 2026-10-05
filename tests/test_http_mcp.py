@@ -140,6 +140,18 @@ class HttpMcpTests(unittest.TestCase):
         self.assertEqual(status, 406)
         self.assertIn("Accept", data["error"]["message"])
 
+    def test_rejected_post_consumes_body_without_dispatch(self):
+        # A multi-packet body must not reset the connection before the caller
+        # receives the rejection, or execute an invalid request.
+        with patch.object(http_mcp.server, "handle") as handle:
+            status, _, data = self.request("POST", payload={
+                "jsonrpc": "2.0", "id": 4, "method": "ping",
+                "params": {"padding": "x" * (512 * 1024)},
+            }, headers={"Content-Type": "text/plain"})
+        self.assertEqual(status, 415)
+        self.assertIn("Content-Type", data["error"]["message"])
+        handle.assert_not_called()
+
     def test_invalid_host_header_is_rejected(self):
         status, _, data = self.request("POST", payload={
             "jsonrpc": "2.0", "id": 5, "method": "ping",

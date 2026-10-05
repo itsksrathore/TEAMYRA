@@ -203,9 +203,11 @@ class MediaEngineTests(unittest.TestCase):
                 "type": "sound_effect", "prompt": "horse gallop", "project_path": str(project),
             })
             planned = media_engine.prepare_output(td, job["job_id"])
-            self.assertIn(str(Path(td) / "media" / "staging"), planned["temporary_video_path"])
-            self.assertNotIn(str(project / "Generated Assets"), planned["temporary_video_path"])
-            self.assertIn(str(project / "Generated Assets" / "Sound Effects"), planned["path"])
+            staging = Path(planned["temporary_video_path"]).resolve()
+            assets = (project / "Generated Assets").resolve()
+            self.assertTrue(staging.is_relative_to((Path(td) / "media" / "staging").resolve()))
+            self.assertFalse(staging.is_relative_to(assets))
+            self.assertTrue(Path(planned["path"]).resolve().is_relative_to(assets / "Sound Effects"))
 
     def test_asset_registry_ids_and_lineage(self):
         with tempfile.TemporaryDirectory() as td:
