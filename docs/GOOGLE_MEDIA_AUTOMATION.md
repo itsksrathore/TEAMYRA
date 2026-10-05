@@ -22,6 +22,12 @@ debugger lifecycle control. This allows its loading transitions and native image
 button activation to complete without showing or focusing the desktop window.
 Background connection polling does not open settings menus.
 
+Google Flow and Flow Music browser views are muted natively before loading,
+including sign-in popups. Autoplay previews stay silent even in hidden views;
+the mute persists through navigation and is restored when an unloaded view is
+recreated. Downloaded files retain their audio. Loaded provider status reports
+`audio_muted` from Electron's actual view state.
+
 Download completion is an Electron download event plus a nonempty local file.
 FFmpeg checks decodability, visual dimensions/aspect ratio, requested upscale
 size, and audio streams before asset registration. Cover art attached to a music

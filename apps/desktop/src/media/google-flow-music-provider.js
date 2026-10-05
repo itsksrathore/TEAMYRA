@@ -37,6 +37,9 @@ class GoogleFlowMusicProvider {
         backgroundThrottling: false
       }
     });
+    // Flow Music can autoplay a generated track without a Play action.
+    // Mute the whole view so HTML media and Web Audio remain silent.
+    this.view.webContents.setAudioMuted(true);
     this.view.setBackgroundColor('#0b0e14');
     this.view.setBounds(this.bounds);
     this.view.setVisible(this.visible);
@@ -87,6 +90,7 @@ class GoogleFlowMusicProvider {
       };
     });
     this.view.webContents.on('did-create-window', child => {
+      child.webContents.setAudioMuted(true);
       this.childWindows.add(child);
       child.once('closed', () => this.childWindows.delete(child));
       const childGuard = (event, url) => {
@@ -195,6 +199,7 @@ class GoogleFlowMusicProvider {
       status: {
         loaded: true,
         visible: this.visible,
+        audio_muted: this.view.webContents.isAudioMuted(),
         url: this.view.webContents.getURL(),
         probe_ok: Boolean(probe),
         probe_error: probe ? '' : String(lastProbeError?.message || lastProbeError || '').slice(0, 800),

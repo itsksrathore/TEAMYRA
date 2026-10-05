@@ -111,6 +111,8 @@ class GoogleMediaProfileRuntime {
       busy: this.visualConsumer.busy || this.musicConsumer.busy,
       visual_busy: this.visualConsumer.busy,
       music_busy: this.musicConsumer.busy,
+      visual_audio_muted: this.visual.view?.webContents?.isAudioMuted?.() ?? null,
+      music_audio_muted: this.music.view?.webContents?.isAudioMuted?.() ?? null,
       current_url: this.visual.view?.webContents?.getURL?.()
         || this.music.view?.webContents?.getURL?.()
         || this.lastStatus.current_url

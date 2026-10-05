@@ -37,6 +37,9 @@ class GoogleFlowProvider {
         backgroundThrottling: false
       }
     });
+    // Provider previews may autoplay after generation, including while hidden.
+    // Native view muting also covers Web Audio and persists across navigation.
+    this.view.webContents.setAudioMuted(true);
     this.view.setBackgroundColor('#0b0e14');
     this.view.setBounds(this.bounds);
     this.view.setVisible(this.visible);
@@ -78,6 +81,7 @@ class GoogleFlowProvider {
       };
     });
     this.view.webContents.on('did-create-window', child => {
+      child.webContents.setAudioMuted(true);
       this.childWindows.add(child);
       child.once('closed', () => this.childWindows.delete(child));
       const childGuard = (event, url) => {
@@ -188,6 +192,7 @@ class GoogleFlowProvider {
       status: {
         loaded: true,
         visible: this.visible,
+        audio_muted: this.view.webContents.isAudioMuted(),
         url: this.view.webContents.getURL(),
         probe_ok: Boolean(probe),
         probe_error: probe ? '' : String(lastProbeError?.message || lastProbeError || '').slice(0, 800),
