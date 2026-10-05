@@ -37,6 +37,9 @@ class GoogleFlowMusicProvider {
         backgroundThrottling: false
       }
     });
+    // Flow Music can autoplay a generated track without a Play action.
+    // Mute the whole view so HTML media and Web Audio remain silent.
+    this.view.webContents.setAudioMuted(true);
     this.view.setBackgroundColor('#0b0e14');
     this.view.setBounds(this.bounds);
     this.view.setVisible(this.visible);
@@ -87,6 +90,7 @@ class GoogleFlowMusicProvider {
       };
     });
     this.view.webContents.on('did-create-window', child => {
+      child.webContents.setAudioMuted(true);
       this.childWindows.add(child);
       child.once('closed', () => this.childWindows.delete(child));
       const childGuard = (event, url) => {
@@ -107,8 +111,6 @@ class GoogleFlowMusicProvider {
   }
   async ensureLoaded() {
     const view = this.ensureView();
-    const current = view.webContents.getURL();
-    if (current && current !== 'about:blank' && safeMusicUrl(current) && !view.webContents.isLoading()) return view;
     if (this.loadingPromise) return this.loadingPromise;
     this.loadingPromise = (async () => {
       let navigationError = null;
@@ -117,11 +119,18 @@ class GoogleFlowMusicProvider {
         view.webContents.loadURL(FLOW_MUSIC_HOME).catch(error => { navigationError = error; });
       }
       const deadline = Date.now() + 20000;
+      let stableUrl = '';
+      let stableSince = 0;
       while (Date.now() < deadline) {
         const url = view.webContents.getURL();
+        if (url !== stableUrl) {
+          stableUrl = url;
+          stableSince = Date.now();
+        }
         if (url && url !== 'about:blank' && safeMusicUrl(url)) {
           const readyState = await view.webContents.executeJavaScript('document.readyState', true).catch(() => '');
-          if (readyState === 'interactive' || readyState === 'complete') return view;
+          const ready = readyState === 'interactive' || readyState === 'complete';
+          if (ready && Date.now() - stableSince >= 600) return view;
         }
         await new Promise(resolve => setTimeout(resolve, 120));
       }
@@ -166,11 +175,42 @@ class GoogleFlowMusicProvider {
     if (this.view && !this.view.webContents.isDestroyed() && this.visible) this.view.setBounds(this.bounds);
     return this.bounds;
   }
-  async status() {
-    if (!this.view || this.view.webContents.isDestroyed()) return { loaded: false, visible: false, url: '' };
-    const probe = await this.adapter.probe().catch(() => null);
+  async inspect(timeoutMs = 15000) {
+    if (!this.view || this.view.webContents.isDestroyed()) {
+      return {
+        status: { loaded: false, visible: false, url: '' },
+        capabilities: {}
+      };
+    }
+    const deadline = Date.now() + timeoutMs;
+    let probe = null;
+    let lastProbeError = null;
+    while (Date.now() < deadline && !probe) {
+      try {
+        probe = await this.adapter.probe();
+      } catch (error) {
+        lastProbeError = error;
+      }
+      if (!probe) await new Promise(resolve => setTimeout(resolve, 250));
+    }
     const classified = probe ? this.adapter.classifyProbe(probe) : {};
-    return { loaded: true, visible: this.visible, url: this.view.webContents.getURL(), ...classified };
+    const capabilities = probe ? await this.adapter.capabilities(probe).catch(() => ({})) : {};
+    return {
+      status: {
+        loaded: true,
+        visible: this.visible,
+        audio_muted: this.view.webContents.isAudioMuted(),
+        url: this.view.webContents.getURL(),
+        probe_ok: Boolean(probe),
+        probe_error: probe ? '' : String(lastProbeError?.message || lastProbeError || '').slice(0, 800),
+        ...classified
+      },
+      capabilities
+    };
+  }
+
+  async status() {
+    return (await this.inspect()).status;
   }
   destroy() {
     this.closeChildWindows();

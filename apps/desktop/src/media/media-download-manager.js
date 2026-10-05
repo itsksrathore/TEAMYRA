@@ -5,6 +5,7 @@ class MediaDownloadManager {
   constructor(sessionManager) {
     this.sessionManager = sessionManager;
     this.expected = [];
+    this.active = new Set();
     this.sessionManager.setDownloadHandler((event, item, webContents) => this.handleDownload(event, item, webContents));
   }
 
@@ -20,7 +21,9 @@ class MediaDownloadManager {
         reject,
         timer: setTimeout(() => {
           this.expected = this.expected.filter(item => item !== record);
-          reject(new Error('Timed out waiting for Google media download'));
+          this.active.delete(record);
+          record.item?.cancel();
+          reject(new Error('download_failure: Timed out waiting for Google media download completion'));
         }, timeoutMs)
       };
       record.timer.unref?.();
@@ -36,9 +39,12 @@ class MediaDownloadManager {
       return;
     }
     this.expected = this.expected.filter(entry => entry !== record);
-    clearTimeout(record.timer);
+    record.item = item;
+    this.active.add(record);
     item.setSavePath(record.destination);
     item.once('done', (_doneEvent, state) => {
+      clearTimeout(record.timer);
+      this.active.delete(record);
       if (state !== 'completed') {
         record.reject(new Error('Media download ended with state: ' + state));
         return;
@@ -60,10 +66,12 @@ class MediaDownloadManager {
   }
 
   cancelJob(jobId) {
-    const matches = this.expected.filter(entry => entry.jobId === String(jobId));
+    const matches = [...this.expected, ...this.active].filter(entry => entry.jobId === String(jobId));
     this.expected = this.expected.filter(entry => entry.jobId !== String(jobId));
     for (const record of matches) {
       clearTimeout(record.timer);
+      this.active.delete(record);
+      record.item?.cancel();
       record.reject(new Error('Media download cancelled'));
     }
   }

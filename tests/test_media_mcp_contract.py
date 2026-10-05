@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
@@ -17,8 +18,23 @@ class MediaMcpContractTests(unittest.TestCase):
         for name in (
             "teamyra.media_generate", "teamyra.media_batch", "teamyra.media_transform",
             "teamyra.media_status", "teamyra.media_assets", "teamyra.media_cancel",
+            "teamyra.media_resume_auth",
+            "teamyra.media_resume_download",
         ):
             self.assertIn(name, names)
+
+    def test_batch_wakes_each_surface_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / 'project'
+            project.mkdir()
+            with patch.object(server, 'ROOT', Path(td)), patch.object(server, 'desktop_control', return_value={'waking': True}) as wake:
+                result = server.tool_call('media_batch', {'requests': [
+                    {'type': kind, 'prompt': 'test', 'project_path': str(project)}
+                    for kind in ('image', 'video', 'music')
+                ]})
+            self.assertEqual(result['count'], 3)
+            self.assertEqual({call.args[1]['surface'] for call in wake.call_args_list}, {'visual', 'music'})
+            self.assertEqual(wake.call_count, 2)
 
     def test_media_tool_schema_does_not_expose_browser_clicks(self):
         tools = {tool["name"]: tool for tool in server.mcp_tools(include_legacy=False)}

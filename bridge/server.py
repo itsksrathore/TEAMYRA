@@ -891,6 +891,10 @@ MEDIA_REQUEST_PROPERTIES = {
     "vocals": {"type": "boolean"},
     "lyrics": {"type": "string"},
     "model_preference": {"type": "string"},
+    "download_quality": {"type": "string", "enum": ["auto", "source", "2x", "4x", "prefer_4x_then_2x", "1080p", "4k"]},
+    "generation_resolution": {"type": "string", "enum": ["auto", "360p", "720p", "1080p", "4k"]},
+    "wait_for_upscale": {"type": "boolean"},
+    "audio_only": {"type": "boolean"},
     "first_frame": {"type": "string"},
     "last_frame": {"type": "string"},
     "character_reference": {"type": "string"},
@@ -971,6 +975,10 @@ TOOLS = [
     {"name": "media_cancel", "description": "Request cancellation of a queued or in-progress TEAMYRA media job.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
                      "required": ["job_id"], "additionalProperties": False}},
+    {"name": "media_resume_auth", "description": "Resume media jobs after Google authentication is restored. Jobs already submitted to a provider are preserved for reconciliation and are never blindly resubmitted.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "media_resume_download", "description": "Resume a failed/auth-blocked/rate-limited media job with an identified provider submission. Reconciles and downloads its existing result without generating again.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
     {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
@@ -1279,11 +1287,33 @@ def tool_call(name, a):
         payload.pop("action", None)
         return desktop_control("chatgpt." + action, payload)
     if name == "media_generate":
-        return media_engine.create_job(ROOT, a)
+        result = media_engine.create_job(ROOT, a)
+        surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
+        try:
+            desktop_control("media.wake", {"surface": surface}, 2)
+        except Exception:
+            pass
+        return result
     if name == "media_batch":
-        return media_engine.create_batch(ROOT, a["requests"])
+        result = media_engine.create_batch(ROOT, a["requests"])
+        surfaces = {
+            "music" if item.get("provider_surface") == "google-flow-music" else "visual"
+            for item in result["jobs"]
+        }
+        for surface in surfaces:
+            try:
+                desktop_control("media.wake", {"surface": surface}, 2)
+            except Exception:
+                pass
+        return result
     if name == "media_transform":
-        return media_engine.create_transform_job(ROOT, a)
+        result = media_engine.create_transform_job(ROOT, a)
+        surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
+        try:
+            desktop_control("media.wake", {"surface": surface}, 2)
+        except Exception:
+            pass
+        return result
     if name == "media_status":
         return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30))
     if name == "media_assets":
@@ -1292,6 +1322,24 @@ def tool_call(name, a):
         )
     if name == "media_cancel":
         return media_engine.cancel_job(ROOT, a["job_id"])
+    if name == "media_resume_auth":
+        result = media_engine.resume_auth_jobs(ROOT)
+        surfaces = {media_engine.load_job(ROOT, job_id)["request"]["surface"]
+                    for job_id in result["resumed"] + result["reconcile_required"]}
+        for surface in surfaces:
+            try:
+                desktop_control("media.wake", {"surface": surface}, 2)
+            except Exception:
+                pass
+        return result
+    if name == "media_resume_download":
+        result = media_engine.resume_download_job(ROOT, a["job_id"])
+        surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
+        try:
+            desktop_control("media.wake", {"surface": surface}, 2)
+        except Exception:
+            pass
+        return result
     if name == "timeline_list":
         return observability.timeline(
             ROOT,
