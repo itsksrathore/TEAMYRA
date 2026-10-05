@@ -7,7 +7,7 @@ contextBridge.exposeInMainWorld('teamyra', {
   checkUpdates: () => ipcRenderer.invoke('teamyra:update-check'),
   installUpdate: () => ipcRenderer.invoke('teamyra:update-install'),
   onUpdateState: (callback) => ipcRenderer.on('teamyra:update-state', (_event, payload) => callback(payload)),
-  providers: () => ipcRenderer.invoke('teamyra:providers'),
+  providers: (force = false) => ipcRenderer.invoke('teamyra:providers', force === true),
   closeEmbeddedBrowsers: () => ipcRenderer.invoke('teamyra:browser-close'),
   mediaStatus: (profileId) => ipcRenderer.invoke('teamyra:media-status', profileId),
   openGoogleMedia: (profileId = 'google') => ipcRenderer.invoke('teamyra:media-open', profileId),

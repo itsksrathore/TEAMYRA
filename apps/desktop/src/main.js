@@ -618,11 +618,10 @@ ipcMain.handle('teamyra:update-install', () => {
   return { ok: true };
 });
 
-ipcMain.handle('teamyra:providers', () => providersCached(true));
+ipcMain.handle('teamyra:providers', (_event, force = false) => providersCached(force === true));
 ipcMain.handle('teamyra:browser-close', async () => {
   for (const provider of chatgptProviders.values()) {
-    try { provider.closeEmbeddedPopup(); } catch {}
-    try { provider.setVisible(false); } catch {}
+    try { await provider.close(); } catch {}
   }
   try { googleMediaEngine?.close(); } catch {}
   return { ok: true };
@@ -1207,13 +1206,25 @@ async function processDesktopControlRequests() {
     }
     try { fs.unlinkSync(requestPath); } catch {}
   }
+  return files.length;
+}
+
+function scheduleDesktopControlLoop(delayMs = 500) {
+  if (isQuitting) return;
+  clearTimeout(desktopControlTimer);
+  desktopControlTimer = setTimeout(async () => {
+    desktopControlTimer = null;
+    let processed = 0;
+    try { processed = await processDesktopControlRequests(); } catch {}
+    scheduleDesktopControlLoop(processed > 0 ? 100 : 500);
+  }, Math.max(50, Number(delayMs) || 500));
+  desktopControlTimer.unref?.();
 }
 
 function startDesktopControlLoop() {
   if (desktopControlTimer) return;
   fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
-  desktopControlTimer = setInterval(() => processDesktopControlRequests().catch(() => {}), 150);
-  desktopControlTimer.unref?.();
+  scheduleDesktopControlLoop(100);
 }
 
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
@@ -1315,7 +1326,7 @@ if (!gotSingleInstanceLock) {
 app.on('before-quit', () => {
   isQuitting = true;
   clearDesktopIdleExit();
-  if (desktopControlTimer) clearInterval(desktopControlTimer);
+  if (desktopControlTimer) clearTimeout(desktopControlTimer);
   desktopControlTimer = null;
   try { googleMediaEngine?.destroy(); } catch {}
   googleMediaEngine = null;

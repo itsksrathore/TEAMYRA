@@ -15,7 +15,12 @@ let fitAddon = null;
 let terminalSessionId = null;
 let terminalResizeObserver = null;
 let chatgptBoundsObserver = null;
+let googleMediaBoundsObserver = null;
 let activeChatgptProfileId = 'web';
+let jobsRefreshPromise = null;
+let agentsRefreshPromise = null;
+let jobsRenderSignature = '';
+let jobsPollTimer = null;
 
 function setBrowserCloseVisible(visible) {
   const button = $('#browserClose');
@@ -237,9 +242,23 @@ function renderJobs() {
 }
 
 async function refreshJobs() {
-  currentJobs = await window.teamyra.jobs();
-  updateLiveBadge();
-  renderJobs();
+  if (jobsRefreshPromise) return jobsRefreshPromise;
+  jobsRefreshPromise = (async () => {
+    const jobs = await window.teamyra.jobs();
+    currentJobs = jobs;
+    updateLiveBadge();
+    const signature = jobs.map(job => [job.id, job.state, job.updated, job.heartbeatAt, job.lastEvent].join(':')).join('|');
+    if (signature !== jobsRenderSignature) {
+      jobsRenderSignature = signature;
+      renderJobs();
+    }
+    return jobs;
+  })();
+  try {
+    return await jobsRefreshPromise;
+  } finally {
+    jobsRefreshPromise = null;
+  }
 }
 
 function profileRows(provider) {
@@ -334,9 +353,11 @@ function agentCardHtml(provider) {
   `;
 }
 
-async function refreshAgents() {
+async function refreshAgents(force = false) {
+  if (agentsRefreshPromise) return agentsRefreshPromise;
+  agentsRefreshPromise = (async () => {
   const [providers, mcpConnections] = await Promise.all([
-    window.teamyra.providers(),
+    window.teamyra.providers(force),
     window.teamyra.mcpConnections()
   ]);
   currentProviders = providers;
@@ -379,7 +400,7 @@ async function refreshAgents() {
       button.textContent = 'Opening…';
       try {
         await window.teamyra.setChatgptVisible(false).catch(() => {});
-        setBrowserCloseVisible(true);
+        prepareGoogleMediaSurface();
         const result = await window.teamyra.openGoogleMusic(profileId);
         if (result?.music_authorization?.needs_user_action) {
           button.title = 'Complete Google authorization in the Flow Music window';
@@ -446,7 +467,7 @@ async function refreshAgents() {
           await openChatgptDetail(result.profileId);
         } else if (provider.id === 'google-media') {
           await window.teamyra.setChatgptVisible(false).catch(() => {});
-          setBrowserCloseVisible(true);
+          prepareGoogleMediaSurface();
           await window.teamyra.loginGoogleMedia(result.profileId);
           refreshAgents().catch(() => {});
         } else {
@@ -471,12 +492,19 @@ async function refreshAgents() {
   });
 
   populateTaskAgents();
+  return currentProviders;
+  })();
+  try {
+    return await agentsRefreshPromise;
+  } finally {
+    agentsRefreshPromise = null;
+  }
 }
 
 async function openProvider(provider, profile) {
   if (provider.id === 'google-media') {
     await window.teamyra.setChatgptVisible(false).catch(() => {});
-    setBrowserCloseVisible(true);
+    prepareGoogleMediaSurface();
     if (profile.signedIn) await window.teamyra.openGoogleMedia(profile.id || 'google');
     else await window.teamyra.loginGoogleMedia(profile.id || 'google');
     return;
@@ -622,6 +650,33 @@ async function refreshChatgptStatus() {
   return { status, workspace };
 }
 
+function syncGoogleMediaBounds() {
+  if (activeView !== 'agents') return;
+  const rect = $('.main').getBoundingClientRect();
+  if (rect.width < 50 || rect.height < 50) return;
+  window.teamyra.setGoogleMediaBounds({
+    x: Math.round(rect.left),
+    y: Math.round(rect.top),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+  }).catch(() => {});
+}
+
+function prepareGoogleMediaSurface() {
+  activeView = 'agents';
+  $('#navAgents').classList.add('active');
+  $('#navTasks').classList.remove('active');
+  $('#agentsView').hidden = false;
+  $('#tasksView').hidden = true;
+  setBrowserCloseVisible(true);
+  if (!googleMediaBoundsObserver) {
+    googleMediaBoundsObserver = new ResizeObserver(syncGoogleMediaBounds);
+    googleMediaBoundsObserver.observe($('.main'));
+    window.addEventListener('resize', syncGoogleMediaBounds);
+  }
+  syncGoogleMediaBounds();
+}
+
 function syncChatgptBounds() {
   if (activeView !== 'agents' || $('#chatgptDetail').hidden) return;
   const rect = $('#chatgptViewport').getBoundingClientRect();
@@ -645,7 +700,7 @@ async function openChatgptDetail(profileId = 'web') {
   $('#tasksView').hidden = true;
 
   setBrowserCloseVisible(true);
-  await window.teamyra.setChatgptVisible(true);
+  await window.teamyra.setChatgptVisible(false).catch(() => {});
   if (!chatgptBoundsObserver) {
     chatgptBoundsObserver = new ResizeObserver(syncChatgptBounds);
     chatgptBoundsObserver.observe($('#chatgptViewport'));
@@ -653,7 +708,7 @@ async function openChatgptDetail(profileId = 'web') {
   }
   syncChatgptBounds();
   await window.teamyra.openChatgpt(activeChatgptProfileId);
-  await refreshChatgptStatus();
+  setTimeout(() => refreshChatgptStatus().catch(() => {}), 800);
 }
 
 async function closeChatgptDetail() {
@@ -793,7 +848,7 @@ $('#navAgents').addEventListener('click', () => setView('agents'));
 $('#browserClose').addEventListener('click', () => closeAllEmbeddedBrowsers().catch(() => {}));
 $('#refresh').addEventListener('click', () => {
   const action = activeView === 'agents'
-    ? ($('#chatgptDetail').hidden ? refreshAgents() : refreshChatgptStatus())
+    ? ($('#chatgptDetail').hidden ? refreshAgents(true) : refreshChatgptStatus())
     : refreshJobs();
   action.catch(error => alert(String(error?.message || error)));
 });
@@ -835,17 +890,33 @@ $('#chatgptStop').addEventListener('click', () => window.teamyra.stopChatgpt().c
 
 window.teamyra.onUpdateState(updateUpdateNote);
 
+function scheduleJobsPoll(delayMs) {
+  if (jobsPollTimer) clearTimeout(jobsPollTimer);
+  jobsPollTimer = setTimeout(async () => {
+    jobsPollTimer = null;
+    if (!document.hidden) await refreshJobs().catch(() => {});
+    const hasActive = currentJobs.some(isActive);
+    const next = document.hidden ? 15000
+      : activeView === 'tasks'
+        ? (hasActive ? 2500 : 6000)
+        : 12000;
+    scheduleJobsPoll(next);
+  }, Math.max(1000, delayMs));
+}
+
 async function boot() {
   document.body.dataset.platform = window.teamyra.platform || '';
   const chatgptAvatar = $('.chatgpt-avatar');
   if (chatgptAvatar) chatgptAvatar.innerHTML = agentIconSvg('openai') || 'GPT';
   window.teamyra.updateStatus().then(updateUpdateNote).catch(() => {});
-  await Promise.allSettled([refreshJobs(), refreshAgents()]);
+  await Promise.allSettled([refreshJobs(), refreshAgents(false)]);
   await window.teamyra.setChatgptVisible(false).catch(() => {});
-  setInterval(() => refreshJobs().catch(() => {}), 2800);
+  scheduleJobsPoll(3500);
   setInterval(() => {
-    if (activeView === 'agents' && !$('#chatgptDetail').hidden) refreshChatgptStatus().catch(() => {});
-  }, 5000);
+    if (!document.hidden && activeView === 'agents' && !$('#chatgptDetail').hidden) {
+      refreshChatgptStatus().catch(() => {});
+    }
+  }, 8000);
 }
 
 // Event bindings are ready; background provider/core calls must not gate paint.

@@ -108,27 +108,23 @@ class GoogleFlowMusicProvider {
   async ensureLoaded() {
     const view = this.ensureView();
     const current = view.webContents.getURL();
-    if (current && current !== 'about:blank' && safeMusicUrl(current)) return view;
+    if (current && current !== 'about:blank' && safeMusicUrl(current) && !view.webContents.isLoading()) return view;
     if (this.loadingPromise) return this.loadingPromise;
     this.loadingPromise = (async () => {
       let navigationError = null;
-      const ready = new Promise(resolve => {
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          view.webContents.removeListener('dom-ready', finish);
-          view.webContents.removeListener('did-stop-loading', finish);
-          resolve();
-        };
-        const timer = setTimeout(finish, 20000);
-        timer.unref?.();
-        view.webContents.once('dom-ready', finish);
-        view.webContents.once('did-stop-loading', finish);
-      });
-      view.webContents.loadURL(FLOW_MUSIC_HOME).catch(error => { navigationError = error; });
-      await ready;
+      const startUrl = view.webContents.getURL();
+      if (!startUrl || startUrl === 'about:blank' || !safeMusicUrl(startUrl)) {
+        view.webContents.loadURL(FLOW_MUSIC_HOME).catch(error => { navigationError = error; });
+      }
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        const url = view.webContents.getURL();
+        if (url && url !== 'about:blank' && safeMusicUrl(url)) {
+          const readyState = await view.webContents.executeJavaScript('document.readyState', true).catch(() => '');
+          if (readyState === 'interactive' || readyState === 'complete') return view;
+        }
+        await new Promise(resolve => setTimeout(resolve, 120));
+      }
       const finalUrl = view.webContents.getURL();
       if (!finalUrl || finalUrl === 'about:blank' || !safeMusicUrl(finalUrl)) {
         throw navigationError || new Error('Flow Music did not reach an allowed page');
@@ -141,7 +137,7 @@ class GoogleFlowMusicProvider {
       this.loadingPromise = null;
     }
   }
-  async open() { this.setVisible(true); await this.ensureLoaded(); return this.status(); }
+  async open() { this.setVisible(false); await this.ensureLoaded(); this.setVisible(true); return this.status(); }
   closeChildWindows() {
     for (const child of [...this.childWindows]) {
       try { if (!child.isDestroyed()) child.close(); } catch {}
@@ -182,7 +178,7 @@ class GoogleFlowMusicProvider {
       try { this.window.contentView.removeChildView(this.view); } catch {}
       try { this.view.webContents.close(); } catch {}
     }
-    this.view = null; this.adapter = null;
+    this.view = null; this.adapter = null; this.loadingPromise = null;
   }
 }
 

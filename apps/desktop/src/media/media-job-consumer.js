@@ -18,7 +18,7 @@ function classifyError(error) {
 }
 
 class MediaJobConsumer {
-  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 1500 }) {
+  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500 }) {
     this.surface = surface;
     this.workerName = workerName;
     this.provider = provider;
@@ -31,28 +31,46 @@ class MediaJobConsumer {
     this.currentJobId = null;
   }
 
+  schedule(delayMs = this.pollMs) {
+    if (!this.running) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.tick().catch(() => {
+      this.schedule(Math.max(this.pollMs, 5000));
+    }), Math.max(250, Number(delayMs) || this.pollMs));
+    this.timer.unref?.();
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
-    this.timer = setInterval(() => this.tick().catch(() => {}), this.pollMs);
-    this.timer.unref?.();
-    setImmediate(() => this.tick().catch(() => {}));
+    this.schedule(100);
   }
 
   stop() {
     this.running = false;
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
     this.timer = null;
   }
 
   async tick() {
-    if (!this.running || this.busy) return;
+    if (!this.running) return;
+    if (this.busy) {
+      this.schedule(this.pollMs);
+      return;
+    }
     const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName }, { timeout: 10000 });
-    if (!job) return;
+    if (!job) {
+      this.schedule(this.pollMs);
+      return;
+    }
     this.busy = true;
     this.currentJobId = job.job_id;
     try { await this.process(job); }
-    finally { this.currentJobId = null; this.busy = false; }
+    finally {
+      this.currentJobId = null;
+      this.busy = false;
+      this.schedule(500);
+    }
   }
 
   async update(jobId, state, detail, extra) {

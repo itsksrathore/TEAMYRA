@@ -36,8 +36,17 @@ class GoogleFlowMusicAutomationAdapter {
 
   classifyProbe(probe) {
     const body = lower(probe?.lower || probe?.text);
+    const labels = (probe?.labels || []).map(lower).join(' | ');
+    let host = '';
+    try { host = new URL(String(probe?.url || '')).hostname; } catch {}
+    const onMusicApp = host === 'flowmusic.app' || host === 'www.flowmusic.app';
+    const strongAuthenticatedUi =
+      /settings menu/.test(labels) && /member/.test(labels) &&
+      (/new session/.test(labels) || /profile/.test(labels) || /songs/.test(labels));
+    const explicitAuthUi = /continue with google|choose an account/.test(labels) ||
+      /continue with google|choose an account/.test(body);
     return {
-      signedIn: !/sign in|log in|choose an account/.test(body),
+      signedIn: onMusicApp && strongAuthenticatedUi && !explicitAuthUi,
       challenged: /verify you are human|unusual activity|captcha/.test(body),
       rateLimited: /rate limit|try again later|too many requests/.test(body),
       promptFound: probe?.promptFound === true

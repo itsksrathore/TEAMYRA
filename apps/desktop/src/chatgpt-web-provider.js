@@ -56,6 +56,7 @@ class ChatGPTWebProvider {
     this.lastProbe = null;
     this.jobTimer = null;
     this.heartbeatTimer = null;
+    this.unloadTimer = null;
     this.statusRefresh = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
     this.writeStatus({
@@ -238,17 +239,66 @@ class ChatGPTWebProvider {
   }
 
   async open() {
-    return this.ensureLoaded({ visible: true });
+    this.cancelUnload();
+    const view = this.ensureView();
+    this.visible = false;
+    view.setVisible(false);
+    const current = view.webContents.getURL();
+    if (this.loaded && current && current !== 'about:blank' && !view.webContents.isLoading()) {
+      this.setVisible(true);
+      return this.getStatus();
+    }
+    void (async () => {
+      try {
+        if (!current || current === 'about:blank') {
+          view.webContents.loadURL(CHATGPT_HOME).catch(() => {});
+        }
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline && view.webContents.isLoading()) {
+          await sleep(120);
+        }
+        await this.refreshStatus().catch(() => {});
+        this.setVisible(true);
+      } catch {
+        this.setVisible(false);
+      }
+    })();
+    return this.getStatus();
   }
 
   async wakeBackground() {
+    this.cancelUnload();
     return this.ensureLoaded({ visible: false });
+  }
+
+  cancelUnload() {
+    if (this.unloadTimer) clearTimeout(this.unloadTimer);
+    this.unloadTimer = null;
+  }
+
+  scheduleUnload(delayMs = 15000) {
+    this.cancelUnload();
+    this.unloadTimer = setTimeout(() => {
+      this.unloadTimer = null;
+      if (this.busy || this.visible) return;
+      this.closeEmbeddedPopup();
+      if (this.view && !this.view.webContents.isDestroyed()) {
+        try { this.window.contentView.removeChildView(this.view); } catch {}
+        try { this.view.webContents.close(); } catch {}
+      }
+      this.view = null;
+      this.automation = null;
+      this.loaded = false;
+      this.lastProbe = null;
+    }, Math.max(2000, Number(delayMs) || 15000));
+    this.unloadTimer.unref?.();
   }
 
   close() {
     this.visible = false;
     if (this.view && !this.view.webContents.isDestroyed()) this.view.setVisible(false);
     if (this.popupView && !this.popupView.webContents.isDestroyed()) this.popupView.setVisible(false);
+    this.scheduleUnload(3000);
     return this.getStatus();
   }
 
@@ -292,6 +342,8 @@ class ChatGPTWebProvider {
 
   setVisible(value) {
     this.visible = value === true;
+    if (this.visible) this.cancelUnload();
+    else this.scheduleUnload(15000);
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.view.setVisible(this.visible);
       if (this.visible) this.view.setBounds(this.bounds);
@@ -696,6 +748,7 @@ class ChatGPTWebProvider {
   }
 
   destroy() {
+    this.cancelUnload();
     try {
       this.writeStatus({
         automation_ready: false,
