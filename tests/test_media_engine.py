@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
@@ -11,6 +12,93 @@ import media_engine
 
 
 class MediaEngineTests(unittest.TestCase):
+    def test_cancelled_download_cannot_register_asset(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = self.make_project(td)
+            job = media_engine.create_job(td, {'type': 'image', 'prompt': 'test', 'project_path': str(project)})
+            output = project / 'Generated Assets' / 'Images' / 'cancelled.png'
+            output.write_bytes(b'downloaded')
+            media_engine.cancel_job(td, job['job_id'])
+            with self.assertRaisesRegex(ValueError, 'cancelled'):
+                media_engine.register_asset(td, job['job_id'], output)
+
+    def test_auth_resume_preserves_submission_history_without_timestamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = self.make_project(td)
+            job = media_engine.create_job(td, {'type': 'image', 'prompt': 'test', 'project_path': str(project)})
+            media_engine.update_job_state(td, job['job_id'], 'submitting')
+            media_engine.update_job_state(td, job['job_id'], 'needs_user_auth')
+            result = media_engine.resume_auth_jobs(td)
+            self.assertIn(job['job_id'], result['reconcile_required'])
+            self.assertEqual(result['resumed'], [])
+            self.assertIsNone(media_engine.claim_next_job(td, 'visual', 'worker'))
+
+    def test_media_defaults_and_explicit_quality_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = self.make_project(td)
+            for kind, quality, model in [('image', 'prefer_4x_then_2x', 'auto'), ('video', '1080p', 'Gemini Omni Flash'), ('sound_effect', 'source', 'Gemini Omni Flash'), ('music', None, 'Lyria 3.5')]:
+                request = media_engine.normalize_generate_request(td, {'type': kind, 'prompt': 'test', 'project_path': str(project)})
+                self.assertEqual(request['model_preference'], model)
+                self.assertEqual(request['generation_settings'].get('download_quality'), quality)
+                if kind == 'video':
+                    self.assertEqual(request['generation_settings']['generation_resolution'], '720p')
+                if kind == 'sound_effect':
+                    self.assertEqual(request['generation_settings']['generation_resolution'], '360p')
+                    self.assertFalse(request['generation_settings']['wait_for_upscale'])
+                    self.assertTrue(request['generation_settings']['audio_only'])
+            request = media_engine.normalize_generate_request(td, {'type': 'image', 'prompt': 'test', 'project_path': str(project), 'download_quality': '2x'})
+            self.assertEqual(request['generation_settings']['download_quality'], '2x')
+
+    def test_atomic_write_retries_sharing_violation_without_truncation(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'job.json'
+            target.write_text('{"old": true}')
+            real_replace = media_engine.os.replace
+            attempts = []
+            def replace(source, destination):
+                attempts.append(1)
+                self.assertEqual(target.read_text(), '{"old": true}')
+                if len(attempts) < 3:
+                    raise PermissionError('sharing violation')
+                real_replace(source, destination)
+            with patch.object(media_engine.os, 'replace', side_effect=replace), patch.object(media_engine.time, 'sleep'):
+                media_engine._atomic_write(target, {'new': True})
+            self.assertEqual(json.loads(target.read_text()), {'new': True})
+            self.assertEqual(len(attempts), 3)
+            self.assertFalse(list(Path(td).glob('*.tmp-*')))
+
+    def test_atomic_write_failure_preserves_previous_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'job.json'
+            target.write_text('{"old": true}')
+            with patch.object(media_engine.os, 'replace', side_effect=PermissionError('sharing violation')), patch.object(media_engine.time, 'sleep'):
+                with self.assertRaises(PermissionError):
+                    media_engine._atomic_write(target, {'new': True})
+            self.assertEqual(json.loads(target.read_text()), {'old': True})
+
+    def test_recovery_preserves_ambiguous_submission_without_timestamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = self.make_project(td)
+            created = media_engine.create_job(td, {'type': 'image', 'prompt': 'test', 'project_path': str(project)})
+            media_engine.update_job_state(td, created['job_id'], 'submitting')
+            media_engine.update_job_state(td, created['job_id'], 'waiting_for_browser')
+            report = media_engine.recover_incomplete_jobs(td)
+            self.assertIn(created['job_id'], report['reconcile_required'])
+            self.assertIsNone(media_engine.claim_next_job(td, 'visual', 'worker'))
+
+    def test_resume_download_reconciles_existing_submission_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = self.make_project(td)
+            job = media_engine.create_job(td, {'type': 'video', 'prompt': 'test', 'project_path': str(project)})
+            media_engine.update_job_state(td, job['job_id'], 'failed', 'download_failure')
+            with self.assertRaises(ValueError):
+                media_engine.resume_download_job(td, job['job_id'])
+            media_engine.append_job_metadata(td, job['job_id'], {'provider_submission': {'submitted_at': 123, 'provider_url': 'https://flow.google.com/project/123'}})
+            media_engine.resume_download_job(td, job['job_id'])
+            claimed = media_engine.claim_next_job(td, 'visual', 'recovery')
+            self.assertTrue(claimed['reconcile_required'])
+            self.assertEqual(claimed['provider_submission']['submitted_at'], 123)
+
     def make_project(self, root):
         project = Path(root) / "project"
         project.mkdir(parents=True)
@@ -44,7 +132,7 @@ class MediaEngineTests(unittest.TestCase):
             self.assertIn("No spoken dialogue.", provider_prompt)
             self.assertIn("only the requested sound event", provider_prompt)
 
-    def test_sfx_prompt_preserves_explicit_music_or_voice_intent(self):
+    def test_sfx_prompt_preserves_requested_voice_but_forbids_music(self):
         with tempfile.TemporaryDirectory() as td:
             project = self.make_project(td)
             job = media_engine.create_job(td, {
@@ -54,7 +142,8 @@ class MediaEngineTests(unittest.TestCase):
             })
             stored = media_engine.load_job(td, job["job_id"])
             provider_prompt = stored["request"]["provider_prompt"]
-            self.assertNotIn("No background music.", provider_prompt)
+            self.assertIn("No background music.", provider_prompt)
+            self.assertIn("No melody.", provider_prompt)
             self.assertNotIn("No spoken dialogue.", provider_prompt)
 
     def test_job_persistence_claim_and_cancel(self):

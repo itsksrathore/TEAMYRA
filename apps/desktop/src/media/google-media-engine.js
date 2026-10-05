@@ -134,9 +134,15 @@ class GoogleMediaProfileRuntime {
         await this.visual.ensureLoaded().catch(() => {});
       }
       if (this.visual.view) {
-        visualStatus = await this.visual.status().catch(() => ({ loaded: true, signedIn: false }));
+        const inspection = await this.visual.inspect(force ? 15000 : 8000).catch(() => ({
+          status: { loaded: true, signedIn: false },
+          capabilities: {}
+        }));
+        visualStatus = inspection.status || { loaded: true, signedIn: false };
         if (force || this.visual.visible || !Object.keys(visualCapabilities).length) {
-          visualCapabilities = await this.visual.adapter?.capabilities().catch(() => visualCapabilities) || visualCapabilities;
+          visualCapabilities = Object.keys(inspection.capabilities || {}).length
+            ? inspection.capabilities
+            : visualCapabilities;
         }
       } else if (!allowLoad) {
         visualStatus = {
@@ -149,9 +155,15 @@ class GoogleMediaProfileRuntime {
       }
 
       if (this.music.view) {
-        musicStatus = await this.music.status().catch(() => ({ loaded: true, signedIn: false }));
+        const inspection = await this.music.inspect(force ? 15000 : 8000).catch(() => ({
+          status: { loaded: true, signedIn: false },
+          capabilities: {}
+        }));
+        musicStatus = inspection.status || { loaded: true, signedIn: false };
         if (force || this.music.visible || !Object.keys(musicCapabilities).length) {
-          musicCapabilities = await this.music.adapter?.capabilities().catch(() => musicCapabilities) || musicCapabilities;
+          musicCapabilities = Object.keys(inspection.capabilities || {}).length
+            ? inspection.capabilities
+            : musicCapabilities;
         }
       } else {
         musicStatus = {
@@ -187,6 +199,12 @@ class GoogleMediaProfileRuntime {
         current_url: visualStatus.url || musicStatus.url || '',
         visual_url: visualStatus.url || this.lastStatus.visual_url || '',
         music_url: musicStatus.url || this.lastStatus.music_url || '',
+        visual_probe_ok: visualStatus.probe_ok === true,
+        visual_probe_error: visualStatus.probe_error || '',
+        visual_detected_signed_in: visualStatus.signedIn === true,
+        music_probe_ok: musicStatus.probe_ok === true,
+        music_probe_error: musicStatus.probe_error || '',
+        music_detected_signed_in: musicStatus.signedIn === true,
         detail: connected ? 'Google Media account connected' : 'Google sign-in required'
       };
       return this.snapshot();
@@ -197,6 +215,20 @@ class GoogleMediaProfileRuntime {
     } finally {
       this.refreshPromise = null;
     }
+  }
+
+  wake(surface = 'visual') {
+    this.cancelUnload();
+    const target = surface === 'music' ? this.music : this.visual;
+    target.ensureView();
+    void target.ensureLoaded().then(async () => {
+      await this.refreshConnection({ force: true, allowLoad: false }).catch(() => {});
+      this.setConsumerState(surface === 'music' ? 'music' : 'visual', true);
+      if (!this.visual.visible && !this.music.visible) this.scheduleUnload(30000);
+    }).catch(() => {
+      if (!this.visual.visible && !this.music.visible) this.scheduleUnload(10000);
+    });
+    return { ...this.snapshot(), waking: true, wake_surface: surface };
   }
 
   async open() {
@@ -403,6 +435,12 @@ class GoogleMediaEngine {
     const aggregate = this.aggregateSnapshot();
     callCore('media.connection-update', { patch: aggregate }).catch(() => {});
     return aggregate;
+  }
+
+  wake(surface = 'visual', profileId = 'google') {
+    const id = safeProfileId(profileId || 'google');
+    this.activeProfileId = id;
+    return this.ensureProfile(id).wake(surface === 'music' ? 'music' : 'visual');
   }
 
   async open(profileId = 'google') {

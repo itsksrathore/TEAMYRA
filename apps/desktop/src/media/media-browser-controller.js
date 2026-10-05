@@ -19,10 +19,25 @@ class MediaBrowserController {
     }
   }
 
+  async withActivePage(fn) {
+    return this.withDebugger(async d => {
+      // Keep Chromium's page lifecycle active even when the embedded view is
+      // hidden or the desktop window is occluded. No desktop focus is stolen.
+      await d.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+      try { return await fn(); }
+      finally { await d.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: false }); }
+    });
+  }
+
   async evaluate(expression) {
     return this.withDebugger(async d => {
-      const result = await d.sendCommand('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-      return result?.result?.value;
+      const response = await d.sendCommand('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      if (response?.exceptionDetails) {
+        const details = response.exceptionDetails;
+        const description = details.exception?.description || details.text || 'Runtime.evaluate failed';
+        throw new Error(String(description).slice(0, 1600));
+      }
+      return response?.result?.value;
     });
   }
 
@@ -61,6 +76,27 @@ class MediaBrowserController {
     });
   }
 
+  async pressKeySelector(selector, key = 'Enter') {
+    return this.withDebugger(async d => {
+      const { root } = await d.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
+      const { nodeId } = await d.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector });
+      if (!nodeId) return false;
+      await d.sendCommand('DOM.focus', { nodeId });
+      const isSpace = key === ' ';
+      const code = isSpace ? 'Space' : key;
+      const virtualKeyCode = isSpace ? 32 : ({ Enter: 13, Escape: 27, Backspace: 8 }[key] || 0);
+      const args = {
+        key,
+        code,
+        windowsVirtualKeyCode: virtualKeyCode,
+        nativeVirtualKeyCode: virtualKeyCode
+      };
+      await d.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...args });
+      await d.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...args });
+      return true;
+    });
+  }
+
   async insertText(selector, text) {
     return this.withDebugger(async d => {
       const { root } = await d.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
@@ -69,6 +105,22 @@ class MediaBrowserController {
       await d.sendCommand('DOM.focus', { nodeId });
       await d.sendCommand('Input.insertText', { text: String(text || '') });
       return { ok: true };
+    });
+  }
+
+  async clearText(selector) {
+    return this.withDebugger(async d => {
+      const { root } = await d.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
+      const { nodeId } = await d.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector });
+      if (!nodeId) throw new Error('Prompt input was not found');
+      await d.sendCommand('DOM.focus', { nodeId });
+      // Native editing updates ProseMirror's document as well as the visible DOM.
+      for (const type of ['keyDown', 'keyUp']) {
+        await d.sendCommand('Input.dispatchKeyEvent', { type, key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
+      }
+      for (const type of ['keyDown', 'keyUp']) {
+        await d.sendCommand('Input.dispatchKeyEvent', { type, key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+      }
     });
   }
 }

@@ -1136,6 +1136,7 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (mediaCmd === 'status') return payload.profile_id
       ? googleMediaEngine.profileStatus(payload.profile_id)
       : googleMediaEngine.status();
+    if (mediaCmd === 'wake') return googleMediaEngine.wake(payload.surface || 'visual', payload.profile_id || 'google');
     if (mediaCmd === 'open') return googleMediaEngine.open(payload.profile_id || 'google');
     if (mediaCmd === 'login') return googleMediaEngine.login(payload.profile_id || 'google');
     if (mediaCmd === 'close') return googleMediaEngine.close();
@@ -1143,6 +1144,74 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (mediaCmd === 'visible') return googleMediaEngine.setVisible(payload.visible === true);
     if (mediaCmd === 'bounds') return googleMediaEngine.setBounds(payload.bounds || {});
     if (mediaCmd === 'music') return googleMediaEngine.showMusic(payload.profile_id);
+    if (mediaCmd === 'diagnose') {
+      const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
+      const surface = payload.surface === 'music' ? runtime.music : runtime.visual;
+      if (!surface?.view || surface.view.webContents.isDestroyed()) {
+        return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
+      }
+      let diagnosticAction = null;
+      if (payload.surface !== 'music' && Array.isArray(payload.radio_patterns) && payload.radio_patterns.length) {
+        diagnosticAction = await surface.adapter.selectRadioSetting(
+          payload.radio_patterns.map(value => String(value)),
+          { required: true, label: String(payload.radio_label || 'diagnostic radio') }
+        ).catch(error => ({ ok: false, error: String(error?.message || error).slice(0, 1200) }));
+      }
+      const probe = await surface.adapter.probe().catch(() => null);
+      const classified = probe ? surface.adapter.classifyProbe(probe) : null;
+      const generation = payload.surface === 'music'
+        ? null
+        : await surface.adapter.generationSnapshot().catch(() => null);
+      let promptSelectorDiagnostic = null;
+      if (payload.surface !== 'music') {
+        try {
+          promptSelectorDiagnostic = { ok: true, selector: await surface.adapter.promptSelector() };
+        } catch (error) {
+          promptSelectorDiagnostic = { ok: false, error: String(error?.message || error).slice(0, 1200) };
+        }
+      }
+      const createDetail = payload.surface === 'music' ? null : await surface.view.webContents.executeJavaScript(`(() => {
+        const el = document.querySelector('.create-applet-card[role="button"]')
+          || [...document.querySelectorAll('[role="button"],button')].find(node => /create new/i.test(((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim()));
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const attrs = {};
+        for (const attr of [...el.attributes]) attrs[attr.name] = String(attr.value || '').slice(0, 300);
+        return {
+          tag: el.tagName,
+          attrs,
+          cls: String(el.className || '').slice(0, 300),
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          pointerEvents: style.pointerEvents,
+          cursor: style.cursor,
+          html: String(el.outerHTML || '').replace(/\s+/g, ' ').slice(0, 2500),
+          parent: String(el.parentElement?.outerHTML || '').replace(/\s+/g, ' ').slice(0, 3500)
+        };
+      })()`, true).catch(() => null);
+      const settingsOptions = payload.surface === 'music'
+        ? []
+        : await surface.adapter.settingsOptions().catch(() => []);
+      const settingsState = payload.surface === 'music'
+        ? []
+        : await surface.adapter.settingsControlState().catch(() => []);
+      return {
+        surface: payload.surface || 'visual',
+        loaded: true,
+        visible: surface.visible === true,
+        url: surface.view.webContents.getURL(),
+        classified,
+        promptFound: probe?.promptFound === true,
+        controls: (probe?.buttonLabels || probe?.labels || []).slice(0, 80),
+        text_excerpt: String(probe?.text || '').slice(0, 3000),
+        generation,
+        diagnostic_action: diagnosticAction,
+        settings_options: settingsOptions.slice(0, 120),
+        settings_state: settingsState.slice(0, 120),
+        prompt_selector: promptSelectorDiagnostic,
+        create_detail: createDetail
+      };
+    }
     throw new Error('Unsupported Google Media control action');
   }
   if (!action.startsWith('chatgpt.')) throw new Error('Unsupported desktop control action');

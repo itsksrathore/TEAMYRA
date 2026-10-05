@@ -117,12 +117,29 @@ def _read_json(path, default=None):
         return default
 
 
+def _replace_with_retry(source, destination):
+    error = None
+    for attempt in range(25):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            error = exc
+            time.sleep(min(0.02 * (attempt + 1), 0.25))
+    if error:
+        raise error
+
+
 def _atomic_write(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    tmp.write_text(content, encoding="utf-8")
+    try:
+        _replace_with_retry(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -256,17 +273,16 @@ def _normalize_references(values):
     return normalized
 
 
-def _sfx_prompt(prompt):
+def _sfx_prompt(prompt, vocals=False):
     base = str(prompt or "").strip()
     lowered = base.lower()
-    # Preserve explicitly requested multi-sound ambience and dialogue/music intent.
-    wants_music = any(word in lowered for word in ("music", "score", "song", "instrumental", "melody"))
-    wants_voice = any(word in lowered for word in ("dialogue", "speech", "spoken", "narration", "voice"))
-    constraints = ["Generate ONLY the requested sound effect/audio event."]
-    if not wants_music:
-        constraints += ["No background music.", "No musical score.", "No instruments.", "No soundtrack.", "No singing."]
+    positive_voice = re.sub(r"\b(?:no|without)\s+(?:vocals?|voices?|dialogue|speech|spoken dialogue|narration|singing)\b", "", lowered)
+    wants_voice = vocals or any(word in positive_voice for word in ("dialogue", "speech", "spoken", "narration", "voice", "vocal", "singing"))
+    constraints = ["Generate ONLY a single requested sound effect/audio event.",
+                   "No background music.", "No musical score.", "No instruments.",
+                   "No melody.", "No soundtrack."]
     if not wants_voice:
-        constraints += ["No spoken dialogue.", "No narration."]
+        constraints += ["No vocals.", "No singing.", "No spoken dialogue.", "No narration."]
     constraints += [
         "No unrelated ambient sounds unless explicitly requested.",
         "The audio should contain only the requested sound event(s): " + base,
@@ -287,10 +303,13 @@ def normalize_generate_request(root, request):
     if len(prompt) > MAX_PROMPT:
         raise ValueError("prompt is too long")
 
+    default_model = "Lyria 3.5" if media_type in MUSIC_TYPES else (
+        "Gemini Omni Flash" if media_type in {"video", "sound_effect"} else "auto"
+    )
     result = {
         "type": media_type,
         "prompt": prompt,
-        "provider_prompt": _sfx_prompt(prompt) if media_type == "sound_effect" else prompt,
+        "provider_prompt": _sfx_prompt(prompt, request.get("vocals") is True) if media_type == "sound_effect" else prompt,
         "project_path": str(project),
         "surface": route_for_type(media_type),
         "aspect_ratio": str(request.get("aspect_ratio") or "").strip()[:32] or None,
@@ -301,7 +320,7 @@ def normalize_generate_request(root, request):
         "instrumental": request.get("instrumental") is True or media_type in {"instrumental", "background_music"},
         "vocals": request.get("vocals") is True,
         "lyrics": str(request.get("lyrics") or "").strip()[:MAX_PROMPT] or None,
-        "model_preference": str(request.get("model_preference") or "").strip()[:120] or None,
+        "model_preference": str(request.get("model_preference") or default_model).strip()[:120] or default_model,
         "generation_settings": {},
     }
     if request.get("duration") is not None:
@@ -315,16 +334,50 @@ def normalize_generate_request(root, request):
         if value:
             result[key] = value
 
-    settings = request.get("generation_settings")
-    if settings is not None:
-        if not isinstance(settings, dict):
-            raise ValueError("generation_settings must be an object")
-        # Generic, bounded settings only. Google-specific DOM controls are not part of this contract.
-        result["generation_settings"] = {
-            str(key)[:80]: value
-            for key, value in list(settings.items())[:32]
-            if isinstance(value, (str, int, float, bool)) or value is None
+    defaults = {}
+    if media_type == "image":
+        defaults = {
+            "download_quality": "prefer_4x_then_2x",
+            "wait_for_upscale": True,
         }
+    elif media_type == "video":
+        defaults = {
+            "generation_model": "Gemini Omni Flash",
+            "generation_resolution": "720p",
+            "download_quality": "1080p",
+            "wait_for_upscale": True,
+        }
+    elif media_type == "sound_effect":
+        defaults = {
+            "generation_model": "Gemini Omni Flash",
+            "generation_resolution": "360p",
+            "download_quality": "source",
+            "wait_for_upscale": False,
+            "audio_only": True,
+        }
+    else:
+        defaults = {
+            "generation_model": "Lyria 3.5",
+        }
+
+    settings = request.get("generation_settings")
+    if settings is not None and not isinstance(settings, dict):
+        raise ValueError("generation_settings must be an object")
+    bounded_settings = {
+        str(key)[:80]: value
+        for key, value in list((settings or {}).items())[:32]
+        if isinstance(value, (str, int, float, bool)) or value is None
+    }
+    if "download_quality" in request:
+        bounded_settings["download_quality"] = request.get("download_quality")
+    if "generation_resolution" in request:
+        bounded_settings["generation_resolution"] = request.get("generation_resolution")
+    if "wait_for_upscale" in request:
+        bounded_settings["wait_for_upscale"] = request.get("wait_for_upscale") is True
+    if "audio_only" in request:
+        bounded_settings["audio_only"] = request.get("audio_only") is True
+    defaults.update(bounded_settings)
+    result["generation_settings"] = defaults
     ensure_project_folders(root, project)
     return result
 
@@ -773,6 +826,8 @@ def register_asset(
         job = load_job(root, job_id)
         if job.get("asset_id"):
             return get_asset(root, job["asset_id"])
+        if job.get("cancel_requested") or job.get("state") == "cancelled":
+            raise ValueError("cancelled media job cannot register an asset")
         registry = _load_assets(root)
         asset_id = _allocate_asset_id(registry, job["request"]["type"])
         now = time.time()
@@ -858,12 +913,13 @@ def recover_incomplete_jobs(root):
                 report["unchanged"].append(job.get("job_id") or path.stem)
                 continue
             submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-            if state == "preparing" and not submitted:
+            possible_submission = submitted or any(event.get("state") == "submitting" for event in job.get("history", []))
+            if state in {"preparing", "waiting_for_browser"} and not possible_submission:
                 job["state"] = "queued"
                 job["claimed_by"] = None
                 job["claimed_at"] = None
                 job["reconcile_required"] = False
-                job.setdefault("history", []).append(_event("queued", "Recovered before provider submission"))
+                job.setdefault("history", []).append(_event("queued", "Recovered safely before provider submission"))
                 report["requeued"].append(job["job_id"])
             else:
                 # Never blindly resubmit once submission may have occurred.
@@ -895,26 +951,47 @@ def resume_auth_jobs(root):
     """Requeue only auth-blocked jobs that were never submitted to a provider."""
     resumed = []
     preserved = []
-    for path in _jobs_dir(root).glob("media-*.json"):
-        job = _read_json(path, None)
-        if not isinstance(job, dict) or job.get("state") != "needs_user_auth":
-            continue
-        submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-        if submitted:
-            job["state"] = "waiting_for_browser"
-            job["reconcile_required"] = True
-            job.setdefault("history", []).append(_event("waiting_for_browser", "Authentication restored; provider reconciliation required"))
-            _save_job(root, job)
-            preserved.append(job["job_id"])
-        else:
-            job["state"] = "queued"
-            job["claimed_by"] = None
-            job["claimed_at"] = None
-            job["reconcile_required"] = False
-            job.setdefault("history", []).append(_event("queued", "Authentication restored; safe to retry before submission"))
-            _save_job(root, job)
-            resumed.append(job["job_id"])
+    with _state_lock(root):
+        for path in _jobs_dir(root).glob("media-*.json"):
+            job = _read_json(path, None)
+            if not isinstance(job, dict) or job.get("state") != "needs_user_auth":
+                continue
+            submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+            possible_submission = submitted or any(event.get("state") == "submitting" for event in job.get("history", []))
+            if possible_submission:
+                job["state"] = "waiting_for_browser"
+                job["reconcile_required"] = True
+                job.setdefault("history", []).append(_event("waiting_for_browser", "Authentication restored; provider reconciliation required"))
+                _save_job(root, job)
+                preserved.append(job["job_id"])
+            else:
+                job["state"] = "queued"
+                job["claimed_by"] = None
+                job["claimed_at"] = None
+                job["reconcile_required"] = False
+                job.setdefault("history", []).append(_event("queued", "Authentication restored; safe to retry before submission"))
+                _save_job(root, job)
+                resumed.append(job["job_id"])
     return {"resumed": resumed, "reconcile_required": preserved}
+
+
+def resume_download_job(root, job_id):
+    """Retry reconciliation/download of an identified submission, never generation."""
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        submission = job.get("provider_submission") or {}
+        if job.get("state") not in {"failed", "needs_user_auth", "rate_limited"}:
+            raise ValueError("only a stopped submitted job can resume its download")
+        if not submission.get("submitted_at") or not submission.get("provider_url"):
+            raise ValueError("provider submission identity is required; generation will not be retried")
+        job["state"] = "waiting_for_browser"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["reconcile_required"] = True
+        job["error"] = None
+        job.setdefault("history", []).append(_event("waiting_for_browser", "Resume submitted result for reconciliation and download only"))
+        _save_job(root, job)
+        return public_job(job)
 
 def summary(root):
     jobs = job_status(root, None, 200)["jobs"]
