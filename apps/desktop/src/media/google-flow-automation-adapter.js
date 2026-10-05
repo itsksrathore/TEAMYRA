@@ -42,12 +42,19 @@ class GoogleFlowAutomationAdapter {
 
   classifyProbe(probe) {
     const body = lower(probe?.lower || probe?.text);
+    const labels = (probe?.buttonLabels || []).map(lower).join(' | ');
+    const links = (probe?.controls || []).map(item => lower((item?.label || '') + ' ' + (item?.href || ''))).join(' | ');
     let host = '';
     try { host = new URL(String(probe?.url || '')).hostname; } catch {}
     const onFlow = host === 'flow.google.com' || host === 'www.flow.google.com';
-    const authenticatedUi = /google account:|account details|new project/.test(body) || probe?.promptFound === true;
+    const authenticatedUi =
+      /google account:|account details|new project|more options for the project/.test(body + ' | ' + labels + ' | ' + links) ||
+      /accounts\.google\.com\/signoutoptions/.test(links) ||
+      probe?.promptFound === true;
+    const explicitAuthUi = /(^|\|\s*)(sign in|log in|choose an account)(\s*\||$)/.test(labels) ||
+      /accounts\.google\.com\/(service)?login/.test(links);
     return {
-      signedIn: onFlow && authenticatedUi && !AUTH_WORDS.some(word => body.includes(word)),
+      signedIn: onFlow && authenticatedUi && !explicitAuthUi,
       challenged: CHALLENGE_WORDS.some(word => body.includes(word)),
       rateLimited: RATE_WORDS.some(word => body.includes(word)),
       creditsExhausted: CREDIT_WORDS.some(word => body.includes(word)),

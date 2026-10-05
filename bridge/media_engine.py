@@ -822,6 +822,7 @@ def connection_status(root):
         "challenged": data.get("challenged") is True,
         "flow_ready": data.get("flow_ready") is True,
         "music_ready": data.get("music_ready") is True,
+        "music_signed_in": data.get("music_signed_in") is True,
         "capabilities": data.get("capabilities") if isinstance(data.get("capabilities"), dict) else {},
         "detail": str(data.get("detail") or "Google Media browser session has not reported status yet"),
         "updated_at": data.get("updated_at"),
@@ -833,7 +834,7 @@ def write_connection_status(root, patch):
     if not isinstance(current, dict):
         current = {}
     allowed = {
-        "connected", "needs_user_auth", "challenged", "flow_ready", "music_ready",
+        "connected", "needs_user_auth", "challenged", "flow_ready", "music_ready", "music_signed_in",
         "capabilities", "detail", "flow_url", "music_url",
     }
     for key, value in (patch or {}).items():

@@ -17,10 +17,29 @@ const flow = new GoogleFlowAutomationAdapter({});
 assert.equal(flow.classifyProbe({ lower: 'sign in', promptFound: false }).signedIn, false);
 assert.equal(flow.classifyProbe({ lower: 'verify you are human', promptFound: false }).challenged, true);
 assert.equal(flow.classifyProbe({ lower: 'too many requests', promptFound: true }).rateLimited, true);
+assert.equal(flow.classifyProbe({
+  url: 'https://flow.google.com/',
+  lower: 'history workspace',
+  promptFound: false,
+  buttonLabels: ['Home', 'New project', 'Account details ULTRA'],
+  controls: [{ label: 'Google Account: Test User', href: 'https://accounts.google.com/SignOutOptions?continue=https://flow.google.com/' }]
+}).signedIn, true);
+assert.equal(flow.classifyProbe({
+  url: 'https://flow.google.com/',
+  lower: 'welcome',
+  promptFound: false,
+  buttonLabels: ['Sign in'],
+  controls: [{ label: 'Sign in', href: 'https://accounts.google.com/ServiceLogin' }]
+}).signedIn, false);
 
 const music = new GoogleFlowMusicAutomationAdapter({});
 assert.equal(music.classifyProbe({ lower: 'choose an account' }).signedIn, false);
 assert.equal(music.classifyProbe({ lower: 'unusual activity' }).challenged, true);
+assert.equal(music.classifyProbe({
+  url: 'https://www.flowmusic.app/suburbanplatform',
+  lower: 'songs playlists spaces',
+  labels: ['New session', 'Profile', 'Settings menu suburbanplatform MEMBER', 'Songs (0)']
+}).signedIn, true);
 
 assert.deepEqual(classifyError(new Error('selector_failure: missing button')), {
   state: 'failed', category: 'selector_failure'
