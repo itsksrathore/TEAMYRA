@@ -948,6 +948,38 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 }
 
 .tool-grid input { accent-color: var(--accent); }
+.access-zone {
+  display: grid;
+  gap: 7px;
+  margin: 10px 17px 0;
+  padding: 10px;
+  border: 1px solid rgba(178,50,47,.20);
+  border-radius: 14px;
+  background: rgba(239,100,97,.05);
+}
+
+.access-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 11px;
+  background: rgba(255,255,255,.35);
+  font-size: 11px;
+}
+
+.access-switch input { margin-top: 2px; accent-color: var(--red); }
+.access-switch span { display: grid; gap: 2px; }
+.access-switch small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.access-switch.danger strong { color: var(--red); }
+.access-switch:has(input:disabled) { opacity: .55; }
+.access-warning {
+  margin: 0 2px;
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .tools-note {
   margin: 10px 18px 0;
   color: var(--muted);

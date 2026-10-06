@@ -162,7 +162,19 @@
         <label><input id="chatgptPermGit" type="checkbox" checked /><span>Git</span></label>
         <label><input id="chatgptPermTerminal" type="checkbox" checked /><span>Terminal</span></label>
       </div>
-      <p class="tools-note">Access always stays inside the selected workspace. Destructive actions remain confirmation-gated.</p>
+      <div class="access-zone">
+        <label class="access-switch danger">
+          <input id="chatgptPermFullAccess" type="checkbox" role="switch" />
+          <span><strong>Full PC access</strong><small>ChatGPT workers may read, write and run commands anywhere on this PC, outside the workspace.</small></span>
+        </label>
+        <label class="access-switch">
+          <input id="chatgptPermDestructive" type="checkbox" role="switch" disabled />
+          <span><strong>Destructive commands without confirmation</strong><small>Recursive deletes, force pushes, hard resets and registry edits run without asking. Needs full PC access.</small></span>
+        </label>
+        <p class="access-warning">Warning: with full PC access a ChatGPT worker acts with your Windows account. Turn it on only for tasks you trust. Credential folders stay blocked and every command is audited.</p>
+      </div>
+      <p id="chatgptToolsNote" class="tools-note">Access always stays inside the selected workspace. Destructive actions remain confirmation-gated.</p>
+      <div id="chatgptToolsError" class="dialog-error" hidden></div>
       <div class="dialog-actions">
         <button id="chatgptViewChanges" class="btn quiet" type="button">Changes</button>
         <button id="chatgptSavePermissions" class="btn primary" type="button">Save</button>

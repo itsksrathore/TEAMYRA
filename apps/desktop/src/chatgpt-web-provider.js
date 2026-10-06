@@ -1,13 +1,18 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { WebContentsView } = require('electron');
+const { WebContentsView, Notification } = require('electron');
 const { ChatGPTSessionManager, DEFAULT_CHATGPT_PROFILE_ID } = require('./chatgpt-session-manager');
-const { ChatGPTAutomationAdapter } = require('./chatgpt-automation-adapter');
+const { ChatGPTAutomationAdapter, teamyraError } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
 const MAX_TOOL_RESULT_CHARS = 120000;
 const MAX_TOOL_STEPS = 256;
+const MAX_TOOL_PARSE_FAILURES = 3;
+const CHALLENGE_POLL_MS = 3000;
+const PROGRESS_INTERVAL_MS = 30000;
+const VERIFICATION_MESSAGE = 'ChatGPT asks for human verification. Open TEAMYRA Desktop, select the ChatGPT worker and complete the check; the job resumes automatically.';
+const TOOL_ERROR_HINT = 'Reply with one line: TEAMYRA_TOOL_REQUEST {"tool":"<name>","args":{...}} using valid JSON and forward slashes in paths (D:/dir/file). If the task is complete, reply with the final answer without the TEAMYRA_TOOL_REQUEST marker.';
 const READ_ONLY_BLOCKED_TOOLS = new Set([
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
   'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore'
@@ -54,6 +59,7 @@ class ChatGPTWebProvider {
     this.visible = false;
     this.loaded = false;
     this.busy = false;
+    this.awaitingUser = false;
     this.lastProbe = null;
     this.jobTimer = null;
     this.heartbeatTimer = null;
@@ -111,12 +117,15 @@ class ChatGPTWebProvider {
       const dir = path.join(jobsRoot, entry.name);
       let meta;
       try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')); } catch { continue; }
-      if (meta.provider !== 'chatgpt-web' || meta.state !== 'running' ||
+      if (meta.provider !== 'chatgpt-web' || !['running', 'needs_user'].includes(meta.state) ||
           String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId ||
           fs.existsSync(path.join(dir, 'DONE'))) continue;
       const detail = 'ChatGPT desktop restarted; partial workspace changes are preserved. Resume with a new job.';
       this.appendJobEvent(dir, 'error', detail);
-      this.writeJobMeta(dir, { state: 'failed', reason: 'desktop_interrupted', ended: Date.now() / 1000, last_event: detail });
+      this.writeJobMeta(dir, {
+        state: 'failed', reason: 'desktop_interrupted', exit_code: 1, attention: null,
+        ended: Date.now() / 1000, last_event: detail
+      });
       fs.writeFileSync(path.join(dir, 'DONE'), 'failed', 'utf8');
     }
   }
@@ -188,7 +197,7 @@ class ChatGPTWebProvider {
       this.writeStatus({ detail: 'ChatGPT renderer stopped: ' + (details?.reason || 'unknown') });
     });
     this.view.webContents.on('before-input-event', event => {
-      if (this.busy) event.preventDefault();
+      if (this.busy && !this.awaitingUser) event.preventDefault();
     });
     return this.view;
   }
@@ -536,7 +545,9 @@ class ChatGPTWebProvider {
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
       probe = await this.automation.probe();
-      if (probe.challenged) throw new Error('ChatGPT requires user verification in the embedded view');
+      if (probe.challenged) {
+        throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
+      }
       if (probe.loginVisible) throw new Error('ChatGPT sign-in is required');
       if (probe.promptFound) break;
       await sleep(250);
@@ -605,23 +616,76 @@ class ChatGPTWebProvider {
       const dir = path.join(jobsRoot, entry.name);
       try {
         const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
-        if (meta.provider === 'chatgpt-web' && meta.state === 'waiting_for_desktop' && !fs.existsSync(path.join(dir, 'DONE'))) {
+        if (meta.provider === 'chatgpt-web' && meta.state === 'waiting_for_desktop' && !fs.existsSync(path.join(dir, 'DONE')) &&
+            String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) === this.activeProfileId) {
           candidates.push({ dir, meta });
         }
       } catch {}
     }
     candidates.sort((a, b) => (a.meta.created || 0) - (b.meta.created || 0));
     if (!candidates.length) return;
-    const candidate = candidates.find(item =>
-      String(item.meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) === this.activeProfileId
-    );
-    if (!candidate) return;
     if (!this.view || this.view.webContents.isDestroyed()) {
       await this.wakeBackground();
     }
     const status = await this.refreshStatus();
-    if (!status.workerReady) return;
-    await this.runDelegatedJob(candidate.dir);
+    if (!status.workerReady) {
+      // Keep the jobs waiting, but explain on each of them why they wait.
+      this.markWaitingJobs(candidates, status);
+      return;
+    }
+    this.markWaitingJobs(candidates, null);
+    await this.runDelegatedJob(candidates[0].dir);
+  }
+
+  // Writes attention / last_event on jobs that wait for this worker. `status`
+  // is the not-ready worker status, or null when the worker is ready again.
+  markWaitingJobs(candidates, status) {
+    let newlyChallenged = 0;
+    for (const { dir, meta } of candidates) {
+      const verification = meta.attention?.kind === 'chatgpt_verification';
+      const patch = {};
+      if (status?.challenged) {
+        if (!verification) {
+          patch.attention = { kind: 'chatgpt_verification', since: Date.now() / 1000, message: VERIFICATION_MESSAGE };
+          patch.last_event = 'waiting: ChatGPT verification required in TEAMYRA Desktop';
+          newlyChallenged += 1;
+        }
+      } else {
+        if (verification) patch.attention = null;
+        if (status) {
+          const detail = status.loginVisible
+            ? 'waiting: ChatGPT sign-in required in TEAMYRA Desktop'
+            : 'waiting: embedded ChatGPT worker is not ready';
+          if (meta.last_event !== detail) patch.last_event = detail;
+        }
+      }
+      if (!Object.keys(patch).length) continue;
+      try {
+        const updated = this.writeJobMeta(dir, patch);
+        Object.assign(meta, updated);
+      } catch {}
+    }
+    if (newlyChallenged) this.notifyUser('TEAMYRA: ChatGPT verification needed', VERIFICATION_MESSAGE);
+  }
+
+  notifyUser(title, body) {
+    try {
+      if (!Notification || typeof Notification.isSupported !== 'function' || !Notification.isSupported()) return false;
+      const notification = new Notification({ title, body });
+      notification.on('click', () => {
+        try {
+          if (this.window && !this.window.isDestroyed?.()) {
+            if (this.window.isMinimized?.()) this.window.restore();
+            this.window.show();
+            this.window.focus();
+          }
+        } catch {}
+      });
+      notification.show();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   writeJobMeta(jobDir, patch) {
@@ -640,13 +704,145 @@ class ChatGPTWebProvider {
     fs.appendFileSync(path.join(jobDir, 'transcript.md'), `[${new Date().toLocaleTimeString()}] ${kind}: ${String(text || '')}\n`, 'utf8');
   }
 
+  checkJobActive(job) {
+    if (job.isCancelled()) throw teamyraError('TEAMYRA job cancelled', 'TEAMYRA_CANCELLED', 'cancelled');
+    if (Date.now() >= job.deadline) throw teamyraError('ChatGPT job timed out', 'TEAMYRA_TIMEOUT', 'timeout');
+  }
+
+  recordJobUsage(job) {
+    try { this.writeJobMeta(job.dir, { usage: { ...job.usage } }); } catch {}
+  }
+
+  // Pauses the job as needs_user until the ChatGPT verification is gone. The
+  // job keeps its conversation; it fails only on cancel or deadline.
+  async waitForChallengeResolution(job) {
+    const since = Date.now() / 1000;
+    this.appendJobEvent(job.dir, 'attention', VERIFICATION_MESSAGE);
+    this.writeJobMeta(job.dir, {
+      state: 'needs_user',
+      reason: 'chatgpt_verification',
+      attention: { kind: 'chatgpt_verification', since, message: VERIFICATION_MESSAGE },
+      last_event: 'needs_user: ChatGPT verification required'
+    });
+    this.notifyUser('TEAMYRA: ChatGPT verification needed', VERIFICATION_MESSAGE);
+    this.awaitingUser = true;
+    await this.setInteractionLocked(false).catch(() => {});
+    try {
+      for (;;) {
+        this.checkJobActive(job);
+        let probe = null;
+        try { probe = await this.automation.probe(); } catch {}
+        if (probe && !probe.challenged && probe.promptFound) break;
+        await sleep(Math.max(1, Math.min(this.challengePollMs ?? CHALLENGE_POLL_MS, job.deadline - Date.now())));
+      }
+    } finally {
+      this.awaitingUser = false;
+    }
+    await this.setInteractionLocked(true).catch(() => {});
+    this.writeJobMeta(job.dir, {
+      state: 'running',
+      reason: null,
+      attention: null,
+      last_event: 'resumed after ChatGPT verification'
+    });
+    this.appendJobEvent(job.dir, 'info', 'ChatGPT verification cleared; resuming the same conversation');
+    await this.refreshStatus().catch(() => {});
+  }
+
+  async sendJobMessage(job, text) {
+    for (;;) {
+      this.checkJobActive(job);
+      try {
+        const snap = await this.automation.assistantSnapshot();
+        if (snap?.challenged) {
+          throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
+        }
+        await this.sendTask(text);
+        job.usage.chars_sent += String(text || '').length;
+        job.usage.turns += 1;
+        this.recordJobUsage(job);
+        return snap;
+      } catch (error) {
+        if (error?.code !== 'TEAMYRA_CHALLENGED') throw error;
+        await this.waitForChallengeResolution(job);
+      }
+    }
+  }
+
+  // After a verification pause: back in the job conversation, was the last
+  // message delivered? If not, it has to be sent again.
+  async lastMessageDelivered(job, text) {
+    const current = await this.getCurrentConversation().catch(() => null);
+    if (job.conversationUrl && current?.conversationId !== job.conversationId) {
+      await this.openConversation(job.conversationUrl);
+    }
+    const expected = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const last = String(await this.automation.lastUserMessage().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+      if (last && expected && last.startsWith(expected)) return true;
+      await sleep(this.resumePollMs ?? 1000);
+    }
+    return false;
+  }
+
+  // Sends one message and waits for its reply, surviving verification pauses.
+  async jobExchange(job, text) {
+    let snap = await this.sendJobMessage(job, text);
+    for (;;) {
+      this.checkJobActive(job);
+      try {
+        const reply = await this.automation.waitForAssistantReply({
+          previousCount: snap.count,
+          previousText: snap.text,
+          previousMessageId: snap.messageId,
+          deadline: job.deadline,
+          shouldCancel: job.isCancelled,
+          detectChallenge: true,
+          pollMs: this.replyPollMs,
+          progressIntervalMs: this.progressIntervalMs ?? PROGRESS_INTERVAL_MS,
+          onProgress: ({ elapsedMs, generating }) => {
+            const seconds = Math.round(elapsedMs / 1000);
+            this.writeJobMeta(job.dir, {
+              last_event: generating ? `chatgpt generating ${seconds} s` : `waiting for chatgpt reply ${seconds} s`
+            });
+          }
+        });
+        job.usage.chars_received += String(reply.text || '').length;
+        this.recordJobUsage(job);
+        const conversation = await this.getCurrentConversation().catch(() => null);
+        if (conversation?.conversationId) {
+          job.conversationId = conversation.conversationId;
+          job.conversationUrl = conversation.url;
+        }
+        return reply;
+      } catch (error) {
+        if (error?.code !== 'TEAMYRA_CHALLENGED') throw error;
+        await this.waitForChallengeResolution(job);
+        if (!await this.lastMessageDelivered(job, text)) {
+          this.appendJobEvent(job.dir, 'info', 'last message was lost during verification; sending it again');
+          snap = await this.sendJobMessage(job, text);
+        }
+      }
+    }
+  }
+
   async runDelegatedJob(jobDir) {
     this.busy = true;
     this.activeJobDir = jobDir;
     let state = 'failed';
+    let reason = null;
+    const job = {
+      dir: jobDir,
+      deadline: Infinity,
+      usage: { chars_sent: 0, chars_received: 0, turns: 0 },
+      isCancelled: () => fs.existsSync(path.join(jobDir, 'CANCEL')),
+      conversationId: null,
+      conversationUrl: null
+    };
     try {
       const spec = JSON.parse(fs.readFileSync(path.join(jobDir, 'spec.json'), 'utf8'));
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
+      job.deadline = Date.now() + Number(spec.timeout || 3600) * 1000;
       const workspaceState = await this.workspaceBridge.status().catch(() => null);
       const assignedWorkspace = path.resolve(spec.cwd || '');
       if (!assignedWorkspace || !fs.existsSync(assignedWorkspace) || !fs.statSync(assignedWorkspace).isDirectory()) {
@@ -656,6 +852,7 @@ class ChatGPTWebProvider {
         read: true, search: true, create: true, write: true, git: true, terminal: true,
         outside_workspace: false, destructive_without_confirmation: false
       };
+      const fullAccess = taskPermissions.full_access === true || workspaceState?.full_access === true;
 
       const requestedConversation = spec.session_id
         ? { conversationId: spec.session_id }
@@ -668,58 +865,54 @@ class ChatGPTWebProvider {
         await this.createConversation();
       }
       await this.setInteractionLocked(true);
-      this.writeJobMeta(jobDir, { state: 'running', started: Date.now() / 1000, runner_pid: null });
+      this.writeJobMeta(jobDir, {
+        state: 'running', started: Date.now() / 1000, runner_pid: null, attention: null, usage: { ...job.usage }
+      });
       this.appendJobEvent(jobDir, 'info', 'embedded ChatGPT worker started');
 
       const bootstrap = [
         'You are Teamyra Worker — ChatGPT, operating on a local project through controlled TEAMYRA tools.',
         'Do not claim you changed/read local files unless TEAMYRA returned the tool result.',
-        'When you need a local tool, reply with exactly one line and nothing else:',
+        'When you need a local tool, reply with exactly one line and nothing else (no code fence):',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
+        'Send one tool request per reply and wait for its TEAMYRA_TOOL_RESULT. The JSON must be valid; write paths with forward slashes (D:/project/file.txt), never backslashes.',
         'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
         'filesystem.read is paged: use offset and max_bytes for large files, then next_offset when clipped.',
-        'Use relative paths with forward slashes. git.diff supports base/head commit refs and stat:true.',
+        fullAccess
+          ? 'The user granted full PC access: absolute paths anywhere on this PC are allowed; relative paths resolve inside the workspace.'
+          : 'Use relative paths inside the workspace.',
+        'git.diff supports base/head commit refs and stat:true. An unknown argument is an error that lists the allowed keys.',
+        'If TEAMYRA answers TEAMYRA_TOOL_ERROR, your request could not be parsed: send a corrected request.',
         'This text bridge is your local tool interface: emit TEAMYRA_TOOL_REQUEST even if task files mention calling native tools.',
         'Destructive operations may be denied pending explicit user confirmation. Never try to bypass that denial.',
-        'When the task is complete, reply normally with the final result and do not emit a tool request.',
+        'When the task is complete, reply normally with the final result and do not include the TEAMYRA_TOOL_REQUEST marker.',
         '',
         'WORKSPACE: ' + spec.cwd,
         'TASK:',
         task
       ].join('\n');
 
-      const deadline = Date.now() + Number(spec.timeout || 3600) * 1000;
-      const isCancelled = () => fs.existsSync(path.join(jobDir, 'CANCEL'));
-      const waitOptions = previous => {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) throw new Error('ChatGPT job timed out');
-        return {
-          previousCount: previous.count,
-          previousText: previous.text,
-          previousMessageId: previous.messageId,
-          timeoutMs: remaining,
-          shouldCancel: isCancelled
-        };
-      };
-
-      let snap = await this.automation.assistantSnapshot();
-      await this.sendTask(bootstrap);
-      let reply = await this.automation.waitForAssistantReply(waitOptions(snap));
+      let reply = await this.jobExchange(job, bootstrap);
+      let parseFailures = 0;
 
       for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
-        if (fs.existsSync(path.join(jobDir, 'CANCEL'))) {
+        if (job.isCancelled()) {
           await this.stopGeneration().catch(() => {});
           state = 'cancelled';
           throw new Error('TEAMYRA job cancelled');
         }
-        const request = this.automation.parseToolRequest(reply.text);
-        if (!request) {
+        const parsed = this.automation.parseToolRequestDetailed(reply.text);
+        if (!parsed.marker) {
           const conversation = await this.getCurrentConversation();
           this.saveWorkerConversation(conversation);
           fs.writeFileSync(path.join(jobDir, 'final.txt'), reply.text || '', 'utf8');
           this.appendJobEvent(jobDir, 'message', reply.text || '');
           this.writeJobMeta(jobDir, {
             state: 'done',
+            reason: null,
+            exit_code: 0,
+            attention: null,
+            usage: { ...job.usage },
             ended: Date.now() / 1000,
             session_id: conversation.conversationId,
             chatgpt_url: conversation.url,
@@ -729,6 +922,19 @@ class ChatGPTWebProvider {
           state = 'done';
           return;
         }
+
+        if (!parsed.request) {
+          parseFailures += 1;
+          this.appendJobEvent(jobDir, 'error', `tool request parse error ${parseFailures}/${MAX_TOOL_PARSE_FAILURES}: ${parsed.error}`);
+          if (parseFailures >= MAX_TOOL_PARSE_FAILURES) {
+            reason = 'tool_parse_error';
+            throw new Error(`ChatGPT sent ${parseFailures} unparseable TEAMYRA tool requests in a row: ${parsed.error}`);
+          }
+          reply = await this.jobExchange(job, 'TEAMYRA_TOOL_ERROR ' + JSON.stringify({ error: parsed.error, hint: TOOL_ERROR_HINT }));
+          continue;
+        }
+        parseFailures = 0;
+        const request = parsed.request;
 
         this.appendJobEvent(jobDir, 'command', request.tool + ' ' + JSON.stringify(request.args).slice(0, 1000));
         let toolResult;
@@ -755,23 +961,26 @@ class ChatGPTWebProvider {
               note: 'TEAMYRA clipped this tool result. Request a narrower path/query/range or use filesystem.read offset/next_offset.'
             };
         this.appendJobEvent(jobDir, 'result', rawToolResult.slice(0, 3000));
-        snap = await this.automation.assistantSnapshot();
-        await this.sendTask('TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
-        reply = await this.automation.waitForAssistantReply(waitOptions(snap));
+        reply = await this.jobExchange(job, 'TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
       }
       throw new Error('ChatGPT exceeded the maximum TEAMYRA tool-call loop');
     } catch (error) {
       if (error?.code === 'TEAMYRA_CANCELLED') state = 'cancelled';
       else if (state !== 'cancelled') state = 'failed';
+      const finalReason = state === 'cancelled' ? 'cancelled' : (reason || error?.reason || 'worker_error');
       this.appendJobEvent(jobDir, 'error', String(error?.message || error));
       this.writeJobMeta(jobDir, {
         state,
-        reason: state === 'cancelled' ? 'cancelled' : 'worker_error',
+        reason: finalReason,
+        exit_code: 1,
+        attention: null,
+        usage: { ...job.usage },
         ended: Date.now() / 1000,
         last_event: 'error: ' + String(error?.message || error).slice(0, 180)
       });
       fs.writeFileSync(path.join(jobDir, 'DONE'), state, 'utf8');
     } finally {
+      this.awaitingUser = false;
       await this.setInteractionLocked(false).catch(() => {});
       this.activeJobDir = null;
       this.busy = false;

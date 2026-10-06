@@ -16,7 +16,9 @@ async function main() {
       fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ provider: 'chatgpt-web', profile_id: profile, state }));
     }
     provider.recoverInterruptedJobs();
-    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'jobs/interrupted/meta.json'))).reason, 'desktop_interrupted');
+    const interrupted = JSON.parse(fs.readFileSync(path.join(root, 'jobs/interrupted/meta.json')));
+    assert.equal(interrupted.reason, 'desktop_interrupted');
+    assert.equal(interrupted.exit_code, 1);
     assert.ok(fs.existsSync(path.join(root, 'jobs/interrupted/DONE')));
     assert.ok(!fs.existsSync(path.join(root, 'jobs/other/DONE')));
     assert.ok(!fs.existsSync(path.join(root, 'jobs/queued/DONE')));

@@ -645,6 +645,9 @@ async function refreshChatgptStatus() {
   })) {
     if (Object.prototype.hasOwnProperty.call(permissions, name)) $('#' + id).checked = permissions[name] === true;
   }
+  $('#chatgptPermFullAccess').checked = permissions.full_access === true || workspace?.full_access === true;
+  $('#chatgptPermDestructive').checked = permissions.destructive_without_confirmation === true;
+  syncChatgptAccessUi();
 
   syncChatgptBounds();
   return { status, workspace };
@@ -725,6 +728,7 @@ async function selectChatgptWorkspace() {
 }
 
 function chatgptPermissionsFromUi() {
+  const fullAccess = $('#chatgptPermFullAccess').checked;
   return {
     read: $('#chatgptPermRead').checked,
     search: $('#chatgptPermSearch').checked,
@@ -732,9 +736,20 @@ function chatgptPermissionsFromUi() {
     write: $('#chatgptPermWrite').checked,
     git: $('#chatgptPermGit').checked,
     terminal: $('#chatgptPermTerminal').checked,
-    outside_workspace: false,
-    destructive_without_confirmation: false
+    full_access: fullAccess,
+    outside_workspace: fullAccess,
+    destructive_without_confirmation: fullAccess && $('#chatgptPermDestructive').checked
   };
+}
+
+function syncChatgptAccessUi() {
+  const fullAccess = $('#chatgptPermFullAccess').checked;
+  $('#chatgptPermDestructive').disabled = !fullAccess;
+  if (!fullAccess) $('#chatgptPermDestructive').checked = false;
+  $('#chatgptToolsNote').textContent = fullAccess
+    ? 'Full PC access is ON: ChatGPT workers can use any path on this PC except credential folders. ' +
+      ($('#chatgptPermDestructive').checked ? 'Destructive commands run without confirmation.' : 'Destructive actions remain confirmation-gated.')
+    : 'Access always stays inside the selected workspace. Destructive actions remain confirmation-gated.';
 }
 
 async function saveChatgptPermissions() {
@@ -743,7 +758,20 @@ async function saveChatgptPermissions() {
     await selectChatgptWorkspace();
     return;
   }
-  await window.teamyra.configureChatgptWorkspace(status.workspace, chatgptPermissionsFromUi());
+  $('#chatgptToolsError').hidden = true;
+  const result = await window.teamyra.configureChatgptWorkspace(status.workspace, chatgptPermissionsFromUi());
+  if (result?.cancelled) {
+    // The user declined the confirmation dialog: show the stored permissions again.
+    await refreshChatgptStatus();
+    return;
+  }
+  const stored = result?.permissions;
+  if (stored && $('#chatgptPermFullAccess').checked && stored.full_access !== true) {
+    $('#chatgptToolsError').textContent = 'Full PC access was not enabled by the TEAMYRA core.';
+    $('#chatgptToolsError').hidden = false;
+    await refreshChatgptStatus();
+    return;
+  }
   $('#chatgptToolsDialog').close();
   await refreshChatgptStatus();
 }
@@ -881,6 +909,8 @@ $('#chatgptTools').addEventListener('click', async () => {
   $('#chatgptToolsDialog').showModal();
 });
 $('#chatgptToolsClose').addEventListener('click', () => $('#chatgptToolsDialog').close());
+$('#chatgptPermFullAccess').addEventListener('change', syncChatgptAccessUi);
+$('#chatgptPermDestructive').addEventListener('change', syncChatgptAccessUi);
 $('#chatgptSavePermissions').addEventListener('click', () => saveChatgptPermissions().catch(error => alert(String(error?.message || error))));
 $('#chatgptViewChanges').addEventListener('click', () => showChanges().catch(error => alert(String(error?.message || error))));
 $('#changesClose').addEventListener('click', () => $('#changesDialog').close());

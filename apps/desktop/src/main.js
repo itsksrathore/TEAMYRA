@@ -871,9 +871,54 @@ ipcMain.handle('teamyra:chatgpt-workspace-status', async () => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
   return provider.workspaceBridge.status();
 });
-ipcMain.handle('teamyra:chatgpt-workspace-configure', async (_event, workspace, permissions = {}) => {
+const ELEVATED_CHATGPT_PERMISSIONS = ['full_access', 'outside_workspace', 'destructive_without_confirmation'];
+
+async function storedChatgptPermissions(provider) {
+  const status = await provider.workspaceBridge.status().catch(() => null);
+  const permissions = { ...(status?.permissions || {}) };
+  if (status?.full_access === true) permissions.full_access = true;
+  return permissions;
+}
+
+// Automated callers (desktop control / MCP) may only lower the elevated
+// permissions; raising them needs the desktop UI and its confirmation dialog.
+async function lowerOnlyChatgptPermissions(provider, permissions = {}) {
+  const current = await storedChatgptPermissions(provider);
+  const next = { ...(permissions || {}) };
+  for (const key of ELEVATED_CHATGPT_PERMISSIONS) {
+    next[key] = current[key] === true && next[key] !== false;
+  }
+  return next;
+}
+
+ipcMain.handle('teamyra:chatgpt-workspace-configure', async (event, workspace, permissions = {}) => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
-  return provider.workspaceBridge.configure(String(workspace || ''), permissions || {});
+  const requested = { ...(permissions || {}) };
+  const current = await storedChatgptPermissions(provider);
+  const raised = ELEVATED_CHATGPT_PERMISSIONS.filter(key => requested[key] === true && current[key] !== true);
+  if (raised.length) {
+    const lines = [];
+    if (raised.includes('full_access') || raised.includes('outside_workspace')) {
+      lines.push('Full PC access lets ChatGPT workers read, write and delete files and run commands anywhere on this PC with your Windows account, not only in the workspace. Credential folders stay blocked.');
+    }
+    if (raised.includes('destructive_without_confirmation')) {
+      lines.push('Destructive commands (recursive delete, format, git push --force, git reset --hard, registry edits) will run without asking you first.');
+    }
+    const options = {
+      type: 'warning',
+      title: 'TEAMYRA: grant elevated access?',
+      message: raised.includes('full_access') ? 'Turn on Full PC access for ChatGPT workers?' : 'Allow destructive commands without confirmation?',
+      detail: lines.join('\n\n') + '\n\nOnly continue for tasks you trust. You can turn it off again in Workspace access.',
+      buttons: ['Cancel', 'Turn on'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    };
+    const owner = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow();
+    const answer = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+    if (answer.response !== 1) return { cancelled: true };
+  }
+  return provider.workspaceBridge.configure(String(workspace || ''), requested);
 });
 ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
@@ -1267,7 +1312,12 @@ async function dispatchDesktopControl(action, payload = {}) {
   }
   if (cmd === 'bounds') return provider.setBounds(payload.bounds || {});
   if (cmd === 'workspace_status') return provider.workspaceBridge.status();
-  if (cmd === 'workspace_configure') return provider.workspaceBridge.configure(String(payload.workspace || ''), payload.permissions || {});
+  if (cmd === 'workspace_configure') {
+    return provider.workspaceBridge.configure(
+      String(payload.workspace || ''),
+      await lowerOnlyChatgptPermissions(provider, payload.permissions || {})
+    );
+  }
   if (cmd === 'changes') return provider.workspaceBridge.changes();
   if (cmd === 'revert') {
     if (payload.confirm !== true) throw new Error('Revert requires explicit confirmation');
