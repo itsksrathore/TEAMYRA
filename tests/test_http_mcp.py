@@ -63,9 +63,10 @@ class HttpMcpTests(unittest.TestCase):
 
         fake = FakeServer()
         with patch.object(http_mcp.server.recovery, "recover_all", return_value={"ok": True, "errors": []}) as recover_all, \
-             patch.object(http_mcp, "create_server", return_value=fake):
+             patch.object(http_mcp, "create_server", return_value=fake),              patch.object(http_mcp.server, "start_background_services", return_value=True) as background:
             http_mcp.serve("127.0.0.1", 8787)
         recover_all.assert_called_once_with(server.ROOT, server.BRIDGE, server.PYTHON)
+        background.assert_called_once_with()
         self.assertTrue(fake.served)
         self.assertTrue(fake.closed)
 

@@ -20,6 +20,7 @@ import project_memory
 import handoff_store
 import mcp_pool
 import recovery
+import scheduler
 import media_engine
 import desktop_runtime
 
@@ -44,6 +45,15 @@ RESUME_MESSAGE = ("Your previous run on this task was interrupted: the worker pr
 SEND_LOCK = threading.Lock()
 AUTH_CACHE = {}
 AUTH_CACHE_SECONDS = 20
+# A CLI worker that answered "ready" stays ready for this long when later probes
+# only time out, so one slow probe (agy models often takes >8 s) cannot flip it.
+AUTH_LAST_GOOD_SECONDS = 600
+AUTH_PROBE_TIMEOUTS = {"codex": 8, "claude": 8, "antigravity": 30}
+AUTH_REFRESH_SECONDS = 60
+CLI_PROVIDERS = {"codex", "claude", "antigravity"}
+_AUTH_LOCK = threading.Lock()
+_AUTH_INFLIGHT = set()
+_BACKGROUND_STARTED = threading.Event()
 for p in (JOBS, LOGS, WORKTREES):
     p.mkdir(parents=True, exist_ok=True)
 
@@ -101,21 +111,17 @@ def worker_settings(info):
     return merged
 
 
-def worker_auth_status(info, use_cache=True):
-    worker = info["id"]
-    now = time.time()
-    cached = AUTH_CACHE.get(worker)
-    if use_cache and cached and now - cached["at"] < AUTH_CACHE_SECONDS:
-        return cached["ready"], cached["detail"]
-
+def _probe_worker_auth(info, now):
+    """One readiness probe. Returns (ready, detail, transient)."""
     provider = info["provider"]
+    timeout = AUTH_PROBE_TIMEOUTS.get(provider, 8)
     try:
         if provider == "codex":
             launch = codex_launch()
             if not launch:
                 raise RuntimeError("Codex CLI not found")
             rc, out, err = run([*launch, "login", "status"],
-                                env={"CODEX_HOME": str(info["home"])}, timeout=8)
+                                env={"CODEX_HOME": str(info["home"])}, timeout=timeout)
             detail = (out + err).strip()
             ready = rc == 0 and "not logged in" not in detail.lower()
         elif provider == "claude":
@@ -125,14 +131,14 @@ def worker_auth_status(info, use_cache=True):
             env = {}
             if not info.get("native"):
                 env["CLAUDE_CONFIG_DIR"] = str(info["home"])
-            rc, out, err = run([*launch, "auth", "status", "--json"], env=env, timeout=8)
+            rc, out, err = run([*launch, "auth", "status", "--json"], env=env, timeout=timeout)
             detail = (out + err).strip()
             ready = rc == 0
         elif provider == "antigravity":
             launch = agy_launch()
             if not launch:
                 raise RuntimeError("Antigravity CLI not found")
-            rc, out, err = run([*launch, "models"], timeout=8)
+            rc, out, err = run([*launch, "models"], timeout=timeout)
             detail = (out + err).strip()
             ready = rc == 0 and bool(out.strip())
         elif provider == "chatgpt-web":
@@ -163,11 +169,108 @@ def worker_auth_status(info, use_cache=True):
             ))
         else:
             ready, detail = False, "unsupported provider"
+        return ready, detail, False
+    except subprocess.TimeoutExpired:
+        return False, f"{provider} readiness probe timed out after {timeout} s", True
     except Exception as exc:
-        ready, detail = False, str(exc)
+        return False, str(exc), False
 
-    AUTH_CACHE[worker] = {"at": now, "ready": ready, "detail": detail}
-    return ready, detail
+
+def _store_auth(info, ready, detail, transient, now):
+    worker = info["id"]
+    previous = AUTH_CACHE.get(worker) or {}
+    last_good = previous.get("last_good_at") or 0
+    if (not ready and transient and previous.get("ready")
+            and now - float(last_good) <= AUTH_LAST_GOOD_SECONDS):
+        # Keep the last known good answer; record why it was not refreshed.
+        entry = dict(previous, at=now, probe_error=detail, source="last_known_good")
+    else:
+        entry = {"at": now, "ready": ready, "detail": detail, "source": "probe",
+                 "probe_error": detail if transient else None,
+                 "last_good_at": now if ready else last_good}
+    AUTH_CACHE[worker] = entry
+    return entry
+
+
+def _refresh_auth_async(info):
+    worker = info["id"]
+    with _AUTH_LOCK:
+        if worker in _AUTH_INFLIGHT:
+            return False
+        _AUTH_INFLIGHT.add(worker)
+
+    def task():
+        try:
+            worker_auth_status(info, use_cache=False)
+        finally:
+            with _AUTH_LOCK:
+                _AUTH_INFLIGHT.discard(worker)
+
+    threading.Thread(target=task, daemon=True, name=f"teamyra-auth-{worker}").start()
+    return True
+
+
+def worker_auth_status(info, use_cache=True):
+    worker = info["id"]
+    now = time.time()
+    cached = AUTH_CACHE.get(worker)
+    if use_cache and cached:
+        age = now - cached["at"]
+        if age < AUTH_CACHE_SECONDS:
+            return cached["ready"], cached["detail"]
+        if info.get("provider") in CLI_PROVIDERS and age < AUTH_LAST_GOOD_SECONDS:
+            # Serve the cached answer at once and refresh it in the background.
+            _refresh_auth_async(info)
+            return cached["ready"], cached["detail"]
+    ready, detail, transient = _probe_worker_auth(info, now)
+    entry = _store_auth(info, ready, detail, transient, now)
+    return entry["ready"], entry["detail"]
+
+
+def auth_snapshot(worker):
+    """Cached readiness entry (no probing), or None."""
+    entry = AUTH_CACHE.get(worker)
+    return dict(entry) if entry else None
+
+
+def refresh_worker_auth_all():
+    """Probe every CLI worker in parallel (background refresher)."""
+    items = [info for info in worker_registry().values() if info.get("provider") in CLI_PROVIDERS]
+    if not items:
+        return 0
+    with ThreadPoolExecutor(max_workers=min(8, len(items))) as pool:
+        list(pool.map(lambda info: worker_auth_status(info, use_cache=False), items))
+    return len(items)
+
+
+def scheduler_worker_ready(worker):
+    """Dispatch gate for the background scheduler: never probes, never blocks."""
+    entry = AUTH_CACHE.get(worker)
+    if not entry:
+        return True
+    return bool(entry.get("ready"))
+
+
+def start_background_services(scheduler_interval=5.0, auth_interval=AUTH_REFRESH_SECONDS):
+    """Start the queue dispatcher and the readiness refresher once per process."""
+    if _BACKGROUND_STARTED.is_set():
+        return False
+    _BACKGROUND_STARTED.set()
+    scheduler.start_background_dispatcher(
+        jobs_root(), BRIDGE, PYTHON, spawn=scheduler_spawn, is_ready=scheduler_worker_ready,
+        interval=scheduler_interval,
+    )
+
+    def auth_loop():
+        while True:
+            try:
+                refresh_worker_auth_all()
+            except Exception as exc:
+                print("TEAMYRA readiness refresh error:", exc, file=sys.stderr, flush=True)
+            time.sleep(max(10, int(auth_interval)))
+
+    threading.Thread(target=auth_loop, daemon=True, name="teamyra-auth-refresh").start()
+    return True
 
 
 def git(cwd, *args):
@@ -341,7 +444,9 @@ def pick_worker(worker, exclude=None):
 
     free = [w for w in order if not cooldown_left(w)]
     idle = [w for w in free if not running_jobs(w)]
-    candidates = idle + [w for w in free if w not in idle]
+    # Busy workers last, the shortest queue first (a stable sort keeps the configured order).
+    busy = sorted((w for w in free if w not in idle), key=lambda w: len(running_jobs(w)))
+    candidates = idle + busy
     for candidate in candidates:
         ready, _ = worker_auth_status(registry[candidate])
         if ready:
@@ -349,9 +454,44 @@ def pick_worker(worker, exclude=None):
     raise ValueError("no authenticated worker is currently ready")
 
 
+def spawn_runner(jdir, cwd):
+    """Start runner.py for one job directory, detached from this process; returns its pid."""
+    jdir = Path(jdir)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    log = open(jdir / "runner.log", "a", encoding="utf-8")
+    try:  # break away from the MCP server's job object so a bridge restart does not kill the job
+        try:
+            runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
+                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                           creationflags=flags | 0x01000000)
+        except OSError:
+            runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
+                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                           creationflags=flags)
+    finally:
+        log.close()
+    return runner_proc.pid
+
+
+def jobs_root():
+    """Runtime root that holds JOBS (ROOT in production; follows a patched JOBS in tests)."""
+    return JOBS.parent
+
+
+def scheduler_spawn(job_dir, meta):
+    return spawn_runner(job_dir, meta.get("cwd") or job_dir)
+
+
+def dispatch_queue(workers=None):
+    """Start the oldest queued job of every free worker (see scheduler.dispatch_once)."""
+    return scheduler.dispatch_once(jobs_root(), BRIDGE, PYTHON, spawn=scheduler_spawn,
+                                   is_ready=scheduler_worker_ready, workers=workers)
+
+
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
-              failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True):
+              failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
+              queue=False):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
@@ -418,7 +558,16 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     (jdir / "transcript.md").write_text(f"# {meta['label']}\n{worker} | {cwd} | {meta['branch']} @ {head}\n\n",
                                         encoding="utf-8")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    if provider == "chatgpt-web":
+    if queue:
+        # FIFO per worker: the job waits as `queued` until its worker is free.
+        # dispatch_once decides under the scheduler lock, so concurrent callers
+        # never start two jobs on one worker or one job twice.
+        scheduler.enqueue(jobs_root(), job_id, worker)
+        try:
+            dispatch_queue(workers=[worker])
+        except Exception as exc:
+            print("TEAMYRA dispatch error:", exc, file=sys.stderr, flush=True)
+    elif provider == "chatgpt-web":
         patch_job_meta(
             job_id,
             state="waiting_for_desktop",
@@ -426,19 +575,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             runner_pid=None,
         )
     else:
-        log = open(jdir / "runner.log", "w", encoding="utf-8")
-        try:  # break away from the MCP server's job object so a bridge restart does not kill the job
-            try:
-                runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
-                                               stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                                               creationflags=flags | 0x01000000)
-            except OSError:
-                runner_proc = subprocess.Popen(bridge_process_command("runner.py", jdir), cwd=str(cwd),
-                                               stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                                               creationflags=flags)
-            patch_job_meta(job_id, runner_pid=runner_proc.pid)
-        finally:
-            log.close()
+        patch_job_meta(job_id, runner_pid=spawn_runner(jdir, cwd))
 
     if auto_failover and start_monitor and max_failovers > 0:
         monitor_log = open(jdir / "failover-monitor.log", "a", encoding="utf-8")
@@ -515,16 +652,27 @@ def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2
 
 # --- views ---------------------------------------------------------------------------------
 def summary(m, events=True):
-    out = {k: m.get(k) for k in ("id", "label", "worker", "state", "reason", "branch", "session_id",
-                                 "exit_code", "last_event", "parent", "failover_root", "failover_attempt",
+    out = {k: m.get(k) for k in ("id", "label", "worker", "provider", "state", "reason", "branch", "session_id",
+                                 "exit_code", "attention", "queue_position", "last_event", "parent",
+                                 "failover_root", "failover_attempt",
                                  "failover_job_id", "failover_worker", "failover_complete")}
-    start, end = m.get("started") or m.get("created"), m.get("ended") or time.time()
+    start = m.get("started") or m.get("dispatched_at") or m.get("created")
+    end = m.get("ended") or time.time()
     out["elapsed_s"] = int(end - start) if start else None
     if m.get("usage"):
         out["usage"] = m["usage"]
     if not events:
         out.pop("last_event", None)
     return out
+
+
+def job_brief(m):
+    """Compact view of one job for worker/team reports."""
+    start = m.get("started") or m.get("dispatched_at") or m.get("created")
+    end = m.get("ended") or time.time()
+    return {"id": m.get("id"), "label": m.get("label"), "state": m.get("state"),
+            "elapsed_s": int(end - start) if start else None, "last_event": m.get("last_event"),
+            "attention": m.get("attention"), "queue_position": m.get("queue_position")}
 
 
 def follow_info(job_id):
@@ -652,7 +800,17 @@ def worker_status():
 
     for item in out:
         w = item["worker"]
-        item["running_jobs"] = [m["id"] for m in running_jobs(w)]
+        mine = running_jobs(w)
+        active = [m for m in mine if m.get("state") in scheduler.ACTIVE_STATES]
+        queued = sorted((m for m in mine if m.get("state") == scheduler.QUEUED), key=scheduler.queue_key)
+        item["running_jobs"] = [m["id"] for m in mine if m.get("state") != scheduler.QUEUED]
+        item["current_job"] = job_brief(active[0]) if active else None
+        item["queue_length"] = len(queued)
+        item["queued_jobs"] = [m["id"] for m in queued]
+        cached = auth_snapshot(w) or {}
+        item["ready_source"] = cached.get("source")
+        if cached.get("probe_error"):
+            item["probe_error"] = clip(cached["probe_error"], 200)
         item["cooldown_seconds"] = cooldown_left(w)
         if item["cooldown_seconds"]:
             item["ready"] = False
@@ -1210,16 +1368,19 @@ TOOLS = [
         "Start a worker job and return at once with its job_id (non-blocking). The worker runs in its own "
         "process with a live transcript. Follow it with job_wait, job_status/job_events, or run the returned "
         "follow_command as a background task (its exit signals completion). worker=auto picks the first idle "
-        "worker without a usage cooldown in the configured order."),
+        "worker without a usage cooldown in the configured order. With queue=true (default) a busy worker gets "
+        "the job as state queued with queue_position; TEAMYRA starts it automatically when the worker is free."),
      "inputSchema": {"type": "object", "properties": {
          "worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
          "label": {"type": "string", "description": "short name shown in lists and the dashboard"},
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
          "write": {"type": "boolean", "default": True},
          "auto_failover": {"type": "boolean", "description": "Automatically reassign eligible provider/worker failures. Defaults on when worker=auto."},
-         "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5}},
+         "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5},
+         "queue": {"type": "boolean", "default": True,
+                   "description": "When the chosen worker already has an active job (running, waiting_for_desktop, needs_user), create this job as queued (FIFO per worker) instead of running it concurrently. Its timeout counts from dispatch."}},
          "required": ["project_path", "task"], "additionalProperties": False}},
-    {"name": "job_status", "description": "Compact status of one job, or of the 15 most recent jobs when job_id is omitted.",
+    {"name": "job_status", "description": "Compact status of one job, or of the 15 most recent jobs when job_id is omitted. Includes state, reason, exit_code, attention (a human must act, e.g. ChatGPT verification) and queue_position.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "additionalProperties": False}},
     {"name": "job_events", "description": "Incremental slice of a job's normalized events (commands, results, messages, file changes), each clipped to 300 chars. Pass the returned next as since.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"},
@@ -1267,8 +1428,30 @@ TOOLS = [
                      "required": ["job_id", "message"], "additionalProperties": False}},
     {"name": "job_cancel", "description": "Stop a running job (kills the worker process tree).",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
-    {"name": "worker_status", "description": "List all discovered workers/accounts with auth availability, provider, model, running jobs and usage cooldown.",
+    {"name": "worker_status", "description": "List all discovered workers/accounts with auth availability, provider, model, running jobs, current_job, queue_length and usage cooldown.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "team_report", "description": (
+        "Full team report in one call: every worker (provider, label, model/effort, ready + detail, cooldown, "
+        "current job with label/state/elapsed/last_event/attention, queue with ids and labels, last finished jobs "
+        "with state/reason/exit_code, usage totals) plus all jobs that need the user (e.g. ChatGPT verification). "
+        "Use it to see every agent before delegating."),
+     "inputSchema": {"type": "object", "properties": {
+         "recent": {"type": "integer", "default": 5, "minimum": 1, "maximum": 20,
+                    "description": "Finished jobs listed per worker."},
+         "project_path": {"type": "string", "description": "Optional: restrict job history and usage to one project."}},
+         "additionalProperties": False}},
+    {"name": "queue_list", "description": "List queued jobs per worker in dispatch order (position 1 starts next), with each worker's current job.",
+     "inputSchema": {"type": "object", "properties": {
+         "worker": {"type": "string", "description": "Optional worker id; omit for all workers."}},
+         "additionalProperties": False}},
+    {"name": "queue_cancel", "description": "Cancel one queued (not yet dispatched) job. Use job_cancel for a job that already runs.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
+                     "required": ["job_id"], "additionalProperties": False}},
+    {"name": "queue_move", "description": "Move one queued job to a new 1-based position in its worker's queue (1 = dispatched next).",
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"},
+         "position": {"type": "integer", "minimum": 1}},
+         "required": ["job_id", "position"], "additionalProperties": False}},
     {"name": "clear_worker_cooldown", "description": "Clear the usage-limit cooldown for one worker or all.",
      "inputSchema": {"type": "object", "properties": {"worker": {"type": "string"}}, "additionalProperties": False}},
     {"name": "run_ai_worker", "description": "Compatibility: start_task, then wait up to timeout_seconds. If the job is still running, returns its job_id instead of stopping it.",
@@ -1276,7 +1459,9 @@ TOOLS = [
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
                      "write": {"type": "boolean", "default": True},
                      "auto_failover": {"type": "boolean", "description": "Defaults on when worker=auto."},
-                     "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5}},
+                     "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5},
+                     "queue": {"type": "boolean", "default": True,
+                   "description": "When the chosen worker already has an active job (running, waiting_for_desktop, needs_user), create this job as queued (FIFO per worker) instead of running it concurrently. Its timeout counts from dispatch."}},
                      "required": ["task", "project_path"], "additionalProperties": False}},
     {"name": "run_ai_parallel", "description": "Start up to three independent tasks, each in a new git worktree and branch under D:/AI-Orchestrator/worktrees, and return their job_ids (non-blocking).",
      "inputSchema": {"type": "object", "properties": {"project_path": {"type": "string"},
@@ -1288,6 +1473,21 @@ TOOLS = [
                      "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5}},
                      "required": ["tasks", "project_path"], "additionalProperties": False}},
 ]
+
+
+def mcp_workspace_permissions(service):
+    """Stored workspace permissions (ROOT/chatgpt/workspace.json) for MCP workspace_tool calls.
+
+    The MCP path can only narrow them: full access and outside-workspace access are user-only
+    switches of the desktop UI / interactive CLI and are never enabled through an MCP call.
+    """
+    try:
+        stored = dict(service._load().get("permissions") or {})
+    except Exception:
+        stored = {}
+    stored["full_access"] = False
+    stored["outside_workspace"] = False
+    return stored
 
 
 def tool_call(name, a):
@@ -1386,14 +1586,15 @@ def tool_call(name, a):
         actor = "teamyra-mcp"
         if a.get("agent"):
             actor += ":" + str(a["agent"])[:80]
-        return workspace_tools.WorkspaceToolService(ROOT).execute_in_workspace(
+        service = workspace_tools.WorkspaceToolService(ROOT)
+        return service.execute_in_workspace(
             a["project_path"],
             a["tool"],
             a.get("args"),
-            permissions={"terminal": True},
+            permissions=mcp_workspace_permissions(service),
             trusted=True,
             actor=actor,
-            confirm=False,
+            confirm=a.get("confirm") is True,
         )
     if name == "memory_add":
         return project_memory.add(
@@ -1538,8 +1739,17 @@ def tool_call(name, a):
             requested_worker, a["task"], a["project_path"], a.get("label"),
             a.get("timeout_minutes", 90), a.get("write", True),
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
+            queue=a.get("queue", True),
         )
-        return {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
+        result = {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
+        try:
+            meta = read_meta(job_id)
+            result["state"] = meta.get("state")
+            if meta.get("state") == scheduler.QUEUED:
+                result["queue_position"] = meta.get("queue_position")
+        except Exception:
+            pass
+        return result
     if name == "job_status":
         if a.get("job_id"):
             return summary(read_meta(a["job_id"]))
@@ -1640,12 +1850,29 @@ def tool_call(name, a):
         return {"job_id": job_id, "worker": worker, **follow_info(job_id)}
     if name == "job_cancel":
         terminal_id = failover_terminal_job_id(a["job_id"])
-        read_meta(terminal_id)
+        terminal = read_meta(terminal_id)
+        if terminal.get("state") == scheduler.QUEUED and not is_done(terminal_id):
+            try:
+                scheduler.queue_cancel(jobs_root(), terminal_id)
+                return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
+                        "note": "the job was still queued and never started"}
+            except ValueError:
+                pass  # dispatched meanwhile: cancel it like a running job
         (JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
         return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
                 "note": "the active terminal worker stops within a few seconds"}
     if name == "worker_status":
         return worker_status()
+    if name == "team_report":
+        return observability.team_report(
+            jobs_root(), worker_status(), a.get("recent", 5), a.get("project_path"),
+        )
+    if name == "queue_list":
+        return scheduler.queue_list(jobs_root(), a.get("worker"))
+    if name == "queue_cancel":
+        return scheduler.queue_cancel(jobs_root(), a["job_id"])
+    if name == "queue_move":
+        return scheduler.queue_move(jobs_root(), a["job_id"], a["position"])
     if name == "clear_worker_cooldown":
         try:
             data = json.loads(COOLDOWN_FILE.read_text(encoding="utf-8"))
@@ -1662,6 +1889,7 @@ def tool_call(name, a):
             requested_worker, a["task"], a["project_path"], a.get("label"),
             a.get("timeout_minutes", int(config().get("job_timeout_minutes", 180))), a.get("write", True),
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
+            queue=a.get("queue", True),
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
         res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}
@@ -1786,6 +2014,10 @@ def main():
         dashboard.serve(int(config().get("dashboard_port", 8765)))
     except Exception as e:
         print("dashboard not started:", e, file=sys.stderr, flush=True)
+    try:
+        start_background_services()
+    except Exception as e:
+        print("scheduler not started:", e, file=sys.stderr, flush=True)
     for line in sys.stdin:
         line = line.strip()
         if not line:

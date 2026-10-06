@@ -363,6 +363,16 @@ class Job:
         )
         (self.dir / "DONE").write_text(state, encoding="utf-8")
 
+def dispatch_next(job_dir):
+    """On-exit hook: start the next queued job of any free worker (FIFO per worker)."""
+    try:
+        import scheduler
+        root = Path(job_dir).resolve().parent.parent
+        scheduler.dispatch_once(root, Path(__file__).resolve().parent, sys.executable)
+    except Exception as exc:  # the job itself is already finished; never fail it here
+        print(f"queue dispatch failed: {exc}", file=sys.stderr, flush=True)
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: runner.py <job_dir>")
@@ -376,6 +386,7 @@ def main():
             runner_pid=None, worker_pid=None,
         )
         (job.dir / "DONE").write_text("failed", encoding="utf-8")
+    dispatch_next(job.dir)
 
 
 if __name__ == "__main__":

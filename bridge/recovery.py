@@ -10,9 +10,13 @@ import time
 from pathlib import Path
 
 import media_engine
+import scheduler
 
 
 TERMINAL_GRAPH_STATES = {"done", "failed", "cancelled"}
+# Jobs in these states have no runner process by design: queued jobs wait for
+# the scheduler, chatgpt-web jobs are owned by TEAMYRA Desktop.
+DESKTOP_JOB_STATES = {"waiting_for_desktop", "needs_user"}
 TERMINAL_REVIEW_STATES = {"done", "failed", "cancelled", "exhausted", "interrupted"}
 INTERNAL_PROCESS_MODES = {
     "runner.py": "__runner",
@@ -108,6 +112,12 @@ def recover_job(root, bridge, python_exe, job_dir):
         return {"kind": "job", "id": job_dir.name, "action": "unchanged"}
 
     meta = _read_json(meta_path)
+    state = meta.get("state")
+    if state == "queued":
+        return {"kind": "job", "id": job_dir.name, "action": "queued",
+                "queue_position": meta.get("queue_position")}
+    if state in DESKTOP_JOB_STATES or meta.get("provider") == "chatgpt-web":
+        return recover_desktop_job(job_dir, meta)
     runner_pid = meta.get("runner_pid")
     worker_pid = meta.get("worker_pid")
     heartbeat = meta.get("heartbeat_at") or meta.get("updated")
@@ -183,6 +193,33 @@ def recover_job(root, bridge, python_exe, job_dir):
         "action": "manual_retry_required",
         "reason": meta["reason"],
     }
+
+
+def recover_desktop_job(job_dir, meta):
+    """Keep desktop-owned jobs; fail a waiting_for_desktop job whose deadline passed."""
+    job_dir = Path(job_dir)
+    state = meta.get("state")
+    if state == "waiting_for_desktop":
+        start = meta.get("dispatched_at") or meta.get("created")
+        try:
+            deadline = float(start) + float(meta.get("timeout_s") or 0)
+        except (TypeError, ValueError):
+            deadline = 0
+        if start and meta.get("timeout_s") and time.time() > deadline:
+            meta["state"] = "failed"
+            meta["reason"] = "timeout"
+            meta["exit_code"] = 1
+            meta["ended"] = time.time()
+            meta["attention"] = None
+            meta["last_event"] = "timed out waiting for TEAMYRA Desktop"
+            meta["recovery_state"] = "timed_out_waiting_for_desktop"
+            _atomic_write(job_dir / "meta.json", meta)
+            (job_dir / "DONE").write_text("failed", encoding="utf-8")
+            return {"kind": "job", "id": job_dir.name, "action": "timeout", "reason": "timeout"}
+    # running / needs_user chatgpt-web jobs are driven by the desktop provider,
+    # which also reconciles jobs it owned before a desktop restart.
+    return {"kind": "job", "id": job_dir.name, "action": "desktop_owned", "state": state,
+            "attention": meta.get("attention")}
 
 
 def recover_graph(root, bridge, python_exe, graph_path):
@@ -341,6 +378,14 @@ def recover_all(root, bridge, python_exe):
             except Exception as exc:
                 report["errors"].append({"kind": "failover", "id": job_dir.name, "error": str(exc)})
 
+    # Queued jobs whose worker is free (for example after the previous job
+    # ended while no TEAMYRA process was alive) are started now.
+    if jobs_dir.exists():
+        try:
+            report["dispatch"] = scheduler.dispatch_once(root, bridge, python_exe)
+        except Exception as exc:
+            report["errors"].append({"kind": "dispatch", "id": "scheduler", "error": str(exc)})
+
     try:
         media_report = media_engine.recover_incomplete_jobs(root)
         for job_id in media_report.get("requeued", []):
@@ -355,7 +400,8 @@ def recover_all(root, bridge, python_exe):
     report["ended_at"] = time.time()
     report["ok"] = not report["errors"]
     report["actions"] = {
-        key: sum(1 for item in report[key] if item.get("action") not in {"unchanged", "alive"})
+        key: sum(1 for item in report[key]
+                 if item.get("action") not in {"unchanged", "alive", "queued", "desktop_owned"})
         for key in ("jobs", "graphs", "reviews", "failovers", "media")
     }
     return report

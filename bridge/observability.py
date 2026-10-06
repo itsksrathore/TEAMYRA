@@ -102,6 +102,22 @@ def _job_timeline(root):
                 "kind": "job.created",
                 "message": f"Job created for {meta.get('worker') or 'worker'}",
             })
+        queued_at = meta.get("queued_at")
+        if isinstance(queued_at, (int, float)):
+            rows.append({
+                **base,
+                "ts": float(queued_at),
+                "kind": "job.queued",
+                "message": f"Job queued for {meta.get('worker') or 'worker'}",
+            })
+        dispatched = meta.get("dispatched_at")
+        if isinstance(dispatched, (int, float)):
+            rows.append({
+                **base,
+                "ts": float(dispatched),
+                "kind": "job.dispatched",
+                "message": f"Job dispatched from the queue after {int(meta.get('queue_wait_s') or 0)} s",
+            })
         started = meta.get("started")
         if isinstance(started, (int, float)):
             rows.append({
@@ -109,6 +125,14 @@ def _job_timeline(root):
                 "ts": float(started),
                 "kind": "job.started",
                 "message": f"Job started on {meta.get('worker') or 'worker'}",
+            })
+        attention = meta.get("attention")
+        if isinstance(attention, dict) and isinstance(attention.get("since"), (int, float)):
+            rows.append({
+                **base,
+                "ts": float(attention["since"]),
+                "kind": "job.needs_user",
+                "message": _clip(attention.get("message") or attention.get("kind") or "User action needed", 900),
             })
 
         events_path = folder / "events.jsonl"
@@ -510,6 +534,10 @@ TOKEN_KEYS = (
     "reasoning_output_tokens",
     "thinking_tokens",
     "total_tokens",
+    # chatgpt-web jobs record characters and turns instead of tokens.
+    "chars_sent",
+    "chars_received",
+    "turns",
 )
 
 
@@ -571,10 +599,12 @@ def usage_snapshot(root, worker_rows=None, project_path=None):
             row["jobs"] += 1
             total_jobs += 1
             state = str(meta.get("state") or "")
-            if state in row:
+            if state in {"running", "done", "failed", "cancelled"}:
                 row[state] += 1
-            elif state in {"starting"}:
+            elif state in {"starting", "waiting_for_desktop", "needs_user"}:
                 row["running"] += 1
+            elif state == "queued":
+                row["queued"] = row.get("queued", 0) + 1
 
             usage = _usage_numbers(meta.get("usage"))
             for key, value in usage.items():
@@ -650,4 +680,130 @@ def usage_snapshot(root, worker_rows=None, project_path=None):
         "workers": workers,
         "providers": providers,
         "note": "Quota visibility uses real readiness/cooldown telemetry. Exact provider quota percentages are not fabricated when unavailable.",
+    }
+
+
+ACTIVE_JOB_STATES = {"starting", "running", "waiting", "waiting_for_desktop", "needs_user"}
+FINISHED_JOB_STATES = {"done", "failed", "cancelled"}
+
+
+def _job_brief(meta, now=None):
+    now = now or time.time()
+    start = meta.get("started") or meta.get("dispatched_at") or meta.get("created")
+    end = meta.get("ended") or now
+    try:
+        elapsed = int(float(end) - float(start)) if start else None
+    except (TypeError, ValueError):
+        elapsed = None
+    return {
+        "id": meta.get("id"),
+        "label": meta.get("label"),
+        "state": meta.get("state"),
+        "elapsed_s": elapsed,
+        "last_event": _clip(meta.get("last_event"), 300) or None,
+        "attention": meta.get("attention"),
+    }
+
+
+def team_report(root, worker_rows=None, recent=5, project_path=None):
+    """One bounded report of every worker, its current job, queue, history and usage."""
+    recent = max(1, min(int(recent or 5), 20))
+    now = time.time()
+    jobs_dir = Path(root) / "jobs"
+    metas = []
+    if jobs_dir.exists():
+        for folder in jobs_dir.iterdir():
+            if not folder.is_dir():
+                continue
+            meta = _read_json(folder / "meta.json")
+            if not isinstance(meta, dict):
+                continue
+            meta.setdefault("id", folder.name)
+            meta["_done"] = (folder / "DONE").exists()
+            metas.append(meta)
+    metas.sort(key=lambda m: float(m.get("created") or 0), reverse=True)
+
+    usage = usage_snapshot(root, worker_rows, project_path)
+    usage_by_worker = {row.get("worker"): row for row in usage.get("workers") or []}
+    live = [row for row in (worker_rows or []) if row.get("worker")]
+    names = [row["worker"] for row in live]
+    for meta in metas:
+        worker = meta.get("worker")
+        if worker and worker not in names and not meta["_done"]:
+            names.append(worker)
+    live_by_worker = {row["worker"]: row for row in live}
+
+    def scoped(meta):
+        return not project_path or _project_matches(meta.get("cwd"), project_path)
+
+    workers = []
+    for worker in names:
+        status = live_by_worker.get(worker) or {}
+        mine = [m for m in metas if m.get("worker") == worker]
+        open_jobs = [m for m in mine if not m["_done"]]
+        active = [m for m in open_jobs if m.get("state") in ACTIVE_JOB_STATES]
+        queued = [m for m in open_jobs if m.get("state") == "queued"]
+
+        def queue_order(meta):
+            try:
+                order = float(meta.get("queue_order"))
+            except (TypeError, ValueError):
+                order = float(meta.get("created") or 0)
+            return (order, float(meta.get("created") or 0), str(meta.get("id")))
+
+        queued.sort(key=queue_order)
+        finished = [m for m in mine if m["_done"] or m.get("state") in FINISHED_JOB_STATES]
+        finished = [m for m in finished if scoped(m)]
+        finished.sort(key=lambda m: float(m.get("ended") or m.get("updated") or m.get("created") or 0), reverse=True)
+        usage_row = usage_by_worker.get(worker) or {}
+        workers.append({
+            "worker": worker,
+            "provider": status.get("provider") or (mine[0].get("provider") if mine else None),
+            "label": status.get("label") or (mine[0].get("worker_label") if mine else None) or worker,
+            "model": status.get("model"),
+            "effort": status.get("effort"),
+            "enabled": status.get("enabled"),
+            "ready": status.get("ready"),
+            "detail": status.get("detail"),
+            "cooldown_seconds": int(status.get("cooldown_seconds") or 0),
+            "current_job": _job_brief(active[0], now) if active else None,
+            "other_active_jobs": [m.get("id") for m in active[1:]],
+            "queue": [{"id": m.get("id"), "label": m.get("label"), "position": index,
+                       "wait_s": int(now - float(m.get("queued_at") or m.get("created") or now))}
+                      for index, m in enumerate(queued, 1)],
+            "recent_jobs": [{
+                "id": m.get("id"), "label": m.get("label"), "state": m.get("state"),
+                "reason": m.get("reason"), "exit_code": m.get("exit_code"), "ended": m.get("ended"),
+            } for m in finished[:recent]],
+            "usage": {
+                "jobs": usage_row.get("jobs", 0),
+                "done": usage_row.get("done", 0),
+                "failed": usage_row.get("failed", 0),
+                "cancelled": usage_row.get("cancelled", 0),
+                "tokens": usage_row.get("tokens") or {},
+            },
+        })
+
+    needs_user = []
+    for meta in metas:
+        if meta["_done"]:
+            continue
+        if meta.get("state") == "needs_user" or meta.get("attention"):
+            needs_user.append({
+                "id": meta.get("id"), "label": meta.get("label"), "worker": meta.get("worker"),
+                "state": meta.get("state"), "attention": meta.get("attention"),
+                "last_event": _clip(meta.get("last_event"), 300) or None,
+            })
+
+    totals = {"workers": len(workers), "ready": sum(1 for w in workers if w.get("ready")),
+              "busy": sum(1 for w in workers if w["current_job"]),
+              "queued": sum(len(w["queue"]) for w in workers),
+              "needs_user": len(needs_user)}
+    return {
+        "generated_at": now,
+        "project_path": str(project_path) if project_path else None,
+        "totals": totals,
+        "workers": workers,
+        "needs_user": needs_user,
+        "usage_totals": usage.get("providers") or [],
     }

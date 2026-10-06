@@ -230,6 +230,7 @@ def serve(host="127.0.0.1", port=8787):
             flush=True,
         )
     httpd = create_server(host, port)
+    server.start_background_services()  # queue dispatcher + readiness refresher
     actual_host, actual_port = httpd.server_address[:2]
     print(
         f"TEAMYRA HTTP MCP listening on http://{actual_host}:{actual_port}{MCP_PATH}",

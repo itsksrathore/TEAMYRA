@@ -1,10 +1,13 @@
 """Local live dashboard for worker jobs: http://127.0.0.1:<port>/ (read-only)."""
-import json, threading, time
+import json, os, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-JOBS = Path(__file__).resolve().parent.parent / "jobs"
+# Same runtime root as server.py: TEAMYRA_ROOT wins over the folder next to the bridge.
+ROOT = Path(os.environ.get("TEAMYRA_ROOT") or Path(__file__).resolve().parent.parent).resolve()
+JOBS = ROOT / "jobs"
+ACTIVE_STATES = {"starting", "running", "waiting", "waiting_for_desktop", "needs_user"}
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI Workers</title><style>
@@ -18,24 +21,31 @@ h1{font-size:15px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line)
 .job{padding:10px 16px;border-bottom:1px solid var(--line);cursor:pointer}.job.sel{background:var(--bg)}
 .job b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .job small{color:var(--mute);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.st{font-size:12px;font-weight:600}.running{color:var(--run)}.done{color:var(--ok)}.failed,.cancelled{color:var(--bad)}
+.st{font-size:12px;font-weight:600}.running,.starting,.waiting_for_desktop{color:var(--run)}.done{color:var(--ok)}.failed,.cancelled{color:var(--bad)}
+.queued{color:var(--mute)}.needs_user{color:#c9821b}.attn{color:#c9821b;font-size:12px;display:block}
+#workers{border-bottom:1px solid var(--line)}.wk{padding:8px 16px;border-bottom:1px solid var(--line);font-size:12.5px}
+.wk b{font-weight:600}.wk small{color:var(--mute);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main{display:flex;flex-direction:column;min-width:0}header{padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
 #log{flex:1;margin:0;padding:12px 16px;overflow:auto;font:12.5px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
-</style></head><body><div class="wrap"><aside><h1>AI Workers</h1><div id="jobs"></div></aside>
+</style></head><body><div class="wrap"><aside><h1>AI Workers</h1><div id="workers"></div><div id="jobs"></div></aside>
 <main><header id="head">Select a job</header><pre id="log"></pre></main></div><script>
 let sel=null,pos=0;const $=s=>document.querySelector(s);
 const age=t=>{const s=Math.max(0,Math.round(Date.now()/1000-t));return s<90?s+'s':Math.round(s/60)+'m'};
 async function jobs(){const r=await fetch('/api/jobs');const js=await r.json();
  if(!sel&&js.length)pick(js[0].id);
  $('#jobs').innerHTML=js.map(j=>`<div class="job ${j.id===sel?'sel':''}" data-id="${j.id}"><b>${esc(j.label||j.id)}</b>
- <span class="st ${j.state}">${j.state}</span> <small>${esc(j.worker)} &middot; ${age(j.started||j.created)} ago</small><small>${esc(j.last_event||'')}</small></div>`).join('');
+ <span class="st ${esc(j.state)}">${esc(j.state)}${j.queue_position?' #'+j.queue_position:''}</span> <small>${esc(j.worker)} &middot; ${age(j.started||j.created)} ago</small>${attn(j)}<small>${esc(j.last_event||'')}</small></div>`).join('');
  document.querySelectorAll('.job').forEach(e=>e.onclick=()=>pick(e.dataset.id));
  const cur=js.find(j=>j.id===sel);if(cur)$('#head').textContent=`${cur.label||cur.id} | ${cur.worker} | ${cur.state} | ${cur.cwd||''}`}
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function attn(j){return j.attention?`<span class="attn">needs you: ${esc(j.attention.message||j.attention.kind||'action required')}</span>`:''}
+async function workers(){const r=await fetch('/api/workers');const ws=await r.json();
+ $('#workers').innerHTML=ws.map(w=>`<div class="wk"><b>${esc(w.worker)}</b> ${w.current?`<span class="st ${esc(w.current.state)}">${esc(w.current.state)}</span>`:'<span class="st done">idle</span>'}${w.queued.length?` &middot; ${w.queued.length} queued`:''}
+ ${w.current?`<small>${esc(w.current.label||w.current.id)}</small>${attn(w.current)}`:''}</div>`).join('')}
 function pick(id){sel=id;pos=0;$('#log').textContent='';jobs()}
 async function log(){if(!sel)return;const r=await fetch(`/api/log?id=${sel}&from=${pos}`);const d=await r.json();
  if(d.text){const el=$('#log'),stick=el.scrollTop+el.clientHeight>=el.scrollHeight-40;el.textContent+=d.text;pos=d.next;if(stick)el.scrollTop=el.scrollHeight}}
-setInterval(jobs,3000);setInterval(log,1500);jobs();
+setInterval(jobs,3000);setInterval(workers,3000);setInterval(log,1500);jobs();workers();
 </script></body></html>"""
 
 
@@ -48,9 +58,38 @@ def list_jobs(limit=60):
             m = json.loads((d / "meta.json").read_text(encoding="utf-8"))
         except Exception:
             continue
-        out.append({k: m.get(k) for k in ("id", "label", "worker", "state", "reason", "cwd",
+        out.append({k: m.get(k) for k in ("id", "label", "worker", "provider", "state", "reason", "exit_code",
+                                         "queue_position", "attention", "cwd",
                                          "created", "started", "ended", "last_event")})
     return out
+
+
+def list_workers():
+    """Per-worker current job and queue, read from job files only (no auth probes)."""
+    rows = {}
+    if not JOBS.exists():
+        return []
+    for d in JOBS.iterdir():
+        if not d.is_dir() or (d / "DONE").exists():
+            continue
+        try:
+            m = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        worker = m.get("worker")
+        if not worker:
+            continue
+        row = rows.setdefault(worker, {"worker": worker, "current": None, "queued": []})
+        brief = {k: m.get(k) for k in ("id", "label", "state", "attention", "last_event",
+                                        "queue_position", "created", "queue_order")}
+        if m.get("state") == "queued":
+            row["queued"].append(brief)
+        elif m.get("state") in ACTIVE_STATES:
+            if row["current"] is None or (brief.get("created") or 0) > (row["current"].get("created") or 0):
+                row["current"] = brief
+    for row in rows.values():
+        row["queued"].sort(key=lambda b: (b.get("queue_order") or b.get("created") or 0, b.get("created") or 0))
+    return sorted(rows.values(), key=lambda r: r["worker"])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -73,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(PAGE, "text/html")
         if url.path == "/api/jobs":
             return self.send(json.dumps(list_jobs()))
+        if url.path == "/api/workers":
+            return self.send(json.dumps(list_workers()))
         if url.path == "/api/log":
             job_id = (q.get("id") or [""])[0]
             if not job_id or "/" in job_id or "\\" in job_id or ".." in job_id:
