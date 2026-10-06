@@ -14,6 +14,9 @@ import server
 
 VERSION = "0.2.0"
 
+DONE_STATES = {"done"}
+FAILED_STATES = {"failed", "cancelled", "timed_out"}
+
 
 def emit(value):
     if isinstance(value, str):
@@ -26,7 +29,27 @@ def call(name, args=None):
     return server.tool_call(name, args or {})
 
 
+def job_exit_code(jobs):
+    """0 only when every job is done; 1 when any failed/cancelled; 2 when the
+    wait expired while a job is still queued/running/waiting/needs_user.
+    The final state and reason of every job are printed to stderr."""
+    rows = [job for job in jobs if isinstance(job, dict)]
+    states = []
+    for job in rows:
+        state = str(job.get("state") or "unknown")
+        states.append(state)
+        job_id = job.get("terminal_job_id") or job.get("job_id") or job.get("id") or "job"
+        reason = job.get("reason")
+        print(f"TEAMYRA {job_id}: {state}" + (f" ({reason})" if reason else ""), file=sys.stderr)
+    if any(state in FAILED_STATES for state in states):
+        return 1
+    if states and all(state in DONE_STATES for state in states):
+        return 0
+    return 2
+
+
 def cmd_doctor(args):
+    from runtime_paths import claude_launch_info
     workers = server.worker_status()
     ready = [item for item in workers if item.get("ready")]
     result = {
@@ -37,6 +60,7 @@ def cmd_doctor(args):
         "mcp_version": server.MCP_SERVER_VERSION,
         "ready_workers": len(ready),
         "workers": workers,
+        "claude_cli": claude_launch_info(),
     }
     emit(result)
     return 0 if ready else 2
@@ -65,23 +89,84 @@ def cmd_run(args):
     if args.wait:
         payload["timeout_seconds"] = args.wait_timeout
         result = call("run_ai_worker", payload)
-    else:
-        result = call("start_task", payload)
+        emit(result)
+        return job_exit_code([result])
+    result = call("start_task", payload)
     emit(result)
-    return 1 if result.get("state") in {"failed", "cancelled", "timed_out"} else 0
+    return 1 if result.get("state") in FAILED_STATES else 0
 
 
 def cmd_wait(args):
-    emit(call("job_wait", {
+    result = call("job_wait", {
         "job_ids": args.job_ids,
         "mode": args.mode,
         "timeout_seconds": args.timeout_seconds,
-    }))
-    return 0
+    })
+    emit(result)
+    jobs = result.get("jobs") if isinstance(result, dict) else None
+    jobs = jobs if isinstance(jobs, list) else []
+    if args.mode == "any":
+        finished = [job for job in jobs if isinstance(job, dict)
+                    and job.get("state") in DONE_STATES | FAILED_STATES]
+        if finished:
+            jobs = finished
+    return job_exit_code(jobs)
 
 
 def cmd_result(args):
-    emit(call("job_result", {"job_id": args.job_id}))
+    result = call("job_result", {"job_id": args.job_id})
+    emit(result)
+    return job_exit_code([result])
+
+
+def cmd_chatgpt_access(args):
+    """User-only switch for Full PC access of the ChatGPT web workers.
+
+    Turning access on requires an interactive terminal and an explicit y/N
+    answer; agents, jobs and MCP calls cannot run this successfully without a
+    TTY. Turning it off always works."""
+    import workspace_tools
+    service = workspace_tools.WorkspaceToolService(ROOT)
+    if args.off:
+        access = {key: False for key in workspace_tools.USER_ONLY_PERMISSIONS}
+        data = service.set_access(access, trusted=True, actor="teamyra-cli")
+    else:
+        stdin = sys.stdin
+        if stdin is None or not hasattr(stdin, "isatty") or not stdin.isatty():
+            raise PermissionError(
+                "chatgpt-access --full needs an interactive terminal (TTY); "
+                "enable Full PC access yourself or use TEAMYRA Desktop settings"
+            )
+        print(
+            "WARNING: Full PC access lets TEAMYRA ChatGPT web workers read and write files on any drive "
+            "and run any terminal command, including package installs and network tools.\n"
+            "Credential stores (~/.ssh, ~/.aws, provider auth files, browser profiles, TEAMYRA tokens) "
+            "stay blocked and every call is audited in logs/workspace-tools.jsonl.\n"
+            + ("Destructive commands will also run WITHOUT confirmation.\n"
+               if args.destructive_without_confirmation else
+               "Destructive commands (recursive delete, format, force push, hard reset, registry edits) "
+               "still need confirmation.\n")
+            + "Enable Full PC access? [y/N] ",
+            end="", file=sys.stderr, flush=True,
+        )
+        answer = (stdin.readline() or "").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("Full PC access unchanged.", file=sys.stderr)
+            return 1
+        data = service.set_access(
+            {
+                "full_access": True,
+                "outside_workspace": True,
+                "destructive_without_confirmation": bool(args.destructive_without_confirmation),
+            },
+            trusted=True,
+            actor="teamyra-cli-user",
+            user_confirmed=True,
+        )
+    permissions = data["permissions"]
+    emit({
+        key: permissions[key] for key in workspace_tools.USER_ONLY_PERMISSIONS
+    } | {"settings_file": str(service.settings_file)})
     return 0
 
 
@@ -383,6 +468,17 @@ def parser():
     result = sub.add_parser("result", help="Read a terminal job result")
     result.add_argument("job_id")
     result.set_defaults(func=cmd_result)
+
+    access = sub.add_parser(
+        "chatgpt-access",
+        help="Turn Full PC access for ChatGPT web workers on (interactive y/N) or off",
+    )
+    access_mode = access.add_mutually_exclusive_group(required=True)
+    access_mode.add_argument("--full", action="store_true", help="enable Full PC access (asks y/N on a TTY)")
+    access_mode.add_argument("--off", action="store_true", help="disable Full PC access and its sub-switches")
+    access.add_argument("--destructive-without-confirmation", action="store_true",
+                        help="with --full: also run destructive commands without confirmation")
+    access.set_defaults(func=cmd_chatgpt_access)
 
     timeline = sub.add_parser("timeline", help="Read the unified jobs/graphs/reviews/worktrees timeline")
     timeline.add_argument("--limit", type=int, default=100)

@@ -185,12 +185,29 @@ def handle(action, payload):
             payload.get("tags"), payload.get("max_chars", 8000), payload.get("limit", 40),
         )
     if action == "chatgpt.workspace.configure":
+        # ``permissions`` can keep or lower the user-only switches (full_access,
+        # outside_workspace, destructive_without_confirmation) but never raise
+        # them. Raising one needs the separate ``access`` object together with
+        # ``user_confirmed: true``, which only the desktop settings UI sends
+        # after its confirmation dialog; the MCP chatgpt_control
+        # workspace_configure path forwards ``permissions`` only.
         service = workspace_tools.WorkspaceToolService(ROOT)
+        access = payload.get("access")
+        user_confirmed = payload.get("user_confirmed") is True
+        if access is not None and not str(payload.get("workspace") or "").strip():
+            return service.set_access(
+                access,
+                token=_bridge_token(payload),
+                actor="desktop-user",
+                user_confirmed=user_confirmed,
+            )
         return service.configure(
             payload.get("workspace"),
             payload.get("permissions"),
             token=_bridge_token(payload),
-            actor="chatgpt-normal",
+            actor="desktop-user" if access is not None else "chatgpt-normal",
+            access=access,
+            user_confirmed=user_confirmed,
         )
     if action == "chatgpt.workspace.status":
         return workspace_tools.WorkspaceToolService(ROOT).status(
