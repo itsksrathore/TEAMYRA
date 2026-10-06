@@ -663,10 +663,11 @@ class WorkspaceToolService:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
-        def changed_paths(staged=False):
+        def changed_paths(staged=False, revisions=()):
             argv = [*base, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv"]
             if staged:
                 argv.append("--cached")
+            argv.extend(revisions)
             argv.append("--")
             cp = run_git(argv)
             if cp.returncode != 0:
@@ -688,13 +689,31 @@ class WorkspaceToolService:
             blocked_paths = []
             argv = [*base, "diff", "--no-ext-diff", "--no-textconv"]
             staged = bool(args.get("staged"))
+            revisions = []
+            if args.get("head") and not args.get("base"):
+                raise WorkspaceToolError("git.diff head requires base")
+            if staged and args.get("head"):
+                raise WorkspaceToolError("git.diff staged cannot be combined with head")
+            for key in ("base", "head"):
+                ref = args.get(key)
+                if ref is None:
+                    continue
+                if not isinstance(ref, str) or not ref.strip() or ref.startswith("-") or "\x00" in ref:
+                    raise WorkspaceToolError(f"git.diff {key} must be a valid commit ref")
+                resolved = run_git([*base, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}"])
+                if resolved.returncode != 0:
+                    raise WorkspaceToolError(f"git.diff {key}: unknown commit ref")
+                revisions.append(resolved.stdout.strip())
             if staged:
                 argv.append("--cached")
+            if args.get("stat"):
+                argv.append("--stat")
+            argv.extend(revisions)
             if args.get("path"):
                 path = self._path(args["path"], workspace, permissions, must_exist=False)
                 safe_paths = [os.path.relpath(path, workspace)]
             else:
-                safe_paths, blocked_paths = changed_paths(staged)
+                safe_paths, blocked_paths = changed_paths(staged, revisions)
             if not safe_paths:
                 return {
                     "argv": argv[len(base):],

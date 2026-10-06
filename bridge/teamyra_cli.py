@@ -68,7 +68,7 @@ def cmd_run(args):
     else:
         result = call("start_task", payload)
     emit(result)
-    return 0
+    return 1 if result.get("state") in {"failed", "cancelled", "timed_out"} else 0
 
 
 def cmd_wait(args):

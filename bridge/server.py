@@ -21,6 +21,7 @@ import handoff_store
 import mcp_pool
 import recovery
 import media_engine
+import desktop_runtime
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -850,6 +851,7 @@ def prepare_handoff_record(source_job_id, target_worker, payload):
 
 
 def desktop_control(action, payload=None, timeout_seconds=20):
+    desktop_runtime.ensure_desktop_ready(ROOT)
     control = ROOT / ".teamyra-desktop" / "control"
     control.mkdir(parents=True, exist_ok=True)
     request_id = uuid.uuid4().hex
@@ -873,6 +875,15 @@ def desktop_control(action, payload=None, timeout_seconds=20):
         try: response_file.unlink(missing_ok=True)
         except Exception: pass
 
+def wake_media_surface(surface):
+    try:
+        response = desktop_control("media.wake", {"surface": surface}, 5)
+        return {"state": "waking", "surface": surface, "needs_user_auth": response.get("needs_user_auth") is True}
+    except Exception as exc:
+        # Queue creation is durable. Tell callers why it hasn't started rather
+        # than returning an apparently healthy queued job indefinitely.
+        return {"state": "unavailable", "surface": surface, "error": str(exc)[:800]}
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
@@ -885,18 +896,23 @@ MEDIA_REQUEST_PROPERTIES = {
     "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": 1800},
     "aspect_ratio": {"type": "string"},
     "format": {"type": "string", "enum": MEDIA_FORMAT_ENUM},
-    "references": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+    "references": {"type": "array", "maxItems": 24, "items": {"type": "string"},
+                   "description": "Exact TEAMYRA asset IDs or project-local media files. Omni attaches image identity references directly to the prompt as ingredients; attachments are verified before generation."},
+    "reference_mode": {"type": "string", "enum": ["auto", "ingredients"], "default": "auto",
+                       "description": "Omni uses prompt ingredients. Exact first/last-frame controls are unsupported; do not request Frames mode."},
     "output_count": {"type": "integer", "minimum": 1, "maximum": 8, "default": 1},
     "instrumental": {"type": "boolean"},
     "vocals": {"type": "boolean"},
     "lyrics": {"type": "string"},
     "model_preference": {"type": "string"},
-    "download_quality": {"type": "string", "enum": ["auto", "source", "2x", "4x", "prefer_4x_then_2x", "1080p", "4k"]},
-    "generation_resolution": {"type": "string", "enum": ["auto", "360p", "720p", "1080p", "4k"]},
+    "download_quality": {"type": "string", "enum": ["auto", "source", "2x", "4x", "prefer_4x_then_2x", "1080p", "4k"],
+                         "description": "Video defaults to 1080p: generate at 720p, then select 1080p Upscaled in Download and wait for the real file. source opts out. Sound effects always download the 360p original and extract audio; no upscale."},
+    "generation_resolution": {"type": "string", "enum": ["auto", "360p", "720p"],
+                              "description": "Native Flow generation resolution, separate from download quality. Video defaults to 720p; 1080p is a download upscale. Sound effects are always generated at 360p regardless of overrides."},
     "wait_for_upscale": {"type": "boolean"},
     "audio_only": {"type": "boolean"},
-    "first_frame": {"type": "string"},
-    "last_frame": {"type": "string"},
+    "first_frame": {"type": "string", "description": "Compatibility alias for an Omni prompt image ingredient. No exact first-frame guarantee; prefer references with a TEAMYRA image asset ID or project-local image path."},
+    "last_frame": {"type": "string", "description": "Unsupported by Omni. Rejected before generation; use references for image identity ingredients instead."},
     "character_reference": {"type": "string"},
     "audio_reference": {"type": "string"},
     "video_reference": {"type": "string"},
@@ -930,10 +946,10 @@ TOOLS = [
          "confirm": {"type": "boolean", "default": False},
          "file_path": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
-    {"name": "media_generate", "description": "Queue a durable TEAMYRA media job. TEAMYRA chooses the Google media surface internally and returns immediately with a media job id.",
+    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings.",
      "inputSchema": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
                      "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
-    {"name": "media_batch", "description": "Queue multiple independent durable TEAMYRA media jobs without exposing browser/provider implementation details.",
+    {"name": "media_batch", "description": "Queue independent media jobs and auto-wake each required worker. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames.",
      "inputSchema": {"type": "object", "properties": {
          "requests": {"type": "array", "minItems": 1, "maxItems": 50,
                       "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
@@ -951,15 +967,22 @@ TOOLS = [
          "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": 1800},
          "aspect_ratio": {"type": "string"},
          "format": {"type": "string", "enum": MEDIA_FORMAT_ENUM},
-         "references": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
+         "references": MEDIA_REQUEST_PROPERTIES["references"],
+         "reference_mode": MEDIA_REQUEST_PROPERTIES["reference_mode"],
          "instrumental": {"type": "boolean"},
-         "first_frame": {"type": "string"},
-         "last_frame": {"type": "string"},
+         "first_frame": MEDIA_REQUEST_PROPERTIES["first_frame"],
+         "last_frame": MEDIA_REQUEST_PROPERTIES["last_frame"],
+         "download_quality": MEDIA_REQUEST_PROPERTIES["download_quality"],
+         "generation_resolution": MEDIA_REQUEST_PROPERTIES["generation_resolution"],
+         "wait_for_upscale": MEDIA_REQUEST_PROPERTIES["wait_for_upscale"],
+         "audio_only": MEDIA_REQUEST_PROPERTIES["audio_only"],
          "character_reference": {"type": "string"},
          "audio_reference": {"type": "string"},
          "video_reference": {"type": "string"},
          "generation_settings": {"type": "object"}},
          "required": ["operation", "asset_id"], "additionalProperties": False}},
+    {"name": "media_capabilities", "description": "Read enforced media workflow rules without loading the browser: video native 720p then 1080p upscale; SFX 360p source video then audio extraction; Omni image ingredients with no exact first/end Frames.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "media_status", "description": "Read one TEAMYRA media job or recent media jobs, including durable state and completed asset metadata.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
@@ -1289,10 +1312,7 @@ def tool_call(name, a):
     if name == "media_generate":
         result = media_engine.create_job(ROOT, a)
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
-        try:
-            desktop_control("media.wake", {"surface": surface}, 2)
-        except Exception:
-            pass
+        result["runtime"] = wake_media_surface(surface)
         return result
     if name == "media_batch":
         result = media_engine.create_batch(ROOT, a["requests"])
@@ -1301,19 +1321,22 @@ def tool_call(name, a):
             for item in result["jobs"]
         }
         for surface in surfaces:
-            try:
-                desktop_control("media.wake", {"surface": surface}, 2)
-            except Exception:
-                pass
+            result.setdefault("runtime", {})[surface] = wake_media_surface(surface)
         return result
     if name == "media_transform":
         result = media_engine.create_transform_job(ROOT, a)
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
-        try:
-            desktop_control("media.wake", {"surface": surface}, 2)
-        except Exception:
-            pass
+        result["runtime"] = wake_media_surface(surface)
         return result
+    if name == "media_capabilities":
+        return {"video": {"generation_resolutions": ["360p", "720p"], "default_generation_resolution": "720p",
+                          "default_download_quality": "1080p", "download_workflow": "Select 1080p Upscaled in the generated result's Download menu; wait for the actual file and verify its dimensions"},
+                "sound_effect": {"generation_resolution": "360p", "download_quality": "source", "upscale": False,
+                                 "workflow": "Generate a 360p source video, download original size, extract audio with FFmpeg, return an audio-only file"},
+                "omni_references": {"mode": "ingredients", "references": "Exact TEAMYRA asset IDs or project-local images attach directly in the prompt box and are verified before Generate",
+                                    "exact_first_frame": False, "exact_last_frame": False,
+                                    "first_frame_alias": "Accepted as an image ingredient, without an exact opening-frame guarantee", "last_frame": "Rejected before generation"},
+                "runtime": "Desktop-dependent requests cold-start the app hidden; active jobs retain the browser, idle views unload after a grace period"}
     if name == "media_status":
         return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30))
     if name == "media_assets":
@@ -1327,18 +1350,12 @@ def tool_call(name, a):
         surfaces = {media_engine.load_job(ROOT, job_id)["request"]["surface"]
                     for job_id in result["resumed"] + result["reconcile_required"]}
         for surface in surfaces:
-            try:
-                desktop_control("media.wake", {"surface": surface}, 2)
-            except Exception:
-                pass
+            result.setdefault("runtime", {})[surface] = wake_media_surface(surface)
         return result
     if name == "media_resume_download":
         result = media_engine.resume_download_job(ROOT, a["job_id"])
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
-        try:
-            desktop_control("media.wake", {"surface": surface}, 2)
-        except Exception:
-            pass
+        result["runtime"] = wake_media_surface(surface)
         return result
     if name == "timeline_list":
         return observability.timeline(
@@ -1642,8 +1659,8 @@ def tool_call(name, a):
         requested_worker = a.get("worker", "auto")
         auto_failover = a.get("auto_failover", requested_worker == "auto")
         job_id, worker = start_job(
-            requested_worker, a["task"], a["project_path"], None,
-            int(config().get("job_timeout_minutes", 180)), a.get("write", True),
+            requested_worker, a["task"], a["project_path"], a.get("label"),
+            a.get("timeout_minutes", int(config().get("job_timeout_minutes", 180))), a.get("write", True),
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))

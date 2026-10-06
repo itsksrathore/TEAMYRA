@@ -152,6 +152,38 @@ class WorkspaceToolTests(unittest.TestCase):
             log = service.execute("git.log", {"limit": 2}, token=token)
             self.assertIn("update", log["stdout"])
 
+    def test_git_diff_compares_commits_in_clean_tree_and_filters_secrets(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True, text=True).stdout.strip()
+            git("init")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "Test")
+            (workspace / "safe.txt").write_text("before\n", encoding="utf-8")
+            (workspace / ".env").write_text("SECRET=before\n", encoding="utf-8")
+            git("add", "safe.txt", ".env")
+            git("commit", "-m", "before")
+            before = git("rev-parse", "HEAD")
+            (workspace / "safe.txt").write_text("after\n", encoding="utf-8")
+            (workspace / ".env").write_text("SECRET=after\n", encoding="utf-8")
+            git("add", "safe.txt", ".env")
+            git("commit", "-m", "after")
+            service = self.make_service(Path(td) / "runtime", workspace)
+            args = {"base": before, "head": "HEAD"}
+            result = service.execute("git.diff", args, token="x" * 64)
+            self.assertIn("-before", result["stdout"])
+            self.assertIn("+after", result["stdout"])
+            self.assertNotIn("SECRET", result["stdout"])
+            self.assertIn(".env", result["blocked_paths"])
+            stat = service.execute("git.diff", {**args, "stat": True}, token="x" * 64)
+            self.assertIn("safe.txt", stat["stdout"])
+            self.assertNotIn(".env", stat["stdout"])
+            for bad in ({"base": "--output=leak"}, {"base": "missing-ref"}, {"head": "HEAD"}, {**args, "staged": True}):
+                with self.assertRaises(ValueError):
+                    service.execute("git.diff", bad, token="x" * 64)
+
     def test_git_diff_and_commit_do_not_expose_staged_sensitive_files(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"

@@ -14,6 +14,13 @@ import teamyra_cli
 
 
 class CliTests(unittest.TestCase):
+    def test_waiting_run_reports_terminal_failures_in_exit_code(self):
+        for state, expected in (("done", 0), ("running", 0), ("failed", 1), ("cancelled", 1)):
+            with patch.object(teamyra_cli.server, "tool_call", return_value={"state": state}):
+                code, out, _ = self.run_cli(["run", "--project", "P", "--task", "Review", "--wait"])
+            self.assertEqual(code, expected)
+            self.assertEqual(json.loads(out)["state"], state)
+
     def run_cli(self, argv):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):

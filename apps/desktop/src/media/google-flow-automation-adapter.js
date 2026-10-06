@@ -1,4 +1,5 @@
 const { MediaBrowserController } = require('./media-browser-controller');
+const { FlowReferenceController } = require('./flow-reference-controller');
 
 const FLOW_HOME = 'https://flow.google.com/';
 const AUTH_WORDS = ['sign in', 'log in', 'choose an account'];
@@ -58,19 +59,13 @@ class GoogleFlowAutomationAdapter {
     throw lastError || new Error('browser evaluate failed');
   }
 
-  async stage(name, fn, timeoutMs = 30000) {
-    let timer = null;
-    try {
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('timed out after ' + timeoutMs + 'ms')), timeoutMs);
-        timer.unref?.();
-      });
-      return await Promise.race([Promise.resolve().then(fn), timeout]);
-    } catch (error) {
+  async stage(name, fn) {
+    // Each operation bounds its own waits. Do not race a live DOM mutation:
+    // ownership must remain with this job until the operation has quiesced.
+    try { return await fn(); }
+    catch (error) {
       const message = String(error?.message || error || '').slice(0, 1400);
       throw new Error(name + ': ' + message);
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   }
 
@@ -173,7 +168,13 @@ class GoogleFlowAutomationAdapter {
       native_audio: /audio|sound/.test(joined),
       extend: /extend/.test(joined),
       ingredients: /ingredient|reference/.test(joined),
-      first_last_frame: /first frame|last frame/.test(joined),
+      first_last_frame: false,
+      reference_mode: 'ingredients',
+      reference_note: 'Omni images attach directly to the prompt; exact first/last frames are unavailable',
+      video_generation_resolution: '720p',
+      video_download_quality: '1080p',
+      sound_effect_generation_resolution: '360p',
+      sound_effect_download_quality: 'source',
       models: settingsOptions.slice(0, 20),
       settings_options: settingsOptions.slice(0, 80),
       discovered_controls: (probe.buttonLabels || []).slice(0, 24),
@@ -880,6 +881,9 @@ class GoogleFlowAutomationAdapter {
     if (type === 'video' || type === 'sound_effect') {
       const videoSelection = await this.selectVideoModeAndModel(request);
       actualModel = videoSelection.actual_model;
+      // Omni attaches reference images directly to the prompt. Its Frames
+      // lane must never be used to imply unsupported start/end-frame control.
+      await this.selectRadioSetting(['ingredients'], { required: true, label: 'Omni Ingredients mode' });
       const resolution = type === 'sound_effect' ? '360p' : String(settings.generation_resolution || '720p');
       await this.selectRadioSetting([resolution], { required: true, label: resolution + ' resolution' });
     }
@@ -912,19 +916,7 @@ class GoogleFlowAutomationAdapter {
   }
 
   async uploadReferences(references = []) {
-    const files = references.map(item => item.path).filter(Boolean);
-    if (!files.length) return { ok: true, count: 0 };
-    await this.semanticClick(['upload', 'reference', 'ingredient', 'add media', 'add']);
-    const selectors = ['input[type="file"][multiple]', 'input[type="file"]'];
-    for (const selector of selectors) {
-      try {
-        if (await this.browser.query(selector)) {
-          await this.browser.setFiles(selector, files);
-          return { ok: true, count: files.length };
-        }
-      } catch {}
-    }
-    throw new Error('selector_failure: Google Flow reference file input was not found');
+    return new FlowReferenceController(this).prepare(references);
   }
 
   async resultSnapshot() {
@@ -1112,8 +1104,9 @@ class GoogleFlowAutomationAdapter {
       }
       if (!await this.waitForSettingsTrigger()) throw new Error('selector_failure: Flow composer unavailable');
     });
+    await new FlowReferenceController(this).clearComposer();
     const intent = await this.stage('intent', () => this.selectIntent(request, job.operation));
-    await this.stage('references', () => this.uploadReferences(job.resolved_references || []));
+    const references = await this.stage('references', () => this.uploadReferences(job.resolved_references || []), null);
     const selector = await this.stage('prompt_find', () => this.waitForPrompt());
     await this.browser.clickSelector(selector).catch(() => false);
     await this.stage('prompt_clear', () => this.browser.clearText(selector));
@@ -1126,6 +1119,9 @@ class GoogleFlowAutomationAdapter {
     await this.stage('prompt_fill', () => this.browser.insertText(selector, providerPrompt));
     const normalizeText = value => String(value || '').replace(/\s+/g, ' ').trim();
     if (normalizeText(await readPrompt()) !== normalizeText(providerPrompt)) throw new Error('selector_failure: prompt editor did not update');
+    if (references && !await new FlowReferenceController(this).matches(references.items)) {
+      throw new Error('selector_failure: prompt reference identities changed before generation');
+    }
     const baselineResults = await this.resultSnapshot();
     const generation = await this.stage('generation_click', () => this.startGenerationVerified(async before => {
       await beforeSubmit({
@@ -1135,6 +1131,8 @@ class GoogleFlowAutomationAdapter {
         baseline_result_keys: baselineResults.map(result => result.key).filter(Boolean),
         selected_settings: await this.settingsTriggerText(),
         actual_model: intent.actual_model,
+        reference_attachments: references?.items || [],
+        reference_mode: 'ingredients',
         acknowledgement_pending: true
       });
     }, { nativeActivation: request.type === 'image' }), 60000);
@@ -1144,7 +1142,9 @@ class GoogleFlowAutomationAdapter {
       baseline_media_count: Number(generation?.before?.mediaCount || 0),
       baseline_result_keys: baselineResults.map(result => result.key).filter(Boolean),
       selected_settings: await this.settingsTriggerText(),
-      actual_model: intent.actual_model
+      actual_model: intent.actual_model,
+      reference_attachments: references?.items || [],
+      reference_mode: 'ingredients'
     };
   }
 
@@ -1275,7 +1275,7 @@ class GoogleFlowAutomationAdapter {
       selected = quality === '2x' ? two : four || (quality === 'prefer_4x_then_2x' ? two : null);
       actualQuality = selected === four ? '4x' : '2x';
     } else if (type === 'video' && quality !== 'source') {
-      selected = choices.find(item => /1080\s*p/i.test(item.text));
+      selected = choices.find(item => /1080\s*p/i.test(item.text) && /upscal/i.test(item.text));
       actualQuality = '1080p';
     } else {
       selected = choices.find(item => /original size|original|source/i.test(item.text)) ||

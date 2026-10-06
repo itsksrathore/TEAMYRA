@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const { callCore } = require('../core-api');
 const { extractAudio } = require('./media-audio-processor');
 const { convertImage, verifyMediaOutput } = require('./media-output-validator');
+const { mediaId } = require('./flow-reference-controller');
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
@@ -19,7 +20,7 @@ function classifyError(error) {
 }
 
 class MediaJobConsumer {
-  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500 }) {
+  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {} }) {
     this.surface = surface;
     this.workerName = workerName;
     this.provider = provider;
@@ -30,6 +31,7 @@ class MediaJobConsumer {
     this.busy = false;
     this.timer = null;
     this.currentJobId = null;
+    this.onActivity = onActivity;
   }
 
   schedule(delayMs = this.pollMs) {
@@ -66,10 +68,12 @@ class MediaJobConsumer {
     }
     this.busy = true;
     this.currentJobId = job.job_id;
+    this.onActivity();
     try { await this.process(job); }
     finally {
       this.currentJobId = null;
       this.busy = false;
+      this.onActivity();
       this.schedule(500);
     }
   }
@@ -257,11 +261,11 @@ class MediaJobConsumer {
         job_id: jobId,
         local_path: finalPath,
         provider: this.surface === 'music' ? 'google-flow-music' : 'google-flow',
-        provider_asset_id: providerSubmission.provider_asset_id,
-        provider_project_id: providerSubmission.provider_project_id,
+        provider_asset_id: providerSubmission.provider_asset_id || mediaId(providerSubmission.result_key),
+        provider_project_id: providerSubmission.provider_project_id || providerSubmission.provider_url?.match(/\/project\/([^/?#]+)/)?.[1],
         provider_url: providerSubmission.provider_url,
         generation_settings: request.generation_settings || {},
-        metadata: { mime: isImage ? 'image/' + (['jpg', 'jpeg'].includes(planned.format) ? 'jpeg' : planned.format) : isSfx ? (planned.format === 'wav' ? 'audio/wav' : 'audio/' + planned.format) : downloaded.mime || '', bytes: fs.statSync(finalPath).size, google_profile_id: this.profileId, download_action: downloadAction || null, verified_output: outputInfo, selected_settings: providerSubmission.selected_settings || null, actual_model: providerSubmission.actual_model || null }
+        metadata: { reference_attachments: providerSubmission.reference_attachments || [], reference_mode: providerSubmission.reference_mode || 'ingredients', mime: isImage ? 'image/' + (['jpg', 'jpeg'].includes(planned.format) ? 'jpeg' : planned.format) : isSfx ? (planned.format === 'wav' ? 'audio/wav' : 'audio/' + planned.format) : downloaded.mime || '', bytes: fs.statSync(finalPath).size, google_profile_id: this.profileId, download_action: downloadAction || null, verified_output: outputInfo, selected_settings: providerSubmission.selected_settings || null, actual_model: providerSubmission.actual_model || null }
       }, { timeout: 20000 });
       if (isSfx) await callCore('media.cleanup-staging', { job_id: jobId });
       if (isImage) { try { fs.unlinkSync(downloadPath); } catch {} }

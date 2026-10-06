@@ -87,7 +87,7 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         self.assertIn("TEAMYRA_TOOL_REQUEST", self.automation)
         self.assertIn("TEAMYRA_CANCELLED", self.automation)
         self.assertIn("Array.isArray(data.args)", self.automation)
-        self.assertIn("for (let step = 0; step < 16; step += 1)", self.provider)
+        self.assertIn("step < MAX_TOOL_STEPS", self.provider)
         self.assertIn("MAX_TOOL_RESULT_CHARS", self.provider)
         self.assertIn("next_offset", self.provider)
         self.assertIn("before-input-event", self.provider)

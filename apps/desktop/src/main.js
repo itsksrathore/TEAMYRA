@@ -81,6 +81,17 @@ let mcpBootError = null;
 let desktopIdleTimer = null;
 
 const DESKTOP_IDLE_SECONDS = Math.max(30, Number(process.env.TEAMYRA_DESKTOP_IDLE_SECONDS) || 600);
+let desktopReady = false;
+let desktopStateWrittenAt = 0;
+function publishDesktopState(ready = desktopReady) {
+  desktopReady = ready;
+  const state = { protocol: 1, pid: process.pid, ready, runtime_root: RUNTIME_ROOT, updated_at: Date.now() / 1000 };
+  const file = path.join(DESKTOP_USER_DATA, 'runtime.json');
+  const temporary = file + '.tmp-' + process.pid;
+  fs.writeFileSync(temporary, JSON.stringify(state), 'utf8');
+  fs.renameSync(temporary, file);
+  desktopStateWrittenAt = Date.now();
+}
 const ROOT = RUNTIME_ROOT;
 const JOBS = path.join(ROOT, 'jobs');
 const APP_ICON = app.isPackaged
@@ -374,9 +385,20 @@ function jobBlocksDesktopSleep(job) {
 
 function hasActiveDesktopWork() {
   if (TERMINALS.size > 0) return true;
+  try {
+    if (fs.readdirSync(DESKTOP_CONTROL_DIR).some(name => name.endsWith('.request.json'))) return true;
+    const states = new Set(['queued', 'preparing', 'waiting_for_browser', 'submitting', 'generating', 'processing', 'downloading', 'extracting_audio', 'organizing']);
+    const mediaJobs = path.join(ROOT, 'media', 'jobs');
+    if (fs.existsSync(mediaJobs) && fs.readdirSync(mediaJobs).filter(name => name.endsWith('.json')).some(name => {
+      try {
+        const job = JSON.parse(fs.readFileSync(path.join(mediaJobs, name), 'utf8'));
+        return states.has(job.state) && (Date.now() / 1000 - Number(job.updated_at || job.created_at || 0)) < DESKTOP_IDLE_SECONDS;
+      } catch { return false; }
+    })) return true;
+  } catch {}
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
-  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumer?.busy === true || runtime.musicConsumer?.busy === true)) return true;
+  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumer?.busy === true || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
   return false;
 }
 
@@ -575,10 +597,12 @@ function createWindow(background = false) {
       googleMediaEngine?.destroy();
       googleMediaEngine = new GoogleMediaEngine({ window: win });
       googleMediaEngine.initialize();
+      publishDesktopState(true);
     } catch (error) {
       startupLog('google-media-start-failed', { error: String(error?.stack || error) });
       try { googleMediaEngine?.destroy(); } catch {}
       googleMediaEngine = null;
+      publishDesktopState(true);
     }
   });
   const webContentsId = win.webContents.id;
@@ -1256,6 +1280,7 @@ async function dispatchDesktopControl(action, payload = {}) {
 }
 
 async function processDesktopControlRequests() {
+  if (desktopReady && Date.now() - desktopStateWrittenAt >= 5000) publishDesktopState();
   fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
   const files = fs.readdirSync(DESKTOP_CONTROL_DIR).filter(name => name.endsWith('.request.json')).slice(0, 20);
   for (const name of files) {
@@ -1367,12 +1392,20 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => showMainWindow());
+  app.on('second-instance', (_event, argv) => {
+    // MCP waking a running instance must never steal desktop focus.
+    if (argv.includes('--background')) scheduleDesktopIdleExit();
+    else showMainWindow();
+  });
 
   app.whenReady().then(() => {
     if (shouldUseWindowsAppUserModelId()) app.setAppUserModelId('com.teamyra.desktop');
     ensureWindowsShortcutIdentity();
     const background = process.argv.includes('--background');
+    fs.writeFileSync(path.join(DESKTOP_USER_DATA, 'launch.json'), JSON.stringify({
+      executable: process.execPath, packaged: app.isPackaged, runtime_root: RUNTIME_ROOT
+    }), 'utf8');
+    publishDesktopState(false);
     createWindow(background);
     startDesktopControlLoop();
     if (background) scheduleDesktopIdleExit();
@@ -1394,6 +1427,7 @@ if (!gotSingleInstanceLock) {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (gotSingleInstanceLock) { try { publishDesktopState(false); } catch {} }
   clearDesktopIdleExit();
   if (desktopControlTimer) clearTimeout(desktopControlTimer);
   desktopControlTimer = null;

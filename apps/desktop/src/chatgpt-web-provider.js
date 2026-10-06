@@ -7,6 +7,7 @@ const { WorkspaceBridge } = require('./workspace-bridge');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
 const MAX_TOOL_RESULT_CHARS = 120000;
+const MAX_TOOL_STEPS = 256;
 const READ_ONLY_BLOCKED_TOOLS = new Set([
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
   'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore'
@@ -73,6 +74,7 @@ class ChatGPTWebProvider {
   }
 
   initialize() {
+    this.recoverInterruptedJobs();
     this.sessionManager.initialize();
     this.profileSessionStatus(this.activeProfileId).then(profile => {
       this.writeStatus({
@@ -97,6 +99,26 @@ class ChatGPTWebProvider {
       this.jobTimer.unref?.();
     }
     return this.getStatus();
+  }
+
+  recoverInterruptedJobs() {
+    // Only one desktop owns this runtime. A new provider cannot still own a
+    // running browser loop from the previous desktop process.
+    const jobsRoot = path.join(this.runtimeRoot, 'jobs');
+    if (!fs.existsSync(jobsRoot)) return;
+    for (const entry of fs.readdirSync(jobsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(jobsRoot, entry.name);
+      let meta;
+      try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')); } catch { continue; }
+      if (meta.provider !== 'chatgpt-web' || meta.state !== 'running' ||
+          String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId ||
+          fs.existsSync(path.join(dir, 'DONE'))) continue;
+      const detail = 'ChatGPT desktop restarted; partial workspace changes are preserved. Resume with a new job.';
+      this.appendJobEvent(dir, 'error', detail);
+      this.writeJobMeta(dir, { state: 'failed', reason: 'desktop_interrupted', ended: Date.now() / 1000, last_event: detail });
+      fs.writeFileSync(path.join(dir, 'DONE'), 'failed', 'utf8');
+    }
   }
 
   profileConversationFile(profileId = this.activeProfileId) {
@@ -568,6 +590,12 @@ class ChatGPTWebProvider {
   }
 
   async processPendingJobs() {
+    if (this.pendingJobsPromise) return this.pendingJobsPromise;
+    this.pendingJobsPromise = this.processPendingJobsOnce().finally(() => { this.pendingJobsPromise = null; });
+    return this.pendingJobsPromise;
+  }
+
+  async processPendingJobsOnce() {
     if (this.busy) return;
     const jobsRoot = path.join(this.runtimeRoot, 'jobs');
     if (!fs.existsSync(jobsRoot)) return;
@@ -650,6 +678,8 @@ class ChatGPTWebProvider {
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
         'filesystem.read is paged: use offset and max_bytes for large files, then next_offset when clipped.',
+        'Use relative paths with forward slashes. git.diff supports base/head commit refs and stat:true.',
+        'This text bridge is your local tool interface: emit TEAMYRA_TOOL_REQUEST even if task files mention calling native tools.',
         'Destructive operations may be denied pending explicit user confirmation. Never try to bypass that denial.',
         'When the task is complete, reply normally with the final result and do not emit a tool request.',
         '',
@@ -660,21 +690,23 @@ class ChatGPTWebProvider {
 
       const deadline = Date.now() + Number(spec.timeout || 3600) * 1000;
       const isCancelled = () => fs.existsSync(path.join(jobDir, 'CANCEL'));
-      const waitOptions = previousCount => {
+      const waitOptions = previous => {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('ChatGPT job timed out');
         return {
-          previousCount,
-          timeoutMs: Math.min(remaining, 300000),
+          previousCount: previous.count,
+          previousText: previous.text,
+          previousMessageId: previous.messageId,
+          timeoutMs: remaining,
           shouldCancel: isCancelled
         };
       };
 
       let snap = await this.automation.assistantSnapshot();
       await this.sendTask(bootstrap);
-      let reply = await this.automation.waitForAssistantReply(waitOptions(snap.count));
+      let reply = await this.automation.waitForAssistantReply(waitOptions(snap));
 
-      for (let step = 0; step < 16; step += 1) {
+      for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
         if (fs.existsSync(path.join(jobDir, 'CANCEL'))) {
           await this.stopGeneration().catch(() => {});
           state = 'cancelled';
@@ -725,7 +757,7 @@ class ChatGPTWebProvider {
         this.appendJobEvent(jobDir, 'result', rawToolResult.slice(0, 3000));
         snap = await this.automation.assistantSnapshot();
         await this.sendTask('TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
-        reply = await this.automation.waitForAssistantReply(waitOptions(snap.count));
+        reply = await this.automation.waitForAssistantReply(waitOptions(snap));
       }
       throw new Error('ChatGPT exceeded the maximum TEAMYRA tool-call loop');
     } catch (error) {

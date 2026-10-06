@@ -377,6 +377,36 @@ def normalize_generate_request(root, request):
     if "audio_only" in request:
         bounded_settings["audio_only"] = request.get("audio_only") is True
     defaults.update(bounded_settings)
+    if media_type == "video":
+        resolution = str(defaults.get("generation_resolution") or "auto").lower()
+        if resolution == "auto":
+            resolution = "720p"
+        if resolution not in {"360p", "720p"}:
+            raise ValueError("Flow video generation supports 360p/720p; use generation_resolution=720p and download_quality=1080p for an upscaled download")
+        defaults["generation_resolution"] = resolution
+        quality = str(defaults.get("download_quality") or "auto").lower()
+        if quality == "auto":
+            quality = "1080p"
+        if quality not in {"source", "1080p"}:
+            raise ValueError("Flow video download_quality must be source or 1080p")
+        defaults["download_quality"] = quality
+        defaults["wait_for_upscale"] = quality != "source"
+    elif media_type == "sound_effect":
+        # SFX is an inexpensive source video followed by audio extraction.
+        # A video-quality override must never upscale its discarded picture.
+        defaults.update(generation_resolution="360p", download_quality="source",
+                        wait_for_upscale=False, audio_only=True)
+
+    mode = str(request.get("reference_mode") or "auto").strip().lower()
+    if mode not in {"auto", "ingredients"}:
+        raise ValueError("Omni supports reference_mode=ingredients or auto; exact first/last Frames are unavailable")
+    if result.get("last_frame"):
+        raise ValueError("Omni does not support last_frame; attach images directly with references as prompt ingredients")
+    if result.get("first_frame") and media_type != "video":
+        raise ValueError("first_frame compatibility alias requires type=video; use references for image ingredients")
+    result["reference_mode"] = "ingredients"
+    if result.get("first_frame"):
+        result["reference_note"] = "Omni treats first_frame as a prompt image ingredient; it does not guarantee the exact opening frame. Prefer references."
     result["generation_settings"] = defaults
     ensure_project_folders(root, project)
     return result
@@ -444,7 +474,8 @@ def _resolve_reference(root, project, value):
             "kind": "asset",
             "asset_id": asset["asset_id"],
             "path": str(path),
-            "provider_asset_id": asset.get("provider_asset_id"),
+            "provider_asset_id": asset.get("provider_asset_id") or
+                ((asset.get("metadata") or {}).get("download_action") or {}).get("result_key"),
             "provider_project_id": asset.get("provider_project_id"),
             "provider_url": asset.get("provider_url"),
             "type": asset.get("type"),
@@ -465,18 +496,26 @@ def _resolve_reference(root, project, value):
 
 def resolve_request_references(root, request):
     project = Path(request["project_path"]).resolve()
-    values = list(request.get("references") or [])
-    for key in ("first_frame", "last_frame", "character_reference", "audio_reference", "video_reference"):
-        if request.get(key):
-            values.append(request[key])
+    values = [(key, request[key]) for key in
+              ("first_frame", "last_frame", "character_reference", "audio_reference", "video_reference")
+              if request.get(key)]
+    values += [("ingredient", value) for value in request.get("references") or []]
     resolved = []
-    seen = set()
-    for value in values:
+    seen = {}
+    for role, value in values:
         item = _resolve_reference(root, project, value)
         identity = (item.get("asset_id") or "", item["path"])
+        if role in {"first_frame", "last_frame"} and (
+                item.get("type") not in {None, "image"} or
+                Path(item["path"]).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}):
+            raise ValueError(role + " must reference an image")
         if identity in seen:
+            existing = seen[identity]
+            if role != "ingredient" and role not in existing["roles"]:
+                existing["roles"].append(role)
             continue
-        seen.add(identity)
+        item["roles"] = [role]
+        seen[identity] = item
         resolved.append(item)
     return resolved
 
@@ -572,6 +611,9 @@ def create_transform_job(root, request):
     for key in ("first_frame", "last_frame", "character_reference", "audio_reference", "video_reference"):
         if request.get(key):
             generate[key] = request[key]
+    for key in ("reference_mode", "download_quality", "generation_resolution", "wait_for_upscale", "audio_only"):
+        if key in request:
+            generate[key] = request[key]
     if target_type == "music":
         generate["instrumental"] = request.get("instrumental") is True
     return create_job(root, generate, operation=operation, source_asset=asset)
@@ -604,6 +646,10 @@ def public_job(job):
         "operation": job.get("operation"),
         "project_path": job.get("request", {}).get("project_path"),
         "provider_surface": job.get("provider_surface"),
+        "generation_settings": dict(job.get("request", {}).get("generation_settings") or {}),
+        "reference_mode": job.get("request", {}).get("reference_mode", "ingredients"),
+        "parent_asset_ids": list(job.get("parent_asset_ids") or []),
+        "reference_note": job.get("request", {}).get("reference_note"),
         "asset_id": job.get("asset_id"),
         "error": job.get("error"),
         "cancel_requested": job.get("cancel_requested") is True,

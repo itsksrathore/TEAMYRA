@@ -35,6 +35,38 @@ file is allowed. Image bytes are converted rather than saved with a misleading
 extension. A failed 4x download can retry 2x on the same result. Failed SFX
 extraction preserves the source; successful registration permits staging cleanup.
 
+## MCP policy and references
+
+`teamyra.media_capabilities` reports the enforced workflow without opening a
+browser. Generation and download quality are separate: a video is generated at
+720p and its result's Download menu selects **1080p Upscaled**. The job waits for
+the actual download and rejects a file below the requested resolution. Setting
+`download_quality: "source"` explicitly opts out of upscale. Requests for native
+1080p/4K video fail validation before a paid submission.
+
+SFX always uses **360p generation → original-size video download → FFmpeg audio
+extraction**. These rules cannot be changed by video-quality overrides; only the
+audio file is registered as the sound effect.
+
+Omni supports images directly in its prompt as **ingredients**, not exact
+first/last-frame controls. Use `references: ["TYR-IMG-000004"]` and
+`reference_mode: "ingredients"` for the same car/character/object. A legacy
+`first_frame` is accepted as an ingredient with an explicit no-guarantee note;
+`last_frame` and Frames mode are rejected before generation. Unsupported frame modes fail before submission. The same provider image is selected by stable media ID,
+not its generated title. Project-local images use the Upload media picker. The
+attached ingredient is verified before Generate and recorded in submission and
+asset metadata; referenced TEAMYRA asset IDs remain in `parent_asset_ids`.
+Stale ingredients are cleared between jobs.
+
+Desktop-dependent MCP requests now start a closed desktop in the background and
+wait for readiness. Source and installed builds are supported without `npm start`.
+Installed builds record their executable on first startup; `TEAMYRA_DESKTOP_EXE`
+can override discovery. A startup failure is returned in the queued result's
+`runtime` field, preserving the durable job. Read-only policy/status requests
+stay lightweight. Hidden views remain loaded during active/waking jobs and for
+45 seconds after activity, then unload; the hidden desktop/core still sleep after
+their configured idle period. Automated previews remain muted.
+
 ## Recovery
 
 Submission identity and result baselines are saved before the one Generate

@@ -49,6 +49,37 @@ class MediaBrowserController {
     });
   }
 
+  async uploadFiles(activate, files) {
+    return this.withDebugger(async d => {
+      let timer;
+      let listener;
+      const opened = new Promise((resolve, reject) => {
+        listener = (_event, method, params) => {
+          if (method === 'Page.fileChooserOpened') resolve(params);
+        };
+        d.on('message', listener);
+        timer = setTimeout(() => reject(new Error('Reference upload file chooser did not open')), 10000);
+      });
+      // Flow creates a detached file input; querying document inputs misses it.
+      // Intercept before activating Upload so no native OS dialog is needed.
+      try {
+        await d.sendCommand('Page.enable');
+        await d.sendCommand('Page.setInterceptFileChooserDialog', { enabled: true });
+        if (!await activate()) throw new Error('Reference Upload media control unavailable');
+        const chooser = await opened;
+        if (!chooser.backendNodeId) throw new Error('Reference chooser has no file input identity');
+        await d.sendCommand('DOM.setFileInputFiles', { backendNodeId: chooser.backendNodeId, files });
+        return { ok: true };
+      } finally {
+        clearTimeout(timer);
+        d.removeListener('message', listener);
+        // Observe rejection when activation fails before awaiting the chooser.
+        opened.catch(() => {});
+        await d.sendCommand('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => {});
+      }
+    });
+  }
+
   async setFiles(selector, files) {
     return this.withDebugger(async d => {
       const { root } = await d.sendCommand('DOM.getDocument', { depth: -1, pierce: true });

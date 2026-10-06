@@ -60,6 +60,12 @@ Conversation metadata is runtime state only and contains no password.
 
 ChatGPT does not receive unrestricted Node.js or OS access. It requests tools through a text protocol handled by `ChatGPTAutomationAdapter`; TEAMYRA validates the request and executes it through the same `WorkspaceToolService` exposed to MCP callers.
 
+Worker prompts must emit a single `TEAMYRA_TOOL_REQUEST` JSON line for local tools; instructions to call native ChatGPT tools conflict with this bridge. Use relative paths with forward slashes. Reply detection follows the last message/turn identity (with a text fallback) because the web page virtualizes older turns and its visible message count can stop growing. Each job has a 256-request bound and uses its assigned job deadline rather than a separate five-minute response deadline.
+
+`git.diff` accepts `base` and optional `head` commit refs, `staged`, `stat`, and `path`. Commit refs are resolved before diff execution, and the same sensitive-path filtering applies to commit comparisons as to working-tree diffs.
+
+For durable sequential worker queues, `python scripts/teamyra-task-queue.py <manifest.json>` resumes persisted job IDs, waits for each worker to become idle, and validates fresh output artifacts before advancing. Review JSONs require the assigned checkout's exact head. Failed jobs or missing/stale outputs stop that worker's queue and are recorded in `queue.log`; a CLI process exiting successfully alone is not evidence that a review completed. `teamyra run --wait` also returns a nonzero exit code for failed/cancelled terminal jobs.
+
 Supported tools:
 
 - `filesystem.list`

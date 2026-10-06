@@ -161,11 +161,16 @@ class ChatGPTAutomationAdapter {
       const generating = !!document.querySelector(
         'button[data-testid="stop-button"], button[data-testid*="stop"], button[aria-label*="Stop generating"], button[aria-label*="Stop"], button[aria-label*="stop"]'
       );
-      return { count:messages.length, text:messages[messages.length - 1] || '', generating };
+      const last = nodes.filter(node => (node.innerText || node.textContent || '').trim()).at(-1);
+      const turn = last?.closest('[data-testid^="conversation-turn-"], [data-turn-id], article');
+      const messageId = last?.getAttribute('data-message-id') ||
+        last?.closest('[data-message-id]')?.getAttribute('data-message-id') ||
+        turn?.getAttribute('data-turn-id') || turn?.getAttribute('data-testid') || turn?.id || '';
+      return { count:messages.length, text:messages[messages.length - 1] || '', messageId, generating };
     })()`);
   }
 
-  async waitForAssistantReply({ previousCount = 0, timeoutMs = 180000, shouldCancel = null } = {}) {
+  async waitForAssistantReply({ previousCount = 0, previousText, previousMessageId = '', timeoutMs = 180000, shouldCancel = null } = {}) {
     const deadline = Date.now() + timeoutMs;
     let stableText = '';
     let stableCount = 0;
@@ -177,7 +182,12 @@ class ChatGPTAutomationAdapter {
         throw error;
       }
       const snap = await this.assistantSnapshot();
-      if (snap.count > previousCount && snap.text) {
+      // ChatGPT virtualizes older turns, so the visible count can stay at five
+      // or even decrease. Prefer the last turn identity, then its text.
+      const newReply = snap.messageId && previousMessageId
+        ? snap.messageId !== previousMessageId
+        : snap.count > previousCount || (previousText !== undefined && snap.text !== previousText);
+      if (newReply && snap.text) {
         if (snap.text === stableText) stableCount += 1;
         else {
           stableText = snap.text;

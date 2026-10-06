@@ -7,6 +7,7 @@ const { MediaJobConsumer } = require('./media-job-consumer');
 
 const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fflow.google.com%2F';
 const STATUS_CACHE_MS = 15000;
+const BROWSER_IDLE_MS = 45000;
 
 class GoogleMediaProfileRuntime {
   constructor({ window, profileId }) {
@@ -21,19 +22,23 @@ class GoogleMediaProfileRuntime {
       workerName: 'google-media-' + this.profileId + '-visual',
       provider: this.visual,
       downloadManager: this.downloadManager,
-      profileId: this.profileId
+      profileId: this.profileId,
+      onActivity: () => this.touch()
     });
     this.musicConsumer = new MediaJobConsumer({
       surface: 'music',
       workerName: 'google-media-' + this.profileId + '-music',
       provider: this.music,
       downloadManager: this.downloadManager,
-      profileId: this.profileId
+      profileId: this.profileId,
+      onActivity: () => this.touch()
     });
     this.started = false;
     this.visualConsumerStarted = false;
     this.musicConsumerStarted = false;
     this.unloadTimer = null;
+    this.activityUntil = 0;
+    this.wakingCount = 0;
     this.refreshPromise = null;
     this.lastRefreshAt = 0;
     this.lastStatus = {
@@ -89,18 +94,24 @@ class GoogleMediaProfileRuntime {
     this.unloadTimer = null;
   }
 
-  scheduleUnload(delayMs = 3000) {
+  touch() {
+    this.activityUntil = Date.now() + BROWSER_IDLE_MS;
+    this.cancelUnload();
+    this.scheduleUnload(BROWSER_IDLE_MS);
+  }
+
+  scheduleUnload(delayMs = BROWSER_IDLE_MS) {
     this.cancelUnload();
     this.unloadTimer = setTimeout(() => {
       this.unloadTimer = null;
-      if (this.visualConsumer.busy || this.musicConsumer.busy) {
-        this.scheduleUnload(3000);
+      if (this.visualConsumer.busy || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
+        this.scheduleUnload(BROWSER_IDLE_MS);
         return;
       }
       if (this.visual.visible || this.music.visible) return;
       this.visual.destroy();
       this.music.destroy();
-    }, Math.max(1000, Number(delayMs) || 3000));
+    }, Math.max(1000, Number(delayMs) || BROWSER_IDLE_MS));
     this.unloadTimer.unref?.();
   }
 
@@ -220,15 +231,16 @@ class GoogleMediaProfileRuntime {
   }
 
   wake(surface = 'visual') {
-    this.cancelUnload();
+    this.touch();
+    this.wakingCount++;
     const target = surface === 'music' ? this.music : this.visual;
     target.ensureView();
     void target.ensureLoaded().then(async () => {
       await this.refreshConnection({ force: true, allowLoad: false }).catch(() => {});
       this.setConsumerState(surface === 'music' ? 'music' : 'visual', true);
-      if (!this.visual.visible && !this.music.visible) this.scheduleUnload(30000);
-    }).catch(() => {
-      if (!this.visual.visible && !this.music.visible) this.scheduleUnload(10000);
+    }).catch(() => {}).finally(() => {
+      this.wakingCount = Math.max(0, this.wakingCount - 1);
+      if (!this.visual.visible && !this.music.visible) this.scheduleUnload(BROWSER_IDLE_MS);
     });
     return { ...this.snapshot(), waking: true, wake_surface: surface };
   }
