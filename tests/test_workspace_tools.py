@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
@@ -13,6 +14,21 @@ from workspace_tools import WorkspaceToolService
 
 
 class WorkspaceToolTests(unittest.TestCase):
+    def test_terminal_timeout_default_and_explicit_long_build_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(Path(td) / "runtime", workspace)
+            for requested, expected in ((None, 60), (120, 120), (600, 600), (1800, 1800), (9999, 1800), (0, 1)):
+                with self.subTest(timeout=requested):
+                    args = {"argv": [sys.executable, "-m", "unittest"]}
+                    if requested is not None:
+                        args["timeout_seconds"] = requested
+                    with patch("workspace_tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok", "")) as run:
+                        result = service.execute("terminal.run", args, token="x" * 64)
+                    self.assertEqual(run.call_args.kwargs["timeout"], expected)
+                    self.assertEqual(result["exit_code"], 0)
+
     def make_service(self, root, workspace):
         service = WorkspaceToolService(root)
         service.state_root.mkdir(parents=True, exist_ok=True)

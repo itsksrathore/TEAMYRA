@@ -140,13 +140,23 @@ class DesktopContractTests(unittest.TestCase):
         self.assertNotIn("screenX", self.chatgpt_automation)
         self.assertNotIn("screenY", self.chatgpt_automation)
 
-    def test_chatgpt_tools_are_full_workspace_access_but_keep_safety_boundaries(self):
+    def test_chatgpt_full_access_is_off_by_default_and_user_only(self):
         self.assertIn('id="chatgptPermTerminal" type="checkbox" checked', self.html)
-        self.assertIn("outside_workspace: false", self.renderer)
-        self.assertIn("destructive_without_confirmation: false", self.renderer)
+        switch = re.search(r'<input id="chatgptPermFullAccess"[^>]*>', self.html).group()
+        self.assertNotIn("checked", switch)
+        self.assertIn("outside_workspace: fullAccess", self.renderer)
+        self.assertIn("destructive_without_confirmation: fullAccess &&", self.renderer)
+        self.assertIn("dialog.showMessageBox", self.main)
+        self.assertIn("if (answer.response !== 1) return { cancelled: true }", self.main)
+        self.assertIn("requested, access)", self.main)
+        automated = self.main.split("if (cmd === 'workspace_configure') {")[1].split("if (cmd === 'changes')")[0]
+        self.assertIn("lowerOnlyChatgptPermissions", automated)
+        self.assertNotIn("access", automated)
+        self.assertIn('payload.get("user_confirmed") is True', self.desktop_api)
         tools = (ROOT / "bridge" / "workspace_tools.py").read_text(encoding="utf-8")
         self.assertIn('"terminal": True', tools)
-        self.assertIn('if not inside:', tools)
+        self.assertIn('"full_access": False', tools)
+        self.assertIn('USER_ONLY_PERMISSIONS = ("full_access", "outside_workspace", "destructive_without_confirmation")', tools)
 
     def test_advanced_backend_capabilities_remain_available_without_primary_pages(self):
         ipc_contracts = {

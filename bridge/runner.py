@@ -354,7 +354,8 @@ class Job:
         self.save_meta(
             state=state,
             reason=reason,
-            exit_code=rc,
+            exit_code=0 if state == "done" else 1,
+            process_exit_code=rc,
             ended=time.time(),
             runner_pid=None,
             worker_pid=None,
@@ -382,7 +383,7 @@ def main():
     except Exception as exc:
         job.emit("error", f"runner crashed: {exc}")
         job.save_meta(
-            state="failed", reason="runner_crash", ended=time.time(),
+            state="failed", reason="runner_crash", exit_code=1, ended=time.time(),
             runner_pid=None, worker_pid=None,
         )
         (job.dir / "DONE").write_text("failed", encoding="utf-8")

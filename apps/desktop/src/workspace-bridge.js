@@ -39,10 +39,11 @@ class WorkspaceBridge {
     };
   }
 
-  async configure(workspace, permissions = {}) {
+  async configure(workspace, permissions = {}, access = null) {
     const result = await callCore('chatgpt.workspace.configure', {
       workspace: String(workspace || ''),
-      permissions
+      permissions,
+      ...(access ? { access, user_confirmed: true } : {})
     }, this.coreOptions());
     this.statusGeneration++;
     this.statusCache = null;
@@ -68,7 +69,7 @@ class WorkspaceBridge {
       args: args || {},
       confirm: confirm === true
     }, this.coreOptions({
-      timeout: tool === 'terminal.run' ? 135000 : 45000,
+      timeout: this.toolTimeout(tool, args),
       maxBuffer: 12 * 1024 * 1024
     }));
   }
@@ -81,9 +82,16 @@ class WorkspaceBridge {
       permissions: permissions && typeof permissions === 'object' ? permissions : undefined,
       confirm: confirm === true
     }, this.coreOptions({
-      timeout: tool === 'terminal.run' ? 135000 : 45000,
+      timeout: this.toolTimeout(tool, args),
       maxBuffer: 12 * 1024 * 1024
     }));
+  }
+
+  toolTimeout(tool, args) {
+    if (tool !== 'terminal.run') return 45000;
+    const seconds = Number(args?.timeout_seconds);
+    return Number.isFinite(seconds) && seconds > 120
+      ? Math.min(seconds, 1800) * 1000 + 15000 : 135000;
   }
 
   async changes() {

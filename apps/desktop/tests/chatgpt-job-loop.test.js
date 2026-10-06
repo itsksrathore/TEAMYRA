@@ -2,7 +2,24 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { ChatGPTWebProvider } = require('../src/chatgpt-web-provider');
+const vm = require('node:vm');
+const dispatchCalls = [];
+const dispatchErrors = [];
+let dispatchResult = () => Promise.resolve({ dispatched: [] });
+const providerModule = { exports: {} };
+vm.runInNewContext(fs.readFileSync(require.resolve('../src/chatgpt-web-provider'), 'utf8'), {
+  module: providerModule, process, Date, URL, setTimeout, clearTimeout, setInterval, clearInterval,
+  console: { ...console, error: (...args) => dispatchErrors.push(args) },
+  require(name) {
+    if (name === './core-api') return { callCore: action => {
+      dispatchCalls.push(action);
+      return dispatchResult();
+    } };
+    if (name.startsWith('./')) return require('../src/' + name.slice(2));
+    return require(name);
+  }
+});
+const { ChatGPTWebProvider } = providerModule.exports;
 const { ChatGPTAutomationAdapter } = require('../src/chatgpt-automation-adapter');
 
 // DOM-free fake of the embedded ChatGPT page. Each sendTask() consumes one
@@ -108,6 +125,13 @@ function makeProvider(fake, { permissions } = {}) {
     this.metaHistory.push({ ...patch });
     return writeJobMeta.call(this, dir, patch);
   };
+  provider.runDelegatedJob = async function (dir) {
+    const before = dispatchCalls.length;
+    await ChatGPTWebProvider.prototype.runDelegatedJob.call(this, dir);
+    assert.equal(dispatchCalls.length, before + 1, 'every terminal job must trigger dispatch exactly once');
+    assert.equal(dispatchCalls.at(-1), 'scheduler.dispatch');
+    assert.ok(fs.existsSync(path.join(dir, 'DONE')), 'dispatch follows a terminal job');
+  };
   return provider;
 }
 
@@ -146,6 +170,7 @@ async function testHappyPathWithWindowsPath() {
   assert.ok(provider.metaHistory.some(patch => /^chatgpt generating \d+ s$/.test(patch.last_event || '')),
     'live progress must be written to last_event');
   assert.equal(provider.busy, false);
+  assert.equal(dispatchCalls.at(-1), 'scheduler.dispatch');
 }
 
 async function testParseErrorIsSentBackAndJobContinues() {
@@ -176,6 +201,7 @@ async function testThreeParseFailuresFailTheJob() {
   assert.equal(meta.exit_code, 1);
   assert.equal(fake.sent.filter(text => text.startsWith('TEAMYRA_TOOL_ERROR')).length, 2);
   assert.equal(fs.readFileSync(path.join(dir, 'DONE'), 'utf8'), 'failed');
+  assert.equal(dispatchCalls.at(-1), 'scheduler.dispatch');
 }
 
 async function testChallengeWhileWaitingPausesAndResendsLostMessage() {
@@ -247,6 +273,34 @@ async function testCancelSetsExitCode() {
   assert.equal(meta.state, 'cancelled');
   assert.equal(meta.reason, 'cancelled');
   assert.equal(meta.exit_code, 1);
+  assert.equal(dispatchCalls.at(-1), 'scheduler.dispatch');
+}
+
+async function testDispatchNeverBlocksAndLogsRejections() {
+  const provider = makeProvider(new FakeChat(['done']));
+  const before = dispatchCalls.length;
+  dispatchResult = () => new Promise(() => {});
+  const dir = makeJob();
+  let timer;
+  try {
+    await Promise.race([
+      provider.runDelegatedJob(dir),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('dispatch blocked completion')), 1000); })
+    ]);
+    assert.equal(dispatchCalls.length, before + 1);
+    assert.equal(readMeta(dir).state, 'done');
+    dispatchResult = () => Promise.reject(new Error('dispatch unavailable'));
+    await provider.runDelegatedJob(makeJob());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(String(dispatchErrors.at(-1)), /dispatch unavailable/);
+    dispatchResult = () => { throw new Error('sync dispatch error'); };
+    provider.dispatchQueuedJobs();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(String(dispatchErrors.at(-1)), /sync dispatch error/);
+  } finally {
+    clearTimeout(timer);
+    dispatchResult = () => Promise.resolve({ dispatched: [] });
+  }
 }
 
 async function testWorkerChallengedBeforePickupMarksWaitingJobs() {
@@ -288,6 +342,7 @@ async function main() {
     await testChallengeBeforeSending();
     await testDeadlineWhilePausedFailsWithTimeout();
     await testCancelSetsExitCode();
+    await testDispatchNeverBlocksAndLogsRejections();
     await testWorkerChallengedBeforePickupMarksWaitingJobs();
     console.log('chatgpt job loop tests passed');
   } finally {

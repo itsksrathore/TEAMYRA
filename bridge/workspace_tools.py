@@ -1117,7 +1117,7 @@ class WorkspaceToolService:
             raise PermissionError(
                 "arguments with shell metacharacters cannot be passed to batch-file launchers in the sandbox"
             )
-        timeout = max(1, min(int(args.get("timeout_seconds", 60)), 120))
+        timeout = max(1, min(int(args.get("timeout_seconds", 60)), 1800))
         cp = subprocess.run(
             [executable, *run_argv[1:]],
             cwd=str(cwd),

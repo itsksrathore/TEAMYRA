@@ -4,6 +4,7 @@ const { WebContentsView, Notification } = require('electron');
 const { ChatGPTSessionManager, DEFAULT_CHATGPT_PROFILE_ID } = require('./chatgpt-session-manager');
 const { ChatGPTAutomationAdapter, teamyraError } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
+const { callCore } = require('./core-api');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
 const MAX_TOOL_RESULT_CHARS = 120000;
@@ -826,6 +827,13 @@ class ChatGPTWebProvider {
     }
   }
 
+  dispatchQueuedJobs() {
+    // Job completion must never wait for (or fail because of) queue dispatch.
+    Promise.resolve().then(() => callCore('scheduler.dispatch')).catch(error => {
+      console.error('ChatGPT queue dispatch failed:', error);
+    });
+  }
+
   async runDelegatedJob(jobDir) {
     this.busy = true;
     this.activeJobDir = jobDir;
@@ -984,6 +992,7 @@ class ChatGPTWebProvider {
       await this.setInteractionLocked(false).catch(() => {});
       this.activeJobDir = null;
       this.busy = false;
+      this.dispatchQueuedJobs();
       await this.refreshStatus().catch(() => {});
     }
   }

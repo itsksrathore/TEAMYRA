@@ -302,7 +302,18 @@ def patch_job_meta(job_id, **changes):
     meta["updated"] = time.time()
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:  # Windows readers/writers may briefly hold meta.json
+            if attempt == 19:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.05)
     return meta
 
 

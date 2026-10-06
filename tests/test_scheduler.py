@@ -51,6 +51,39 @@ class Spawned:
 
 
 class DispatchTests(unittest.TestCase):
+    def test_server_meta_replace_retries_transient_permission_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "active")
+            replace = os.replace
+            attempts = []
+            def transient(source, target):
+                attempts.append(source)
+                if len(attempts) < 3:
+                    raise PermissionError("reader holds file")
+                replace(source, target)
+            with patch.object(server, "JOBS", Path(td) / "jobs"), \
+                 patch.object(server.os, "replace", side_effect=transient), \
+                 patch.object(server.time, "sleep") as sleep:
+                result = server.patch_job_meta("active", last_event="updated")
+            self.assertEqual(result["last_event"], "updated")
+            self.assertEqual(read_meta(td, "active")["last_event"], "updated")
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(list((Path(td) / "jobs" / "active").glob("*.tmp-*")), [])
+
+    def test_server_meta_replace_exhaustion_cleans_temp_and_preserves_original(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "active")
+            with patch.object(server, "JOBS", Path(td) / "jobs"), \
+                 patch.object(server.os, "replace", side_effect=PermissionError("locked")) as replace, \
+                 patch.object(server.time, "sleep") as sleep:
+                with self.assertRaises(PermissionError):
+                    server.patch_job_meta("active", state="failed")
+            self.assertEqual(replace.call_count, 20)
+            self.assertEqual(sleep.call_count, 19)
+            self.assertEqual(read_meta(td, "active")["state"], "running")
+            self.assertEqual(list((Path(td) / "jobs" / "active").glob("*.tmp-*")), [])
+
     def test_free_worker_gets_oldest_queued_job(self):
         with tempfile.TemporaryDirectory() as td:
             write_job(td, "old", state="done", done=True, created=1)

@@ -33,6 +33,10 @@ def _bridge_token(payload):
 def handle(action, payload):
     payload = payload if isinstance(payload, dict) else {}
 
+    if action == "scheduler.dispatch":
+        import scheduler
+        return scheduler.dispatch_once(ROOT, BRIDGE, sys.executable)
+
     if action == "task.start":
         import server
         task = str(payload.get("task") or "").strip()

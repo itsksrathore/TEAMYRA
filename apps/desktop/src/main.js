@@ -918,7 +918,12 @@ ipcMain.handle('teamyra:chatgpt-workspace-configure', async (event, workspace, p
     const answer = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
     if (answer.response !== 1) return { cancelled: true };
   }
-  return provider.workspaceBridge.configure(String(workspace || ''), requested);
+  const access = {};
+  for (const key of ELEVATED_CHATGPT_PERMISSIONS) {
+    if (Object.prototype.hasOwnProperty.call(requested, key)) access[key] = requested[key] === true;
+    delete requested[key];
+  }
+  return provider.workspaceBridge.configure(String(workspace || ''), requested, access);
 });
 ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
