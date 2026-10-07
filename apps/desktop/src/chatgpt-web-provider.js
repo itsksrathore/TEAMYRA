@@ -10,6 +10,7 @@ const CHATGPT_HOME = 'https://chatgpt.com/';
 const MAX_TOOL_RESULT_CHARS = 120000;
 const MAX_TOOL_STEPS = 256;
 const MAX_TOOL_PARSE_FAILURES = 3;
+const MAX_PROTOCOL_RECOVERIES = 2;
 const CHALLENGE_POLL_MS = 3000;
 const PROGRESS_INTERVAL_MS = 30000;
 const VERIFICATION_MESSAGE = 'ChatGPT asks for human verification. Open TEAMYRA Desktop, select the ChatGPT worker and complete the check; the job resumes automatically.';
@@ -38,6 +39,36 @@ function safeHttps(url) {
 
 function safePopupUrl(url) {
   return url === 'about:blank' || safeHttps(url);
+}
+
+function missingExpectedOutputs(workspace, paths = []) {
+  if (!Array.isArray(paths)) throw teamyraError('Invalid expect_files contract', 'TEAMYRA_MISSING_OUTPUT', 'missing_output');
+  return paths.filter(value => {
+    try {
+      if (typeof value !== 'string' || !value.trim() || path.win32.parse(value).root ||
+          value.replace(/\\/g, '/').split('/').includes('..')) return true;
+      const file = path.resolve(workspace, value.replace(/\\/g, '/'));
+      const relative = path.relative(fs.realpathSync(workspace), fs.realpathSync(file));
+      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return true;
+      const stat = fs.statSync(file);
+      return !stat.isFile() || stat.size === 0;
+    } catch { return true; }
+  });
+}
+
+function looksLikeProtocolLoss(text, successfulTools) {
+  const reply = String(text || '').replace(/[’‘]/g, "'");
+  const refusal = /\b(?:I|we)\s+(?:(?:do not|don't)\s+have\s+access|(?:can(?:not|'t)|am unable to|are unable to)\s+(?:directly\s+)?(?:access|read|write|edit|modify|inspect|open|use))\b[^.!?\n]*(?:files?|filesystem|workspace|repository|repo|local|tools?|TEAMYRA)/i.test(reply);
+  const unavailable = /\b(?:TEAMYRA(?:\s+tool)?\s+(?:interface|tools?)|local\s+tools?|tool\s+interface)\b[^.!?\n]*(?:not\s+(?:available|accessible|enabled)|unavailable|missing|disabled|don't\s+have|do\s+not\s+have)/i.test(reply) ||
+    /\b(?:don't|do not)\s+have\b[^.!?\n]*(?:TEAMYRA|local tools|tool interface)/i.test(reply);
+  const paste = /\b(?:please\s+)?(?:paste|upload|provide|share)\b[^.!?\n]*(?:files?|file contents|source code|repository|repo|code here)/i.test(reply) &&
+    !/\b(?:pasted|uploaded|provided|shared)\b/i.test(reply);
+  if (!(refusal || unavailable || paste)) return false;
+  // A completed result may discuss a resolved access error. Require actual
+  // successful tool work before accepting that kind of completion claim.
+  const completed = /(?:^|\n)\s*(?:done\b|finished\b|completed\b|implemented\b|fixed\b|I (?:have |successfully )?(?:completed|implemented|fixed)\b)/i.test(reply);
+  const unfinished = /\b(?:cannot|can't|unable to)\s+(?:complete|finish)|\b(?:task|work)\s+(?:is\s+)?(?:unfinished|incomplete)/i.test(reply);
+  return unfinished || !successfulTools || !completed;
 }
 
 class ChatGPTWebProvider {
@@ -896,12 +927,15 @@ class ChatGPTWebProvider {
         'When the task is complete, reply normally with the final result and do not include the TEAMYRA_TOOL_REQUEST marker.',
         '',
         'WORKSPACE: ' + spec.cwd,
+        'EXPECTED OUTPUT FILES (must exist and be non-empty): ' + JSON.stringify(spec.expect_files || []),
         'TASK:',
         task
       ].join('\n');
 
       let reply = await this.jobExchange(job, bootstrap);
       let parseFailures = 0;
+      let protocolRecoveries = 0;
+      let successfulTools = 0;
 
       for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
         if (job.isCancelled()) {
@@ -911,6 +945,24 @@ class ChatGPTWebProvider {
         }
         const parsed = this.automation.parseToolRequestDetailed(reply.text);
         if (!parsed.marker) {
+          if (looksLikeProtocolLoss(reply.text, successfulTools)) {
+            if (protocolRecoveries >= MAX_PROTOCOL_RECOVERIES) {
+              reason = 'protocol_lost';
+              throw new Error('ChatGPT lost the TEAMYRA tool protocol after two reminders');
+            }
+            protocolRecoveries += 1;
+            this.appendJobEvent(jobDir, 'protocol_recovery', `protocol reminder ${protocolRecoveries}/${MAX_PROTOCOL_RECOVERIES}: ${reply.text}`);
+            this.writeJobMeta(jobDir, { protocol_recoveries: protocolRecoveries, last_event: 'restoring TEAMYRA tool protocol' });
+            reply = await this.jobExchange(job, 'TEAMYRA protocol reminder: the task is not finished. The text tool bridge is available. Continue through TEAMYRA_TOOL_REQUEST.\n\n' + bootstrap);
+            continue;
+          }
+          this.checkJobActive(job);
+          const missing = missingExpectedOutputs(assignedWorkspace, spec.expect_files);
+          if (missing.length) {
+            reason = 'missing_output';
+            this.writeJobMeta(jobDir, { missing_outputs: missing });
+            throw new Error('Expected outputs missing or empty: ' + missing.join(', '));
+          }
           const conversation = await this.getCurrentConversation();
           this.saveWorkerConversation(conversation);
           fs.writeFileSync(path.join(jobDir, 'final.txt'), reply.text || '', 'utf8');
@@ -960,6 +1012,7 @@ class ChatGPTWebProvider {
         } catch (error) {
           toolResult = { ok: false, error: String(error?.message || error) };
         }
+        if (toolResult?.ok !== false) successfulTools += 1;
         const rawToolResult = JSON.stringify(toolResult);
         const boundedToolResult = rawToolResult.length <= MAX_TOOL_RESULT_CHARS
           ? toolResult

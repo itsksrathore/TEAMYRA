@@ -1,4 +1,4 @@
-"""Per-worker FIFO job queue for TEAMYRA.
+"""Per-worker FIFO queues with optional provider pooling for TEAMYRA.
 
 A job created with queue=true while its worker already has an active job is
 persisted in state ``queued`` (jobs/<id>/meta.json, with ``queue_position``)
@@ -23,6 +23,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from worker_registry import build_worker_registry
 
 QUEUED = "queued"
 # A worker with a job in one of these states (and no DONE file) is busy.
@@ -73,6 +74,67 @@ def _write_meta(job_dir, meta):
                 raise
             time.sleep(0.05)
     return meta
+
+
+def _write_spec(job_dir, spec):
+    path = Path(job_dir) / "spec.json"
+    tmp = path.with_name(path.name + f".tmp-sched-{uuid.uuid4().hex}")
+    try:
+        tmp.write_text(json.dumps(spec, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def chatgpt_ready(root, info):
+    """A pool recipient must have a fresh, ready desktop account."""
+    status = _read_json(Path(root) / "chatgpt" / "status.json") or {}
+    if time.time() - float(status.get("heartbeat_at") or 0) > 20:
+        return False
+    profile = str(info.get("profile_id") or "web")
+    account = (status.get("profiles") or {}).get(profile) or {}
+    if profile == str(status.get("active_profile_id") or "web"):
+        return bool(status.get("worker_ready") or account.get("automation_ready") or account.get("session_present"))
+    return bool(account.get("automation_ready") or account.get("session_present"))
+
+
+def _reassign_job(root, meta, worker, info):
+    """Publish spec before meta while the dispatch lock protects the pair.
+
+    Desktop consumers only read dispatched metas; both files are replaced before
+    the state can leave queued. If publishing meta fails, restore the old spec.
+    """
+    job_dir = _jobs_dir(root) / meta["id"]
+    fresh = _read_json(job_dir / "meta.json")
+    spec = _read_json(job_dir / "spec.json")
+    if not isinstance(fresh, dict) or not isinstance(spec, dict) or not is_queued(fresh):
+        return False
+    if fresh.get("pin") or spec.get("pin") or (job_dir / "DONE").exists():
+        return False
+    old_worker = fresh["worker"]
+    updated_spec = dict(spec, worker=worker, profile_id=info.get("profile_id"))
+    # Preserve the job's command/settings, but use the recipient's account.
+    env = dict(spec.get("env") or {})
+    if fresh.get("provider") == "codex":
+        env["CODEX_HOME"] = str(info["home"])
+    elif fresh.get("provider") == "claude":
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        if not info.get("native"):
+            env["CLAUDE_CONFIG_DIR"] = str(info["home"])
+    updated_spec["env"] = env
+    previous = list(fresh.get("previous_workers") or [])
+    previous.append(old_worker)
+    fresh.update(worker=worker, worker_label=info.get("label"), profile_id=info.get("profile_id"),
+                 previous_workers=previous)
+    _write_spec(job_dir, updated_spec)
+    try:
+        _write_meta(job_dir, fresh)
+    except Exception:
+        _write_spec(job_dir, spec)
+        raise
+    _append_event(job_dir, "pool_reassigned", f"pool reassigned {old_worker} -> {worker}")
+    meta.update(fresh)
+    return True
 
 
 def patch_meta(root, job_id, **changes):
@@ -343,7 +405,7 @@ def _dispatch_job(root, meta, spawn):
 
 
 def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None, workers=None,
-                  lock_timeout=LOCK_WAIT_SECONDS):
+                  lock_timeout=LOCK_WAIT_SECONDS, registry=None):
     """Start the oldest queued job of every free worker. Safe to call concurrently."""
     root = Path(root)
     report = {"dispatched": [], "waiting": [], "skipped": None}
@@ -356,14 +418,31 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
         return report
     try:
         metas = load_jobs(root)
-        names = sorted({m.get("worker") for m in metas if is_queued(m) and m.get("worker")})
+        registry = build_worker_registry(root) if registry is None else registry
+        names = sorted({m.get("worker") for m in metas if is_queued(m) and m.get("worker")} |
+                       {w for w, info in registry.items() if info.get("enabled", True)})
         if workers is not None:
             wanted = set(workers)
             names = [w for w in names if w in wanted]
+        # Give idle owners their own work before offering spare capacity to
+        # other queues. Busy/not-ready owners leave their jobs in the pool.
+        names.sort(key=lambda w: (not queued_jobs(root, w, metas), w))
         for worker in names:
             rows = queued_jobs(root, worker, metas)
+            info = registry.get(worker) or {}
+            borrowed = False
             if not rows:
-                continue
+                # Own queues take precedence. Across queues, creation time is
+                # comparable; queue_order is only meaningful within one worker.
+                rows = [m for m in metas if is_queued(m) and m.get("worker") != worker
+                        and m.get("provider") == info.get("provider") and not m.get("pin")
+                        and (m.get("provider") == "chatgpt-web" or m.get("pool") is True)
+                        and registry.get(m.get("worker"), {}).get("provider") == info.get("provider")]
+                rows.sort(key=lambda m: (float(m.get("queued_at") or m.get("created") or 0),
+                                         str(m.get("id"))))
+                borrowed = True
+                if not rows:
+                    continue
             reason = None
             if worker_busy(root, worker, metas):
                 reason = "busy"
@@ -374,8 +453,16 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
                     if not is_ready(worker):
                         reason = "not_ready"
                 except Exception:
-                    reason = None
+                    reason = "not_ready"
+            elif borrowed:
+                if info.get("provider") == "chatgpt-web" and not chatgpt_ready(root, info):
+                    reason = "not_ready"
             if reason is None:
+                if borrowed:
+                    old_worker = rows[0]["worker"]
+                    if not _reassign_job(root, rows[0], worker, info):
+                        continue
+                    _renumber(root, old_worker, load_jobs(root))
                 result = _dispatch_job(root, rows[0], spawn)
                 if result:
                     report["dispatched"].append(result)

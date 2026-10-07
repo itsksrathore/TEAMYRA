@@ -702,6 +702,8 @@ def _job_brief(meta, now=None):
         "elapsed_s": elapsed,
         "last_event": _clip(meta.get("last_event"), 300) or None,
         "attention": meta.get("attention"),
+        "expect_files": meta.get("expect_files", []),
+        "missing_outputs": meta.get("missing_outputs", []),
     }
 
 
@@ -769,11 +771,13 @@ def team_report(root, worker_rows=None, recent=5, project_path=None):
             "current_job": _job_brief(active[0], now) if active else None,
             "other_active_jobs": [m.get("id") for m in active[1:]],
             "queue": [{"id": m.get("id"), "label": m.get("label"), "position": index,
+                       "expect_files": m.get("expect_files", []),
                        "wait_s": int(now - float(m.get("queued_at") or m.get("created") or now))}
                       for index, m in enumerate(queued, 1)],
             "recent_jobs": [{
                 "id": m.get("id"), "label": m.get("label"), "state": m.get("state"),
                 "reason": m.get("reason"), "exit_code": m.get("exit_code"), "ended": m.get("ended"),
+                "expect_files": m.get("expect_files", []), "missing_outputs": m.get("missing_outputs", []),
             } for m in finished[:recent]],
             "usage": {
                 "jobs": usage_row.get("jobs", 0),

@@ -23,6 +23,7 @@ import recovery
 import scheduler
 import media_engine
 import desktop_runtime
+from expected_outputs import validate_expect_files
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -245,6 +246,9 @@ def refresh_worker_auth_all():
 
 def scheduler_worker_ready(worker):
     """Dispatch gate for the background scheduler: never probes, never blocks."""
+    info = worker_registry().get(worker) or {}
+    if info.get("provider") == "chatgpt-web":
+        return scheduler.chatgpt_ready(jobs_root(), info)
     entry = AUTH_CACHE.get(worker)
     if not entry:
         return True
@@ -496,16 +500,17 @@ def scheduler_spawn(job_dir, meta):
 def dispatch_queue(workers=None):
     """Start the oldest queued job of every free worker (see scheduler.dispatch_once)."""
     return scheduler.dispatch_once(jobs_root(), BRIDGE, PYTHON, spawn=scheduler_spawn,
-                                   is_ready=scheduler_worker_ready, workers=workers)
+                                   is_ready=scheduler_worker_ready, workers=workers, registry=worker_registry())
 
 
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
-              queue=False):
+              queue=False, pin=False, pool=False, expect_files=None):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
+    expect_files = validate_expect_files(cwd, expect_files)
     requested_worker = worker
     worker = pick_worker(worker)
     registry = worker_registry()
@@ -557,10 +562,13 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             "parent": parent, "resumed_session": session_id, "timeout_s": timeout,
             "failover_root": root_id, "failover_attempt": int(failover_attempt),
             "previous_workers": list(previous_workers or []),
-            "auto_failover_enabled": bool(auto_failover), "max_failovers": max_failovers}
+            "auto_failover_enabled": bool(auto_failover), "max_failovers": max_failovers,
+            "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files}
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "task.txt").write_text(task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
+                                                 "profile_id": worker_info.get("profile_id"), "write": write,
+                                                 "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
                                                  "timeout": timeout, "final_path": str(final_path),
                                                  "session_id": session_id,
                                                  "resume_cmd": resume_cmd,
@@ -575,7 +583,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
         # never start two jobs on one worker or one job twice.
         scheduler.enqueue(jobs_root(), job_id, worker)
         try:
-            dispatch_queue(workers=[worker])
+            dispatch_queue()
         except Exception as exc:
             print("TEAMYRA dispatch error:", exc, file=sys.stderr, flush=True)
     elif provider == "chatgpt-web":
@@ -603,7 +611,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             patch_job_meta(job_id, failover_monitor_pid=failover_proc.pid)
         finally:
             monitor_log.close()
-    return job_id, worker
+    return job_id, read_meta(job_id).get("worker", worker)
 
 
 def failover_task(meta, original_task):
@@ -651,6 +659,8 @@ def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2
         root_id,
         previous,
         False,
+        expect_files=meta.get("expect_files", []),
+        pin=meta.get("pin", False), pool=meta.get("pool", False),
     )
     patch_job_meta(
         job_id,
@@ -665,6 +675,7 @@ def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2
 def summary(m, events=True):
     out = {k: m.get(k) for k in ("id", "label", "worker", "provider", "state", "reason", "branch", "session_id",
                                  "exit_code", "attention", "queue_position", "last_event", "parent",
+                                 "expect_files", "missing_outputs", "pin", "pool",
                                  "failover_root", "failover_attempt",
                                  "failover_job_id", "failover_worker", "failover_complete")}
     start = m.get("started") or m.get("dispatched_at") or m.get("created")
@@ -1380,12 +1391,16 @@ TOOLS = [
         "process with a live transcript. Follow it with job_wait, job_status/job_events, or run the returned "
         "follow_command as a background task (its exit signals completion). worker=auto picks the first idle "
         "worker without a usage cooldown in the configured order. With queue=true (default) a busy worker gets "
-        "the job as state queued with queue_position; TEAMYRA starts it automatically when the worker is free."),
+        "the job as state queued with queue_position. ChatGPT queues are shared unless pin=true; other "
+        "providers share within their provider only with pool=true. expect_files requires non-empty output files."),
      "inputSchema": {"type": "object", "properties": {
          "worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
          "label": {"type": "string", "description": "short name shown in lists and the dashboard"},
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
          "write": {"type": "boolean", "default": True},
+         "pin": {"type": "boolean", "default": False, "description": "Keep the job on its assigned worker."},
+         "pool": {"type": "boolean", "default": False, "description": "Allow idle workers of the same provider to take this queued job."},
+         "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
          "auto_failover": {"type": "boolean", "description": "Automatically reassign eligible provider/worker failures. Defaults on when worker=auto."},
          "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5},
          "queue": {"type": "boolean", "default": True,
@@ -1469,6 +1484,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
                      "write": {"type": "boolean", "default": True},
+                     "pin": {"type": "boolean", "default": False},
+                     "pool": {"type": "boolean", "default": False},
+                     "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
                      "auto_failover": {"type": "boolean", "description": "Defaults on when worker=auto."},
                      "max_failovers": {"type": "integer", "default": 2, "minimum": 0, "maximum": 5},
                      "queue": {"type": "boolean", "default": True,
@@ -1751,6 +1769,7 @@ def tool_call(name, a):
             a.get("timeout_minutes", 90), a.get("write", True),
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
+            pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
         )
         result = {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
         try:
@@ -1901,6 +1920,7 @@ def tool_call(name, a):
             a.get("timeout_minutes", int(config().get("job_timeout_minutes", 180))), a.get("write", True),
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
+            pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
         res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}

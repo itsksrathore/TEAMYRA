@@ -174,6 +174,137 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual((meta["state"], meta["reason"], meta["exit_code"]), ("failed", "dispatch_error", 1))
 
 
+class PoolDispatchTests(unittest.TestCase):
+    registry = {
+        "chat-a": {"provider": "chatgpt-web", "label": "Account A", "profile_id": "a"},
+        "chat-b": {"provider": "chatgpt-web", "label": "Account B", "profile_id": "b"},
+        "chat-c": {"provider": "chatgpt-web", "label": "Account C", "profile_id": "c"},
+        "codex-a": {"provider": "codex", "label": "Codex A", "home": "C:/a", "profile_id": "a"},
+        "codex-b": {"provider": "codex", "label": "Codex B", "home": "C:/b", "profile_id": "b"},
+    }
+
+    def dispatch(self, root, **kwargs):
+        return scheduler.dispatch_once(root, registry=self.registry, is_ready=lambda w: True,
+                                       spawn=Spawned(), **kwargs)
+
+    def test_idle_account_takes_oldest_and_rewrites_spec_and_timeline(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "active", worker="chat-a", provider="chatgpt-web")
+            write_job(td, "newer", worker="chat-a", provider="chatgpt-web", state="queued", created=30, queue_order=1)
+            job = write_job(td, "oldest", worker="chat-a", provider="chatgpt-web", state="queued", created=20,
+                            queue_order=9, previous_workers=["earlier"], profile_id="a")
+            report = self.dispatch(td, workers=["chat-b"])
+            self.assertEqual([r["job_id"] for r in report["dispatched"]], ["oldest"])
+            meta = read_meta(td, "oldest")
+            self.assertEqual((meta["worker"], meta["worker_label"], meta["profile_id"]), ("chat-b", "Account B", "b"))
+            self.assertEqual(meta["previous_workers"], ["earlier", "chat-a"])
+            spec = json.loads((job / "spec.json").read_text())
+            self.assertEqual((spec["worker"], spec["profile_id"]), ("chat-b", "b"))
+            self.assertIn("pool_reassigned", (job / "events.jsonl").read_text())
+            self.assertEqual(read_meta(td, "newer")["queue_position"], 1)
+
+    def test_own_queue_precedes_pool(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "foreign", worker="chat-a", provider="chatgpt-web", state="queued", created=1)
+            write_job(td, "own", worker="chat-b", provider="chatgpt-web", state="queued", created=10)
+            self.dispatch(td, workers=["chat-b"])
+            self.assertEqual(read_meta(td, "own")["state"], "waiting_for_desktop")
+            self.assertEqual(read_meta(td, "foreign")["state"], "queued")
+
+    def test_pinned_jobs_and_other_providers_stay_put(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "pinned", worker="chat-a", provider="chatgpt-web", state="queued", pin=True, pool=True)
+            write_job(td, "strict", worker="codex-a", state="queued")
+            self.dispatch(td, workers=["chat-b", "codex-b"])
+            for job in ("pinned", "strict"):
+                self.assertEqual(read_meta(td, job)["state"], "queued")
+
+    def test_explicit_pool_uses_same_provider_and_recipient_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = write_job(td, "shared", worker="codex-a", state="queued", pool=True)
+            self.dispatch(td, workers=["chat-b"])
+            self.assertEqual(read_meta(td, "shared")["state"], "queued")
+            self.dispatch(td, workers=["codex-b"])
+            self.assertEqual(read_meta(td, "shared")["worker"], "codex-b")
+            self.assertEqual(json.loads((job / "spec.json").read_text())["env"]["CODEX_HOME"], "C:/b")
+
+    def test_free_owner_dispatches_before_other_accounts_borrow(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "own", worker="chat-c", provider="chatgpt-web", state="queued")
+            self.dispatch(td)
+            self.assertEqual(read_meta(td, "own")["worker"], "chat-c")
+
+    def test_explicit_cli_pool_also_works_without_readiness_callback(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "busy", worker="codex-a")
+            write_job(td, "shared", worker="codex-a", state="queued", pool=True)
+            scheduler.dispatch_once(td, registry=self.registry, spawn=Spawned())
+            self.assertEqual(read_meta(td, "shared")["worker"], "codex-b")
+
+    def test_failed_meta_publish_restores_spec_and_does_not_dispatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = write_job(td, "queued", worker="chat-a", provider="chatgpt-web", state="queued")
+            original = (job / "spec.json").read_text()
+            with patch.object(scheduler, "_write_meta", side_effect=OSError("disk error")):
+                with self.assertRaises(OSError):
+                    self.dispatch(td, workers=["chat-b"])
+            self.assertEqual(json.loads((job / "spec.json").read_text()), json.loads(original))
+            self.assertEqual(read_meta(td, "queued")["worker"], "chat-a")
+            self.assertEqual(read_meta(td, "queued")["state"], "queued")
+
+    def test_busy_cooldown_disabled_and_not_ready_recipients_do_not_borrow(self):
+        for gate in ("busy", "cooldown", "disabled", "not_ready", "probe_error"):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as td:
+                write_job(td, "queued", worker="chat-a", provider="chatgpt-web", state="queued")
+                registry = {k: dict(v) for k, v in self.registry.items()}
+                if gate == "busy":
+                    write_job(td, "busy", worker="chat-b", provider="chatgpt-web")
+                if gate == "cooldown":
+                    write_job(td, "limited", worker="chat-b", provider="chatgpt-web", state="failed", done=True,
+                              reason="usage_or_rate_limit", ended=time.time())
+                if gate == "disabled":
+                    registry["chat-b"]["enabled"] = False
+                def ready(worker):
+                    if gate == "probe_error":
+                        raise RuntimeError("probe unavailable")
+                    return gate != "not_ready"
+                scheduler.dispatch_once(td, registry=registry, is_ready=ready, workers=["chat-b"])
+                self.assertEqual(read_meta(td, "queued")["worker"], "chat-a")
+
+    def test_default_dispatch_discovers_ready_desktop_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            profile = Path(td) / "profiles" / "chatgpt-web" / "second"
+            profile.mkdir(parents=True)
+            status = Path(td) / "chatgpt"
+            status.mkdir()
+            (status / "status.json").write_text(json.dumps({"heartbeat_at": time.time(),
+                "profiles": {"second": {"session_present": True}}}))
+            write_job(td, "busy", worker="chatgpt-normal", provider="chatgpt-web")
+            write_job(td, "queued", worker="chatgpt-normal", provider="chatgpt-web", state="queued")
+            scheduler.dispatch_once(td)
+            self.assertEqual(read_meta(td, "queued")["worker"], "chatgpt-second")
+
+    def test_concurrent_pool_dispatch_does_not_duplicate_jobs_or_workers(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "busy", worker="chat-a", provider="chatgpt-web")
+            for i in range(3):
+                write_job(td, f"q{i}", worker="chat-a", provider="chatgpt-web", state="queued", created=i)
+            barrier = threading.Barrier(6)
+            reports = []
+            def dispatch():
+                barrier.wait()
+                reports.append(self.dispatch(td))
+            threads = [threading.Thread(target=dispatch) for _ in range(6)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+            dispatched = [r for report in reports for r in report["dispatched"]]
+            self.assertEqual(len(dispatched), 2)
+            self.assertEqual(len({r["job_id"] for r in dispatched}), 2)
+            self.assertEqual({r["worker"] for r in dispatched}, {"chat-b", "chat-c"})
+
+
 class DoubleDispatchTests(unittest.TestCase):
     def test_concurrent_threads_start_a_queued_job_only_once(self):
         with tempfile.TemporaryDirectory() as td:
@@ -307,6 +438,7 @@ class ServerQueueTests(unittest.TestCase):
             patch.object(server, "JOBS", jobs),
             patch.object(server, "worker_registry", return_value=self.registry),
             patch.object(server, "worker_auth_status", return_value=(True, "ready")),
+            patch.object(server, "scheduler_worker_ready", return_value=True),
             patch.object(server, "worker_settings", return_value={}),
             patch.object(server, "cooldown_left", return_value=0),
             patch.object(server, "git", return_value="head"),

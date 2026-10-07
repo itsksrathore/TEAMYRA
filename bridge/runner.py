@@ -14,6 +14,7 @@ stop the job.
 """
 import json, os, subprocess, sys, threading, time
 from pathlib import Path
+from expected_outputs import missing_outputs
 
 LIMIT_MARKERS = ["rate limit", "usage limit", "quota", "too many requests",
                  "resource exhausted", "limit reached", "insufficient quota"]
@@ -346,6 +347,12 @@ class Job:
             state, reason = "failed", "worker_error"
         else:
             state, reason = "done", None
+        if state == "done":
+            missing = missing_outputs(spec["cwd"], spec.get("expect_files", self.meta.get("expect_files", [])))
+            if missing:
+                state, reason = "failed", "missing_output"
+                self.save_meta(missing_outputs=missing)
+                self.emit("error", "Expected outputs missing or empty: " + ", ".join(missing))
         if reason and err.strip():
             self.emit("error", clip(err.strip().splitlines()[-1], 400))
         self.emit("done", f"{state}{' (' + reason + ')' if reason else ''}, exit {rc}, "

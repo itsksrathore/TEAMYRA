@@ -204,6 +204,73 @@ async function testThreeParseFailuresFailTheJob() {
   assert.equal(dispatchCalls.at(-1), 'scheduler.dispatch');
 }
 
+async function testProtocolLossRecoversAndRetriesAreBounded() {
+  const refusals = [
+    'The TEAMYRA tool interface is not available in this chat. Please paste the files.',
+    "I cannot access local files. Please upload the file contents.",
+    "I don't have access to the TEAMYRA tool interface or local tools."
+  ];
+  for (const refusal of refusals) {
+    const fake = new FakeChat([refusal,
+      'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"a.txt"}}',
+      'Finished: the requested file contains hello.']);
+    const provider = makeProvider(fake);
+    const dir = makeJob();
+    await provider.runDelegatedJob(dir);
+    assert.equal(readMeta(dir).state, 'done');
+    assert.equal(readMeta(dir).protocol_recoveries, 1);
+    assert.ok(fake.sent[1].startsWith('TEAMYRA protocol reminder:'));
+    assert.ok(fake.sent[1].includes(fake.sent[0]), 'reminder includes original bootstrap and task');
+    assert.equal(provider.toolCalls.length, 1);
+  }
+  const fake = new FakeChat([...refusals, 'never reached']);
+  const dir = makeJob();
+  await makeProvider(fake).runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'protocol_lost');
+  assert.equal(meta.exit_code, 1);
+  assert.equal(meta.protocol_recoveries, 2);
+  assert.equal(fake.sent.length, 3);
+  assert.equal(fs.readFileSync(path.join(dir, 'DONE'), 'utf8'), 'failed');
+}
+
+async function testProtocolRecoveryAfterToolsAndGenuineFinalAnswers() {
+  const request = 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"a.txt"}}';
+  const fake = new FakeChat([request, 'Local tools are not available. I cannot finish the task.',
+    'Finished: the file contains hello.']);
+  const dir = makeJob();
+  await makeProvider(fake).runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.equal(readMeta(dir).protocol_recoveries, 1);
+  for (const script of [['The requested summary is complete.'],
+    [request, 'Fixed the error: local tools are not available. Tests passed.']]) {
+    const finalFake = new FakeChat(script);
+    const finalDir = makeJob();
+    await makeProvider(finalFake).runDelegatedJob(finalDir);
+    assert.equal(readMeta(finalDir).state, 'done');
+    assert.equal(readMeta(finalDir).protocol_recoveries, undefined);
+  }
+}
+
+async function testExpectedOutputFiles() {
+  fs.writeFileSync(path.join(root, 'empty.txt'), '');
+  fs.writeFileSync(path.join(root, 'ready.txt'), 'content');
+  fs.mkdirSync(path.join(root, 'output-directory'));
+  for (const [paths, passed] of [
+    [[], true], [['ready.txt'], true], [['missing.txt'], false], [['empty.txt'], false],
+    [['output-directory'], false], [['ready.txt', 'missing.txt'], false], [['../outside.txt'], false]
+  ]) {
+    const dir = makeJob({ expect_files: paths });
+    await makeProvider(new FakeChat(['Finished: created all requested outputs.'])).runDelegatedJob(dir);
+    const meta = readMeta(dir);
+    assert.equal(meta.state, passed ? 'done' : 'failed');
+    assert.equal(meta.reason, passed ? null : 'missing_output');
+    assert.equal(meta.exit_code, passed ? 0 : 1);
+    if (!passed) assert.ok(meta.missing_outputs.length);
+  }
+}
+
 async function testChallengeWhileWaitingPausesAndResendsLostMessage() {
   const fake = new FakeChat([
     { text: 'lost', challenge: { snaps: 1, probes: 3, lose: true } },
@@ -337,6 +404,9 @@ async function main() {
     await testHappyPathWithWindowsPath();
     await testParseErrorIsSentBackAndJobContinues();
     await testThreeParseFailuresFailTheJob();
+    await testProtocolLossRecoversAndRetriesAreBounded();
+    await testProtocolRecoveryAfterToolsAndGenuineFinalAnswers();
+    await testExpectedOutputFiles();
     await testChallengeWhileWaitingPausesAndResendsLostMessage();
     await testChallengeWithDeliveredMessageDoesNotResend();
     await testChallengeBeforeSending();
