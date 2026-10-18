@@ -945,7 +945,7 @@ const BULK_STATE_LABELS = {
   queued: 'Queued', preparing: 'Preparing', waiting_for_browser: 'Preparing', submitting: 'Submitting',
   generating: 'Generating', processing: 'Processing', downloading: 'Downloading', extracting_audio: 'Extracting',
   organizing: 'Saving', completed: 'Done', failed: 'Failed', cancelled: 'Stopped',
-  needs_user_auth: 'Sign in', rate_limited: 'Waiting'
+  needs_user_auth: 'Sign in', rate_limited: 'Waiting', assisted: 'Helper'
 };
 const bulkState = { type: 'video', profileId: 'google', projectPath: '', batchId: '', projectOfBatch: '', timer: null, done: false };
 

@@ -106,6 +106,42 @@ Real teaser batches (~150 jobs) exposed failures that are now handled:
   submission time. DNS/network errors (`ERR_NAME_NOT_RESOLVED`) are retried.
 - Faster turnaround: `download_quality: "source"` skips the upscale wait.
 
+## Media helper agents and issue log
+
+An agent that is stuck on media work reports it instead of retrying:
+
+- `teamyra.media_report_issue({description, job_ids | batch_id, reporter, instructions})`
+  logs the issue, creates a helper ticket and starts a TEAMYRA helper agent.
+  The reported jobs move to state `assisted`; their `recovery_plan` says
+  `wait_for_helper`, so any agent polling them stops retrying. The helper
+  finishes the work by hand and delivers into the **same job ids**: a waiting
+  agent simply sees its job complete with the delivered asset. `take_over:false`
+  only logs the issue.
+- `teamyra.media_delegate({description, project_path, requests, instructions})`
+  hands a whole generation task to a helper, which queues it in bulk, handles
+  refusals and re-downloads, follows the instructions and delivers every item.
+- `teamyra.media_ticket_status` shows the helper, its notes and the deliveries
+  (asset ids and local paths). Helpers use `media_ticket_update` and
+  `media_ticket_deliver`; a failed or cancelled ticket returns undelivered jobs
+  to their reporter as ordinary failures.
+
+Helpers are tried as **Codex 1 → Codex 2 → Antigravity**; Claude workers run
+only when none of those is signed in and free of a usage limit (a busy Codex
+is still preferred, its ticket waits in that worker's queue). The same order
+applies to automatic failover. Helper jobs get the TEAMYRA MCP connection in
+any Codex profile and run in plain (non-Git) project folders; without MCP a
+helper can call any tool through `teamyra tool <name> --json '{...}'`.
+
+Every reported issue and every failed media job (automatically, once per job
+and category) is kept in `media/support/issues/` for maintenance:
+`teamyra.media_issues` groups them by category, and `media_issue_update`
+acknowledges or closes them. Helpers add notes about TEAMYRA bugs they notice.
+
+Live check (2026-10-18): a delegated image ticket failed over from Codex 1 and
+Codex 2 (Codex refused the non-Git folder, now fixed) to Antigravity, which
+noted its plan, generated the image, verified it was 1024 × 1024, delivered it
+and closed the ticket with a summary and a maintenance note.
+
 ## MCP policy and references
 
 `teamyra.media_capabilities` reports the enforced workflow without opening a

@@ -418,6 +418,20 @@ def cmd_worktree(args):
     return 0
 
 
+def cmd_tool(args):
+    """Call any TEAMYRA tool from a shell (for agents without the MCP connection)."""
+    payload = {}
+    if args.file:
+        payload = json.loads(Path(args.file).read_text(encoding="utf-8-sig"))
+    elif args.json:
+        payload = json.loads(args.json)
+    if not isinstance(payload, dict):
+        raise ValueError("tool arguments must be a JSON object")
+    name = args.name[len("teamyra."):] if args.name.startswith("teamyra.") else args.name
+    emit(call(name, payload))
+    return 0
+
+
 def cmd_mcp(args):
     if args.transport == "stdio":
         server.main()
@@ -436,6 +450,12 @@ def parser():
     )
     p.add_argument("--version", action="version", version=f"TEAMYRA {VERSION}")
     sub = p.add_subparsers(dest="command_name", required=True)
+
+    tool = sub.add_parser("tool", help="Call any TEAMYRA tool, e.g. tool media_status --json '{\"job_id\": \"...\"}'")
+    tool.add_argument("name")
+    tool.add_argument("--json", help="Tool arguments as a JSON object")
+    tool.add_argument("--file", help="Path to a JSON file with the tool arguments")
+    tool.set_defaults(func=cmd_tool)
 
     doctor = sub.add_parser("doctor", help="Check worker discovery, auth and core readiness")
     doctor.set_defaults(func=cmd_doctor)

@@ -22,6 +22,7 @@ import mcp_pool
 import recovery
 import scheduler
 import media_engine
+import media_support
 import desktop_runtime
 from expected_outputs import validate_expect_files
 
@@ -388,7 +389,10 @@ def cooldown_left(worker):
 
 
 # --- commands -------------------------------------------------------------------------------
-def codex_cmd(task, cwd, write, final_path, session_id=None, settings=None):
+TEAMYRA_MCP_URL = os.environ.get("TEAMYRA_MCP_URL", "http://127.0.0.1:8787/mcp")
+
+
+def codex_cmd(task, cwd, write, final_path, session_id=None, settings=None, extra_config=None, skip_git_check=False):
     c = settings or config().get("codex", {})
     launch = codex_launch()
     if not launch:
@@ -396,12 +400,17 @@ def codex_cmd(task, cwd, write, final_path, session_id=None, settings=None):
     base = [*launch,
             "-c", f'model="{c.get("model", "gpt-6.1-sol")}"',
             "-c", f'model_reasoning_effort="{c.get("effort", "high")}"']
+    for item in extra_config or []:
+        base += ["-c", item]
     if session_id:  # resume has no --approve-for-me / -C: pass the same settings as config
         policy = (["-c", 'approval_policy="on-request"', "-c", 'approvals_reviewer="auto_review"',
                    "-c", 'sandbox_mode="workspace-write"'] if write else ["-c", 'sandbox_mode="read-only"'])
-        return base + policy + ["exec", "resume", "--json", "-o", str(final_path), session_id, task]
+        # Media helpers work in plain project folders, which are not Git repositories.
+        skip = ["--skip-git-repo-check"] if skip_git_check else []
+        return base + policy + ["exec", "resume", *skip, "--json", "-o", str(final_path), session_id, task]
     mode = ["--approve-for-me"] if write else ["--sandbox", "read-only"]
-    return base + ["exec", "--json", *mode, "-C", str(cwd), "-o", str(final_path), task]
+    skip = ["--skip-git-repo-check"] if skip_git_check else []
+    return base + ["exec", *skip, "--json", *mode, "-C", str(cwd), "-o", str(final_path), task]
 
 
 def claude_cmd(task, cwd, write, session_id=None, settings=None):
@@ -441,18 +450,38 @@ def agy_cmd(task, cwd, write, timeout, session_id=None):
     return cmd
 
 
-def pick_worker(worker, exclude=None):
+def helper_worker_order(registry=None):
+    """Media helpers: Codex 1, Codex 2, Antigravity; Claude only as the last resort."""
+    registry = registry or worker_registry()
+    preferred = [w for w in media_support.HELPER_ORDER if w in registry]
+    claude = sorted(w for w, info in registry.items() if info.get("provider") == "claude")
+    return preferred + claude
+
+
+def helper_last_resort(order):
+    if not order:
+        return None
+    registry = worker_registry()
+    return [w for w in order if (registry.get(w) or {}).get("provider") == "claude"]
+
+
+def pick_worker(worker, exclude=None, order=None, last_resort=None):
     registry = worker_registry()
     exclude = set(exclude or [])
     if worker != "auto":
         return worker
 
-    configured = [w for w in config().get("auto_order", [])
-                  if w in registry and w not in exclude and registry[w].get("enabled", True)]
-    discovered = sorted(
-        (w for w in registry if w not in configured and w not in exclude and registry[w].get("enabled", True)),
-        key=lambda w: (registry[w].get("priority", 100), w),
-    )
+    if order:
+        # An explicit order is a closed list: nothing outside it is tried.
+        configured = [w for w in order if w in registry and w not in exclude]
+        discovered = []
+    else:
+        configured = [w for w in config().get("auto_order", [])
+                      if w in registry and w not in exclude and registry[w].get("enabled", True)]
+        discovered = sorted(
+            (w for w in registry if w not in configured and w not in exclude and registry[w].get("enabled", True)),
+            key=lambda w: (registry[w].get("priority", 100), w),
+        )
     order = configured + discovered
     if not order:
         raise ValueError("no enabled workers are configured or discovered")
@@ -462,6 +491,11 @@ def pick_worker(worker, exclude=None):
     # Busy workers last, the shortest queue first (a stable sort keeps the configured order).
     busy = sorted((w for w in free if w not in idle), key=lambda w: len(running_jobs(w)))
     candidates = idle + busy
+    if last_resort:
+        # Last-resort workers (Claude for media helpers) only when no other one
+        # is free of usage limits and signed in, even if the others are busy.
+        last = set(last_resort)
+        candidates = [w for w in candidates if w not in last] + [w for w in candidates if w in last]
     for candidate in candidates:
         ready, _ = worker_auth_status(registry[candidate])
         if ready:
@@ -506,13 +540,13 @@ def dispatch_queue(workers=None):
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
-              queue=False, pin=False, pool=False, expect_files=None):
+              queue=False, pin=False, pool=False, expect_files=None, worker_order=None, teamyra_mcp=False):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
     expect_files = validate_expect_files(cwd, expect_files)
     requested_worker = worker
-    worker = pick_worker(worker)
+    worker = pick_worker(worker, order=worker_order, last_resort=helper_last_resort(worker_order))
     registry = worker_registry()
     if worker not in registry:
         raise ValueError(f"unknown worker: {worker}")
@@ -535,9 +569,11 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     jdir.mkdir()
     final_path = jdir / "final.txt"
     if provider == "codex":
-        cmd = codex_cmd(task, cwd, write, final_path, session_id, settings)
+        extra = [f'mcp_servers.teamyra.url="{TEAMYRA_MCP_URL}"'] if teamyra_mcp else None
+        cmd = codex_cmd(task, cwd, write, final_path, session_id, settings, extra, skip_git_check=teamyra_mcp)
         env = {"CODEX_HOME": str(worker_info["home"])}
-        resume_cmd = codex_cmd(RESUME_MESSAGE, cwd, write, final_path, "{SESSION}", settings)
+        resume_cmd = codex_cmd(RESUME_MESSAGE, cwd, write, final_path, "{SESSION}", settings, extra,
+                               skip_git_check=teamyra_mcp)
     elif provider == "claude":
         cmd = claude_cmd(task, cwd, write, session_id, settings)
         env = {}
@@ -563,7 +599,8 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             "failover_root": root_id, "failover_attempt": int(failover_attempt),
             "previous_workers": list(previous_workers or []),
             "auto_failover_enabled": bool(auto_failover), "max_failovers": max_failovers,
-            "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files}
+            "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
+            "worker_order": list(worker_order or []), "teamyra_mcp": bool(teamyra_mcp)}
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "task.txt").write_text(task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
@@ -640,7 +677,9 @@ def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2
     if meta.get("worker") and meta["worker"] not in previous:
         previous.append(meta["worker"])
 
-    next_worker = pick_worker("auto", exclude=previous)
+    order = meta.get("worker_order") or None
+    next_worker = (pick_worker("auto", exclude=previous, order=order, last_resort=helper_last_resort(order))
+                   if order else pick_worker("auto", exclude=previous))
     continuation = failover_task(meta, original_task)
     timeout_minutes = max(1, min(int((meta.get("timeout_s") or 5400) / 60), 360))
     label = f"failover {attempt}: {meta.get('label') or job_id}"[:80]
@@ -661,6 +700,7 @@ def start_failover_from_job(job_id, root_job_id=None, attempt=1, max_failovers=2
         False,
         expect_files=meta.get("expect_files", []),
         pin=meta.get("pin", False), pool=meta.get("pool", False),
+        worker_order=meta.get("worker_order") or None, teamyra_mcp=meta.get("teamyra_mcp", False),
     )
     patch_job_meta(
         job_id,
@@ -1064,6 +1104,36 @@ def wake_media_surface(surface):
         # than returning an apparently healthy queued job indefinitely.
         return {"state": "unavailable", "surface": surface, "error": str(exc)[:800]}
 
+def dispatch_media_helper(ticket_id):
+    """Start the helper agent for a ticket: Codex 1 -> Codex 2 -> Antigravity -> Claude."""
+    ticket = media_support._load_ticket(ROOT, ticket_id)
+    order = helper_worker_order()
+    try:
+        job_id, worker = start_job(
+            "auto", media_support.helper_task(ticket), ticket["project_path"],
+            label=f"media helper {ticket_id} ({ticket['kind']})"[:80], timeout_minutes=120, write=True,
+            auto_failover=True, max_failovers=max(0, len(order) - 1), queue=True,
+            worker_order=order, teamyra_mcp=True)
+    except Exception as exc:
+        media_support.record_dispatch(ROOT, ticket_id, error=str(exc))
+        return {"started": False, "error": str(exc)[:800], "worker_order": order}
+    media_support.record_dispatch(ROOT, ticket_id, worker=worker, job_id=job_id)
+    return {"started": True, "worker": worker, "job_id": job_id, "worker_order": order}
+
+
+def media_helper_state(ticket):
+    job_id = (ticket.get("helper") or {}).get("job_id")
+    if not job_id:
+        return None
+    try:
+        terminal = failover_terminal_job_id(job_id)
+        meta = read_meta(terminal)
+        return {"job_id": terminal, "worker": meta.get("worker"), "state": meta.get("state"),
+                "reason": meta.get("reason"), "last_event": meta.get("last_event")}
+    except Exception as exc:
+        return {"job_id": job_id, "state": "unknown", "error": str(exc)[:300]}
+
+
 # --- MCP tools -------------------------------------------------------------------------------
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
@@ -1185,6 +1255,47 @@ TOOLS = [
                      "additionalProperties": False}},
     {"name": "media_resume_auth", "description": "Resume media jobs after Google authentication is restored. Jobs already submitted to a provider are preserved for reconciliation and are never blindly resubmitted.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "media_report_issue", "description": "Report a media generation/download problem you cannot resolve quickly (stuck, failing, refused, waiting too long). TEAMYRA logs it for maintenance and a TEAMYRA helper agent (Codex 1, Codex 2, Antigravity; Claude as last resort) takes the jobs over, finishes them by hand and delivers the results into your same job ids. After reporting, stop retrying: poll media_ticket_status or your jobs.",
+     "inputSchema": {"type": "object", "properties": {
+         "description": {"type": "string", "description": "What went wrong and what you need (e.g. 'S10 clip stuck generating 20 min; need it with the English line')."},
+         "job_ids": {"type": "array", "maxItems": 50, "items": {"type": "string"}},
+         "batch_id": {"type": "string", "description": "Report every unfinished job of a batch."},
+         "reporter": {"type": "string", "description": "Your agent/session name so the helper and maintenance know who reported."},
+         "instructions": {"type": "string", "description": "Anything the helper must keep (dialogue, style, naming)."},
+         "take_over": {"type": "boolean", "default": True, "description": "false only logs the issue for maintenance."}},
+         "required": ["description"], "additionalProperties": False}},
+    {"name": "media_delegate", "description": "Hand a whole media generation task to a TEAMYRA helper agent. It queues every request (bulk), handles failures (rewording refused prompts, re-downloading), follows your instructions and delivers each asset. Poll media_ticket_status for deliveries instead of generating yourself.",
+     "inputSchema": {"type": "object", "properties": {
+         "description": {"type": "string"},
+         "project_path": {"type": "string"},
+         "requests": {"type": "array", "maxItems": 50, "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
+                      "required": ["type", "prompt"], "additionalProperties": False}},
+         "instructions": {"type": "string", "description": "How the helper must do it: naming, rewording limits, quality checks, priorities."},
+         "reporter": {"type": "string"}},
+         "required": ["description", "project_path"], "additionalProperties": False}},
+    {"name": "media_ticket_status", "description": "Status of a helper ticket: helper agent and its progress, notes, per-job state and delivered assets (ids and local paths).",
+     "inputSchema": {"type": "object", "properties": {"ticket_id": {"type": "string"}}, "required": ["ticket_id"], "additionalProperties": False}},
+    {"name": "media_ticket_update", "description": "Helper agents: record progress notes and set the ticket status (working, delivered, partially_delivered, failed). Failed/cancelled returns undelivered jobs to their reporter as failures.",
+     "inputSchema": {"type": "object", "properties": {
+         "ticket_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(media_support.TICKET_STATES)},
+         "note": {"type": "string"}, "summary": {"type": "string"}, "by": {"type": "string"}},
+         "required": ["ticket_id"], "additionalProperties": False}},
+    {"name": "media_ticket_deliver", "description": "Helper agents: deliver a finished asset for a ticket. With original_job_id the reporter's job completes with this asset, so the waiting agent receives it on its next poll.",
+     "inputSchema": {"type": "object", "properties": {
+         "ticket_id": {"type": "string"}, "asset_id": {"type": "string"}, "original_job_id": {"type": "string"},
+         "item": {"type": "integer", "minimum": 0}, "note": {"type": "string"}, "by": {"type": "string"}},
+         "required": ["ticket_id", "asset_id"], "additionalProperties": False}},
+    {"name": "media_issues", "description": "Maintenance view of media issues reported by agents or logged automatically from failures, grouped by category.",
+     "inputSchema": {"type": "object", "properties": {
+         "status": {"type": "string", "enum": sorted(media_support.ISSUE_STATES)},
+         "category": {"type": "string"}, "source": {"type": "string", "enum": ["agent_report", "delegation", "automatic"]},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}},
+         "additionalProperties": False}},
+    {"name": "media_issue_update", "description": "Maintenance: acknowledge or close a media issue with a note.",
+     "inputSchema": {"type": "object", "properties": {
+         "issue_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(media_support.ISSUE_STATES)},
+         "note": {"type": "string"}, "by": {"type": "string"}},
+         "required": ["issue_id"], "additionalProperties": False}},
     {"name": "media_resume_download", "description": "Resume a failed/auth-blocked/rate-limited media job with an identified provider submission. Reconciles and downloads its existing result without generating again.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
     {"name": "media_recover", "description": "Safely recover a stopped media job using its durable checkpoints. Retries confirmed pre-submission failures or reconciles/downloads an existing submission; never blindly clicks Generate twice. Returns recovery_plan when login, credits, policy refusal or missing identity require attention. Use after inspecting media_status, then poll the same job_id.",
@@ -1598,6 +1709,47 @@ def tool_call(name, a):
         for surface in surfaces:
             result.setdefault("runtime", {})[surface] = wake_media_surface(surface)
         return result
+    if name == "media_report_issue":
+        if a.get("take_over", True) is False:
+            jobs = list(a.get("job_ids") or [])
+            snapshots = [media_support.job_snapshot(ROOT, job_id) for job_id in jobs[:50]]
+            issue = media_support.log_issue(
+                ROOT, source="agent_report", summary=a["description"], details=a.get("instructions"),
+                category=(snapshots[0]["failure"].get("category") if snapshots else None) or "reported",
+                job_ids=jobs, batch_id=a.get("batch_id"), reporter=a.get("reporter"),
+                project_path=snapshots[0]["project_path"] if snapshots else None)
+            return {"issue_id": issue["issue_id"], "logged": True, "helper": None}
+        ticket = media_support.create_ticket(
+            ROOT, kind="issue", reporter=a.get("reporter"), description=a["description"],
+            job_ids=a.get("job_ids") or [], batch_id=a.get("batch_id"), instructions=a.get("instructions"))
+        dispatch = dispatch_media_helper(ticket["ticket_id"])
+        return {"ticket_id": ticket["ticket_id"], "issue_id": ticket["issue_id"], "helper": dispatch,
+                "jobs": ticket.get("assisted_jobs"),
+                "next": "Stop retrying these jobs. A TEAMYRA helper agent is handling them; poll media_ticket_status "
+                        "or your job ids. Results are delivered into the same job ids."}
+    if name == "media_delegate":
+        ticket = media_support.create_ticket(
+            ROOT, kind="delegate", reporter=a.get("reporter"), description=a["description"],
+            project_path=a["project_path"], requests=a.get("requests") or [], instructions=a.get("instructions"))
+        dispatch = dispatch_media_helper(ticket["ticket_id"])
+        return {"ticket_id": ticket["ticket_id"], "issue_id": ticket["issue_id"], "helper": dispatch,
+                "requests": len(ticket.get("requests") or []),
+                "next": "The helper agent generates and delivers these. Poll media_ticket_status; do not generate them yourself."}
+    if name == "media_ticket_status":
+        ticket = media_support._load_ticket(ROOT, a["ticket_id"])
+        return media_support.ticket_status(ROOT, a["ticket_id"], media_helper_state(ticket))
+    if name == "media_ticket_update":
+        ticket = media_support.update_ticket(ROOT, a["ticket_id"], status=a.get("status"), note=a.get("note"),
+                                             by=a.get("by"), summary=a.get("summary"))
+        return media_support.ticket_status(ROOT, ticket["ticket_id"], media_helper_state(ticket))
+    if name == "media_ticket_deliver":
+        ticket = media_support.deliver(ROOT, a["ticket_id"], a["asset_id"], original_job_id=a.get("original_job_id"),
+                                       item=a.get("item"), note=a.get("note"), by=a.get("by"))
+        return media_support.ticket_status(ROOT, ticket["ticket_id"], media_helper_state(ticket))
+    if name == "media_issues":
+        return media_support.list_issues(ROOT, a.get("status"), a.get("category"), a.get("source"), a.get("limit", 50))
+    if name == "media_issue_update":
+        return media_support.update_issue(ROOT, a["issue_id"], status=a.get("status"), note=a.get("note"), by=a.get("by"))
     if name == "media_resume_download":
         result = media_engine.resume_download_job(ROOT, a["job_id"])
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"

@@ -28,6 +28,8 @@ JOB_STATES = {
     "queued", "preparing", "waiting_for_browser", "submitting", "generating",
     "processing", "downloading", "extracting_audio", "organizing", "completed",
     "failed", "cancelled", "needs_user_auth", "rate_limited",
+    # A TEAMYRA helper agent has taken the job over (see media_support).
+    "assisted",
 }
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 ASSET_PREFIX = {
@@ -106,6 +108,11 @@ def recovery_plan(job):
     state = job.get("state")
     if job.get("cancel_requested") or state in {"completed", "cancelled"}:
         plan.update(action="none", instruction="This job is finished or cancelled.")
+    elif job.get("assisted_by"):
+        plan.update(action="wait_for_helper", ticket_id=job["assisted_by"],
+                    instruction="A TEAMYRA helper agent is handling this job (ticket " + str(job["assisted_by"]) +
+                    "). Do not retry or resubmit it; poll this job or teamyra.media_ticket_status. The result is "
+                    "delivered into this job id.")
     elif state not in {"failed", "needs_user_auth", "rate_limited"}:
         plan.update(action="wait", instruction="Poll teamyra.media_status for this job; do not create a replacement.")
     elif state == "needs_user_auth" or category in {"human_verification", "login_required"}:
@@ -131,6 +138,9 @@ def recovery_plan(job):
                         instruction="Call teamyra.media_recover with this job_id; poll the same job. Existing submissions reconcile and download without another Generate click.")
         else:
             plan["instruction"] = "Inspect this failure before recovery; do not create a replacement job blindly."
+    if state in {"failed", "needs_user_auth", "rate_limited"} and not job.get("assisted_by"):
+        plan["helper"] = ("If you cannot resolve this quickly, call teamyra.media_report_issue with this job id: a "
+                          "TEAMYRA helper agent logs it, finishes the work and delivers into this job.")
     return plan
 
 
@@ -811,6 +821,8 @@ def public_job(job):
         "parent_asset_ids": list(job.get("parent_asset_ids") or []),
         "reference_note": job.get("request", {}).get("reference_note"),
         "asset_id": job.get("asset_id"),
+        "assisted_by": job.get("assisted_by"),
+        "fulfilled_by": job.get("fulfilled_by"),
         "error": job.get("error"),
         "failure": dict(job.get("failure") or {}),
         "recovery": dict(job.get("recovery") or {}),
@@ -951,6 +963,9 @@ def update_job_state(root, job_id, state, detail=None, extra=None):
             job["detail"] = str(detail)[:1000]
         if state == "failed":
             job["error"] = str(detail or "media generation failed")[:2000]
+            if job.get("assisted_by"):
+                # A helper already owns this job; its reporter keeps waiting.
+                job["state"] = "assisted"
         elif state not in {"rate_limited", "needs_user_auth"}:
             job["error"] = None
         if isinstance(extra, dict):
@@ -963,6 +978,66 @@ def update_job_state(root, job_id, state, detail=None, extra=None):
                 if key in allowed:
                     job[key] = value
         job.setdefault("history", []).append(_event(state, detail))
+        saved = _save_job(root, job)
+    if state == "failed":
+        import media_support
+        media_support.log_job_failure(root, saved)
+    return saved
+
+
+def assign_helper(root, job_ids, ticket_id):
+    """Mark jobs as handled by a helper ticket; stopped jobs wait as 'assisted'."""
+    result = []
+    for job_id in job_ids:
+        with _state_lock(root):
+            job = load_job(root, job_id)
+            if job.get("state") == "completed":
+                result.append({"job_id": job_id, "state": "completed", "note": "already completed"})
+                continue
+            job["assisted_by"] = ticket_id
+            if job.get("state") in {"failed", "needs_user_auth", "rate_limited"}:
+                job["state"] = "assisted"
+            job.setdefault("history", []).append(_event(job["state"], f"Handed to TEAMYRA helper ticket {ticket_id}"))
+            _save_job(root, job)
+            result.append({"job_id": job_id, "state": job["state"]})
+    return result
+
+
+def release_helper(root, job_ids, ticket_id, reason):
+    """A closed ticket returns its undelivered jobs to ordinary failed state."""
+    for job_id in job_ids:
+        with _state_lock(root):
+            try:
+                job = load_job(root, job_id)
+            except ValueError:
+                continue
+            if job.get("assisted_by") != ticket_id or job.get("state") == "completed":
+                continue
+            job["assisted_by"] = None
+            if job.get("state") == "assisted":
+                job["state"] = "failed"
+                job["error"] = str(reason)[:2000]
+            job.setdefault("history", []).append(_event(job["state"], str(reason)[:1000]))
+            _save_job(root, job)
+
+
+def fulfill_job(root, job_id, asset_id, ticket_id):
+    """Complete a reporter's job with an asset a helper produced for it."""
+    asset = get_asset(root, asset_id)
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        if job.get("state") == "completed" and job.get("asset_id") and job.get("asset_id") != asset["asset_id"]:
+            raise ValueError(f"{job_id} already completed with {job['asset_id']}")
+        if asset.get("type") != job["request"].get("type"):
+            raise ValueError("delivered asset type does not match the job")
+        job["state"] = "completed"
+        job["asset_id"] = asset["asset_id"]
+        job["error"] = None
+        job["reconcile_required"] = False
+        job["fulfilled_by"] = {"ticket_id": ticket_id, "asset_id": asset["asset_id"],
+                               "job_id": asset.get("job_id"), "at": time.time()}
+        job.setdefault("history", []).append(_event(
+            "completed", f"Delivered by TEAMYRA helper ticket {ticket_id}: {asset['asset_id']}"))
         return _save_job(root, job)
 
 
@@ -1031,7 +1106,7 @@ def cancel_job(root, job_id):
         if job.get("state") in TERMINAL_STATES:
             return public_job(job)
         job["cancel_requested"] = True
-        if job.get("state") in {"queued", "preparing", "waiting_for_browser", "rate_limited", "needs_user_auth"}:
+        if job.get("state") in {"queued", "preparing", "waiting_for_browser", "rate_limited", "needs_user_auth", "assisted"}:
             job["state"] = "cancelled"
             job.setdefault("history", []).append(_event("cancelled", "Cancellation requested before provider execution"))
         else:
