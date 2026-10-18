@@ -1,4 +1,8 @@
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { MediaBrowserController } = require('./media-browser-controller');
+const { mediaFingerprints } = require('./media-output-validator');
 const { FlowReferenceController } = require('./flow-reference-controller');
 
 const FLOW_HOME = 'https://flow.google.com/';
@@ -14,12 +18,33 @@ const CREDIT_WORDS = [
   'credit limit reached'
 ];
 
+// Page-wide text that marks a refused or failed generation. Bulk jobs compare
+// the count against their submission baseline instead of failing on old tiles.
+const FAILURE_SIGNAL_RE = /policy|couldn.?t generate|can.?t generate|not allowed/g;
+// Flow refusing another concurrent generation. Detected before the paid click.
+const CAPACITY_RE = /(?:too many|maximum(?: number of)?|limit of|max(?:imum)?\s+\d+)\s+(?:\w+\s+){0,3}(?:generations?|videos?|images?|requests?)(?:\s+(?:in progress|at (?:a|one|the same) time|at once))?|wait (?:for|until) (?:your |the )?(?:current |other |previous )?(?:generations?|videos?) (?:to )?(?:finish|complete)/i;
+
 function lower(value) { return String(value || '').toLowerCase(); }
+
+function failureSignalCount(text) {
+  return (lower(text).replace(/generating will use [0-9]+ credits/g, '').match(FAILURE_SIGNAL_RE) || []).length;
+}
+
+function capacitySignal(text) {
+  const match = String(text || '').match(CAPACITY_RE);
+  return match ? match[0].slice(0, 200) : '';
+}
+
+function projectId(url) {
+  return String(url || '').match(/^https:\/\/flow\.google\.com\/project\/([^/?#]+)/i)?.[1] || '';
+}
 
 class GoogleFlowAutomationAdapter {
   constructor(webContents) {
     this.webContents = webContents;
     this.browser = new MediaBrowserController(webContents);
+    // A tile's provider prompt never changes; avoid reopening its info panel.
+    this.resultInfoCache = new Map();
   }
 
   isTransientPageError(error) {
@@ -683,12 +708,15 @@ class GoogleFlowAutomationAdapter {
   }
 
   aspectRatioPatterns(value) {
+    // Flow labels: crop_16_9 16:9, crop_landscape 4:3, crop_square 1:1,
+    // crop_portrait 3:4, crop_9_16 9:16. Generic words like "portrait" name a
+    // different ratio, so match the exact ratio text and icon only.
     const ratio = String(value || '').trim().toLowerCase();
-    if (ratio === '1:1') return ['1:1', 'square', 'crop_square'];
-    if (ratio === '16:9') return ['16:9', 'landscape', 'crop_16_9'];
-    if (ratio === '9:16') return ['9:16', 'portrait', 'crop_9_16'];
-    if (ratio === '4:3') return ['4:3', 'crop_4_3'];
-    if (ratio === '3:4') return ['3:4', 'crop_3_4'];
+    if (ratio === '1:1') return ['1:1', 'crop_square'];
+    if (ratio === '16:9') return ['16:9', 'crop_16_9'];
+    if (ratio === '9:16') return ['9:16', 'crop_9_16'];
+    if (ratio === '4:3') return ['4:3', 'crop_landscape', 'crop_4_3'];
+    if (ratio === '3:4') return ['3:4', 'crop_portrait', 'crop_3_4'];
     return [ratio];
   }
 
@@ -757,10 +785,13 @@ class GoogleFlowAutomationAdapter {
           s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
       };
       const radios = [...document.querySelectorAll('[role="radio"]')].filter(visible);
-      const target = radios.find(el => {
-        const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || '')).trim().toLowerCase();
-        return patterns.some(pattern => text.includes(pattern));
-      });
+      const label = el => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || '')).trim().toLowerCase();
+      // Patterns are in preference order: the first pattern any radio matches wins.
+      let target = null;
+      for (const pattern of patterns) {
+        target = radios.find(el => label(el).includes(pattern));
+        if (target) break;
+      }
       if (!target) return { found: false, selected: false, text: '' };
       const token = target.getAttribute('data-teamyra-setting-radio') ||
         ('teamyra-setting-radio-' + Math.random().toString(36).slice(2));
@@ -858,7 +889,7 @@ class GoogleFlowAutomationAdapter {
     if (operationLabels[operation]) await this.semanticClick(operationLabels[operation]);
 
     if (type === 'image') {
-      await this.selectRadioSetting(['image'], { required: true, label: 'Image mode' });
+      await this.selectSettingsRadio(['image'], { required: true, label: 'Image mode' });
       const preferred = String(request.model_preference || 'auto');
       if (preferred.toLowerCase() !== 'auto') {
         if (!await this.ensureSettingsPanelOpen()) throw new Error('selector_failure: image settings unavailable');
@@ -883,20 +914,22 @@ class GoogleFlowAutomationAdapter {
       actualModel = videoSelection.actual_model;
       // Omni attaches reference images directly to the prompt. Its Frames
       // lane must never be used to imply unsupported start/end-frame control.
-      await this.selectRadioSetting(['ingredients'], { required: true, label: 'Omni Ingredients mode' });
+      // Keep one verified popover open. Closing/reopening between each setting
+      // races Flow's overlay teardown and can hide the 720p control mid-setup.
+      await this.selectSettingsRadio(['ingredients'], { required: true, label: 'Omni Ingredients mode' });
       const resolution = type === 'sound_effect' ? '360p' : String(settings.generation_resolution || '720p');
-      await this.selectRadioSetting([resolution], { required: true, label: resolution + ' resolution' });
+      await this.selectSettingsRadio([resolution], { required: true, label: resolution + ' resolution' });
     }
 
     if (request.aspect_ratio) {
-      await this.selectRadioSetting(this.aspectRatioPatterns(request.aspect_ratio), {
+      await this.selectSettingsRadio(this.aspectRatioPatterns(request.aspect_ratio), {
         required: true,
         label: 'aspect ratio'
       });
     }
 
     const count = Math.max(1, Math.min(Number(request.output_count || 1), 4));
-    await this.selectRadioSetting(['x' + count], {
+    await this.selectSettingsRadio(['x' + count], {
       required: true,
       label: 'output count'
     });
@@ -905,7 +938,7 @@ class GoogleFlowAutomationAdapter {
     if ((type === 'video' || type === 'sound_effect') && requestedDuration > 0) {
       const supported = [4, 6, 8, 10];
       const seconds = supported.find(value => value >= requestedDuration) || 10;
-      await this.selectRadioSetting([seconds + 's', seconds + ' sec', seconds + ' seconds'], {
+      await this.selectSettingsRadio([seconds + 's', seconds + ' sec', seconds + ' seconds'], {
         required: true,
         label: 'video duration'
       });
@@ -931,8 +964,8 @@ class GoogleFlowAutomationAdapter {
     }))()`);
   }
 
-  async resultForJob(job) {
-    const results = await this.resultSnapshot();
+  async resultForJob(job, { results = null, excludeKeys = null } = {}) {
+    results = results || await this.resultSnapshot();
     const submission = job?.provider_submission || {};
     const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
     if (submission.result_key) {
@@ -944,7 +977,10 @@ class GoogleFlowAutomationAdapter {
     const prompt = String(job?.request?.provider_prompt || job?.request?.prompt || '').replace(/\s+/g, ' ').trim();
     if (!prompt) return null;
     const baseline = new Set(submission.baseline_result_keys || []);
-    for (const result of results.filter(result => result.type === type && result.ready &&
+    // In a bulk run, tiles already matched to other jobs (including copies of
+    // the same prompt) belong to them.
+    const taken = excludeKeys instanceof Set ? excludeKeys : new Set(excludeKeys || []);
+    for (const result of results.filter(result => result.type === type && result.ready && !taken.has(result.key) &&
       (submission.result_key || !Array.isArray(submission.baseline_result_keys) || !baseline.has(result.key)))) {
       const info = await this.resultInfo(result.key);
       if (String(info?.prompt || '').replace(/\s+/g, ' ').trim() === prompt) return result;
@@ -953,6 +989,16 @@ class GoogleFlowAutomationAdapter {
   }
 
   async resultInfo(key) {
+    if (key && this.resultInfoCache.has(key)) return this.resultInfoCache.get(key);
+    const info = await this.readResultInfo(key);
+    if (key && info?.prompt) {
+      if (this.resultInfoCache.size > 500) this.resultInfoCache.delete(this.resultInfoCache.keys().next().value);
+      this.resultInfoCache.set(key, info);
+    }
+    return info;
+  }
+
+  async readResultInfo(key) {
     return this.executePageScript(`(async () => {
       const key = ${JSON.stringify(key)};
       const tile = [...document.querySelectorAll('flow-image-tile,flow-video-tile')].find(tile => {
@@ -1034,6 +1080,8 @@ class GoogleFlowAutomationAdapter {
       before = await this.generationSnapshot();
     }
     if (before.generateDisabled || !before.promptText) {
+      const busy = capacitySignal(await this.executePageScript("document.body?.innerText || ''").catch(() => ''));
+      if (busy) throw new Error('capacity_limited: Google Flow is busy before Generate: ' + busy);
       throw new Error(
         'selector_failure: Google Flow generate control did not become ready; snapshot=' +
         JSON.stringify(before).slice(0, 1600)
@@ -1123,12 +1171,14 @@ class GoogleFlowAutomationAdapter {
       throw new Error('selector_failure: prompt reference identities changed before generation');
     }
     const baselineResults = await this.resultSnapshot();
+    const baselineFailures = failureSignalCount(await this.executePageScript("document.body?.innerText || ''").catch(() => ''));
     const generation = await this.stage('generation_click', () => this.startGenerationVerified(async before => {
       await beforeSubmit({
         submitted_at: Date.now() / 1000,
         provider_url: this.webContents.getURL(),
         baseline_media_count: Number(before.mediaCount || 0),
         baseline_result_keys: baselineResults.map(result => result.key).filter(Boolean),
+        baseline_failure_signals: baselineFailures,
         selected_settings: await this.settingsTriggerText(),
         actual_model: intent.actual_model,
         reference_attachments: references?.items || [],
@@ -1141,6 +1191,7 @@ class GoogleFlowAutomationAdapter {
       provider_url: this.webContents.getURL(),
       baseline_media_count: Number(generation?.before?.mediaCount || 0),
       baseline_result_keys: baselineResults.map(result => result.key).filter(Boolean),
+      baseline_failure_signals: baselineFailures,
       selected_settings: await this.settingsTriggerText(),
       actual_model: intent.actual_model,
       reference_attachments: references?.items || [],
@@ -1148,10 +1199,13 @@ class GoogleFlowAutomationAdapter {
     };
   }
 
-  async generationState(job = null) {
-    const expectedUrl = job?.provider_submission?.provider_url || '';
+  async pageState(expectedUrl = '', acceptableUrls = null, { allowNavigation = true } = {}) {
+    // Bulk jobs submitted from one page share it: any of their submission
+    // URLs is acceptable, so polling never reloads between them. A reload
+    // would also abort in-page upscale downloads, so callers can defer it.
     const currentUrl = this.webContents.getURL();
-    if (expectedUrl && currentUrl !== expectedUrl && /^https:\/\/flow\.google\.com\/project\//i.test(expectedUrl)) {
+    const acceptable = acceptableUrls || [expectedUrl];
+    if (allowNavigation && expectedUrl && /^https:\/\/flow\.google\.com\/project\//i.test(expectedUrl) && !acceptable.includes(currentUrl)) {
       await this.loadProjectUrl(expectedUrl).catch(() => {});
     }
     let probe;
@@ -1170,13 +1224,131 @@ class GoogleFlowAutomationAdapter {
       }
       return { state: 'needs_user_auth', reason: 'login_required' };
     }
-    if (cls.rateLimited) return { state: 'rate_limited', reason: 'rate_limited' };
-    if (cls.creditsExhausted) return { state: 'failed', reason: 'credits_exhausted' };
-    const body = lower(probe.text);
-    if (/policy|couldn.?t generate|can.?t generate|not allowed/.test(body)) return { state: 'failed', reason: 'policy_refusal' };
+    return {
+      state: 'ok',
+      rate_limited: cls.rateLimited,
+      credits_exhausted: cls.creditsExhausted,
+      failure_signals: failureSignalCount(probe.text),
+      project_id: projectId(probe.url || this.webContents.getURL())
+    };
+  }
+
+  async generationState(job = null) {
+    const page = await this.pageState(job?.provider_submission?.provider_url || '');
+    if (page.state !== 'ok') return page;
+    // A finished result wins over unrelated page-wide warnings.
     const result = await this.resultForJob(job);
     if (result) return { state: 'ready_to_download', result_key: result.key };
+    if (page.rate_limited) return { state: 'rate_limited', reason: 'rate_limited' };
+    if (page.credits_exhausted) return { state: 'failed', reason: 'credits_exhausted' };
+    const baseline = job?.provider_submission?.baseline_failure_signals;
+    const refused = Number.isFinite(Number(baseline)) && baseline !== null
+      ? page.failure_signals > Number(baseline)
+      : page.failure_signals > 0;
+    if (refused) return { state: 'failed', reason: 'policy_refusal' };
     return { state: 'generating' };
+  }
+
+  // One page inspection for every in-flight bulk job. Jobs are matched oldest
+  // first and each tile is assigned at most once, so copies of one prompt and
+  // already-claimed tiles never satisfy two jobs.
+  async generationStates(jobs = [], { claimedKeys = [], allowNavigation = true } = {}) {
+    const ordered = [...jobs].sort((a, b) =>
+      Number(a?.provider_submission?.submitted_at || 0) - Number(b?.provider_submission?.submitted_at || 0));
+    const current = projectId(this.webContents.getURL());
+    const target = ordered.find(job => projectId(job?.provider_submission?.provider_url) === current) || ordered[0];
+    const urls = ordered.map(job => job?.provider_submission?.provider_url).filter(Boolean);
+    const page = await this.pageState(target?.provider_submission?.provider_url || '', urls, { allowNavigation });
+    const states = new Map();
+    if (page.state !== 'ok') {
+      for (const job of ordered) states.set(job.job_id, { state: page.state, reason: page.reason });
+      return { page, states };
+    }
+    const results = await this.resultSnapshot();
+    const taken = new Set(claimedKeys);
+    for (const job of ordered) {
+      const jobProject = projectId(job?.provider_submission?.provider_url);
+      if (jobProject && page.project_id && jobProject !== page.project_id) {
+        states.set(job.job_id, { state: 'generating', reason: 'other_project' });
+        continue;
+      }
+      const result = await this.resultForJob(job, { results, excludeKeys: taken });
+      if (result) {
+        taken.add(result.key);
+        states.set(job.job_id, { state: 'ready_to_download', result_key: result.key });
+      } else {
+        states.set(job.job_id, { state: 'generating' });
+      }
+    }
+    return { page, states };
+  }
+
+  // 64-bit difference hash of a result tile's thumbnail. Downloads arrive as
+  // anonymous blob URLs; this lets concurrent downloads be attributed by content.
+  // Flow serves thumbnails from another origin, so the page usually cannot read
+  // their pixels; the main process then fetches the thumbnail with this view's
+  // session and hashes it with FFmpeg, exactly like downloaded files.
+  async resultFingerprint(key) {
+    this.lastFingerprint = { key, source: null, reason: '' };
+    if (!key) return null;
+    const page = await this.executePageScript(`(async () => {
+      const key = ${JSON.stringify(key)};
+      const tile = [...document.querySelectorAll('flow-image-tile,flow-video-tile')].find(tile => {
+        const image = tile.querySelector('img[src]');
+        let id = image?.getAttribute('data-media-id') || '';
+        if (!id && image?.src) { try { id = new URL(image.src).pathname; } catch {} }
+        return id === key;
+      });
+      const image = tile?.querySelector('img[src]');
+      if (!image) return { reason: 'thumbnail_missing' };
+      const src = image.currentSrc || image.src || '';
+      if (!image.complete || !image.naturalWidth) return { src, reason: 'thumbnail_not_loaded' };
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 72; canvas.height = 64;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        context.imageSmoothingQuality = 'high';
+        context.drawImage(image, 0, 0, 72, 64);
+        const data = context.getImageData(0, 0, 72, 64).data;
+        const gray = new Array(72).fill(0);
+        for (let y = 0; y < 64; y += 1) for (let x = 0; x < 72; x += 1) {
+          const i = (y * 72 + x) * 4;
+          gray[Math.floor(y / 8) * 9 + Math.floor(x / 8)] += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        }
+        let hex = '';
+        for (let row = 0; row < 8; row += 1) {
+          let byte = 0;
+          for (let col = 0; col < 8; col += 1) byte = (byte << 1) | (gray[row * 9 + col] > gray[row * 9 + col + 1] ? 1 : 0);
+          hex += byte.toString(16).padStart(2, '0');
+        }
+        return { hash: hex, src };
+      } catch (error) {
+        return { src, reason: 'canvas_' + String(error?.name || 'error').toLowerCase() };
+      }
+    })()`).catch(error => ({ reason: 'page_script: ' + String(error?.message || error).slice(0, 160) }));
+    if (page?.hash) {
+      this.lastFingerprint = { key, source: 'page_canvas', reason: '' };
+      return page.hash;
+    }
+    const src = String(page?.src || '');
+    if (!/^https:\/\//i.test(src) || typeof this.webContents.session?.fetch !== 'function') {
+      this.lastFingerprint = { key, source: null, reason: page?.reason || 'thumbnail_unavailable' };
+      return null;
+    }
+    const temp = path.join(os.tmpdir(), 'teamyra-thumb-' + process.pid + '-' + Math.random().toString(36).slice(2) + '.img');
+    try {
+      const response = await this.webContents.session.fetch(src);
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      fs.writeFileSync(temp, Buffer.from(await response.arrayBuffer()));
+      const [hash] = await mediaFingerprints(temp, { maxFrames: 1 });
+      this.lastFingerprint = { key, source: hash ? 'session_fetch' : null, reason: hash ? '' : 'thumbnail_decode_failed' };
+      return hash || null;
+    } catch (error) {
+      this.lastFingerprint = { key, source: null, reason: 'thumbnail_fetch: ' + String(error?.message || error).slice(0, 160) };
+      return null;
+    } finally {
+      try { fs.unlinkSync(temp); } catch {}
+    }
   }
 
   async openGeneratedAssetMenu(resultKey = null) {
@@ -1259,10 +1431,10 @@ class GoogleFlowAutomationAdapter {
     return choices;
   }
 
-  async startDownload(job = null) {
+  async startDownload(job = null, { excludeKeys = null } = {}) {
     const type = job?.request?.type;
     if (!type) throw new Error('download_failure: media request is missing');
-    const result = await this.resultForJob(job);
+    const result = await this.resultForJob(job, { excludeKeys });
     if (!result) throw new Error('download_failure: submitted result identity is unavailable');
     const choices = await this.openDownloadChoices(result.key);
     const quality = job.request.generation_settings?.download_quality ||
@@ -1291,13 +1463,16 @@ class GoogleFlowAutomationAdapter {
       upscale: actualQuality !== 'source', wait_for_download: true };
   }
 
-  async reconcile(job) {
+  async reconcile(job, { allowNavigation = true } = {}) {
     const url = job.provider_submission?.provider_url;
     if (!url) return { reconciled: false, reason: 'provider_identity_missing' };
+    // Other bulk downloads are running: the shared monitor checks this job once
+    // the page may navigate again.
+    if (!allowNavigation) return { reconciled: true, state: { state: 'generating', reason: 'navigation_deferred' } };
     await this.loadProjectUrl(url);
     const state = await this.generationState(job);
     return { reconciled: true, state };
   }
 }
 
-module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME };
+module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId };

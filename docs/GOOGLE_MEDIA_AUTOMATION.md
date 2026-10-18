@@ -35,6 +35,43 @@ file is allowed. Image bytes are converted rather than saved with a misleading
 extension. A failed 4x download can retry 2x on the same result. Failed SFX
 extraction preserves the source; successful registration permits staging cleanup.
 
+## Bulk generation
+
+Images, videos and sound effects can be generated many at a time. In the app,
+the Google Media card's **Bulk** button opens a dialog: one prompt per line (or
+blocks separated by a `---` line), copies per prompt, aspect ratio, duration,
+download quality, how many run at once, and the project folder. A batch holds
+up to 50 generations; progress, per-item assets and **Stop batch** stay in the
+dialog. Agents use `teamyra.media_batch` with `max_parallel`, then poll
+`teamyra.media_status({batch_id})` or stop it with `teamyra.media_cancel({batch_id})`.
+
+The visual worker no longer waits for one result before starting the next. It
+submits each job as soon as Flow's composer is free (default 10, at most 30 in
+flight), and one shared monitor reads every in-flight result from a single page
+snapshot. Music stays one song at a time.
+
+- **Result identity.** Jobs are matched oldest first and each result tile is
+  assigned once, so copies of the same prompt get distinct results. Tile prompts
+  are cached instead of reopening the info panel every poll.
+- **Downloads in parallel.** Flow downloads are anonymous `blob:` URLs. Up to 4
+  downloads overlap; while more than one could own a download it lands in a
+  neutral file, and its frames are compared with each job's tile thumbnail
+  (64-bit difference hash). It is assigned only to a clearly closer match;
+  identical requests are interchangeable. If content cannot decide, those
+  downloads fail and automatic recovery downloads the existing results again,
+  one at a time; nothing is guessed onto a job. A job without a thumbnail
+  fingerprint downloads alone.
+- **Backpressure.** If Flow will not accept another generation before the
+  Generate click (busy message, rate limit, Generate stays disabled while others
+  run), the job returns to the queue without using an attempt and the worker
+  runs with fewer slots for a while, growing back as jobs complete. A job that
+  may have reached Generate is never released for a second click.
+- **Refusals.** Flow's refusal text is page-wide. Each submission records the
+  count beforehand; a new refusal is assigned only once it accounts for every
+  unresolved job that could have produced it.
+- **Files.** Output paths are reserved across unfinished jobs, so concurrent
+  outputs never share an index or a filename.
+
 ## MCP policy and references
 
 `teamyra.media_capabilities` reports the enforced workflow without opening a
@@ -69,6 +106,31 @@ their configured idle period. Automated previews remain muted.
 
 ## Recovery
 
+Video setup keeps one settings popover open while mode, Ingredients, resolution,
+aspect ratio, output count and duration are selected and verified. Repeatedly
+closing/reopening the popover races Flow's overlay teardown and previously failed
+at the 720p selection. It closes once after configuration is complete.
+
+Transient browser/selector/download failures get at most two automatic recovery
+attempts per job, with durable counters and backoff (5s, then 10s; rate limits wait
+at least 60s). Recovery recreates the affected browser view while retaining its
+signed-in session. A checkpoint before the paid click distinguishes preparation
+from a possibly submitted generation. Submitted jobs only reconcile and download
+their existing result; downloaded files and result identities are preserved.
+
+For AI callers, `teamyra.media_status` returns `failure`, `recovery`, `retry_after`
+and `recovery_plan` (category, safe action, instruction and remaining automatic
+budget). Poll the same job while recovery is scheduled. After correcting a
+persistent problem, call **`teamyra.media_recover({job_id})`** to retry that stopped
+job explicitly. It wakes the correct media lane only if safely requeued. Do not
+replace a failed job with `media_generate` just to retry: an ambiguous submission
+may already have consumed credits. Legacy failures explicitly within the intent
+setup stage can also recover before submission.
+
+Login/CAPTCHA, exhausted credits and policy refusals do not automatically retry.
+Unknown submission history without durable provider identity requires manual
+reconciliation. Cancelled/completed/active jobs cannot be recovered by this tool.
+
 Submission identity and result baselines are saved before the one Generate
 activation. An uncertain acknowledgement or a restart never causes an automatic
 second generation. Visual results are matched by stable identity and their full
@@ -82,6 +144,32 @@ checkpoint can be reused after extraction or verification failure. Jobs without
 sufficient provider identity remain stopped for manual reconciliation.
 
 ## Acceptance evidence and limits
+
+Bulk acceptance on 2026-10-18 used real `teamyra.media_batch` MCP requests:
+
+- 10 different videos (8 × 16:9, 2 × 9:16, 6 s/8 s, 1080p upscale): all 10
+  submitted to Flow within 50 seconds and generated concurrently. With
+  thumbnail fingerprints unavailable in-page (Flow serves thumbnails from
+  another origin), downloads ran one at a time and the batch took about 10 min.
+- After adding the session-fetch thumbnail fingerprint, a second batch of 10
+  (including two copies of one prompt) completed in 4 min 5 s with 4
+  overlapping downloads. Every download was attributed by content at hash
+  distance 0–3 of 64; the two copies received two distinct results.
+- Image batches: 4K upscales at 16:9 and 1:1 completed. A 9:16 image exposed an
+  older aspect bug: the generic word "portrait" matched Flow's 3:4 option. The
+  verifier rejected the 3:4 file; aspect options are now matched by exact ratio
+  (9:16 → 3072 × 5504, 3:4 → 3584 × 4800, 4:3 → 4800 × 3584 verified live).
+  A result with the wrong shape is no longer auto-retried as a download failure.
+- Every video and image frame was checked against its own prompt; none were
+  mismatched.
+
+Windows verification on 2026-10-16 reproduced the settings failure on the live
+Flow page, then passed the full video configuration after the fix. An existing
+failed job resumed through `teamyra.media_recover`, generated once with Omni 1.1
+Flash at 720p, downloaded its explicitly requested original/source MP4, passed
+FFmpeg decode and 1280 × 720 checks, and registered as `TYR-VID-000005`. Desktop
+checks and 55 media/core/security tests passed, including overlay teardown,
+bounded recovery, submission ambiguity, backoff, cancellation and MCP routing.
 
 Windows acceptance on 2026-10-05 used real MCP requests and local asset
 registration for all four lanes:

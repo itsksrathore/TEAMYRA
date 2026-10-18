@@ -182,6 +182,59 @@
     </form>
   </dialog>
 
+  <dialog id="bulkMediaDialog" class="glass-dialog bulk-dialog">
+    <form id="bulkMediaForm" class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <span class="micro-label">GOOGLE MEDIA · BULK</span>
+          <h2>Generate in bulk</h2>
+        </div>
+        <button class="icon-btn" id="bulkMediaClose" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="bulk-type">
+        <div class="segmented" role="radiogroup" aria-label="Media type">
+          <button type="button" role="radio" data-bulk-type="video" class="active" aria-checked="true">Videos</button>
+          <button type="button" role="radio" data-bulk-type="image" aria-checked="false">Images</button>
+          <button type="button" role="radio" data-bulk-type="sound_effect" aria-checked="false">Sound FX</button>
+        </div>
+      </div>
+      <label class="task-prompt">
+        <textarea id="bulkPrompts" maxlength="200000" placeholder="One prompt per line.&#10;For prompts that span several lines, put a line with --- between them."></textarea>
+      </label>
+      <div class="bulk-grid">
+        <label class="bulk-field"><span>Copies each</span><input id="bulkCopies" type="number" min="1" max="10" value="1" /></label>
+        <label class="bulk-field" id="bulkAspectField"><span>Aspect</span><select id="bulkAspect"></select></label>
+        <label class="bulk-field" id="bulkDurationField"><span>Duration</span><select id="bulkDuration">
+          <option value="">Default</option><option value="4">4s</option><option value="6">6s</option><option value="8">8s</option><option value="10">10s</option>
+        </select></label>
+        <label class="bulk-field" id="bulkQualityField"><span>Download</span><select id="bulkQuality"></select></label>
+        <label class="bulk-field"><span>At once</span><input id="bulkParallel" type="number" min="1" max="30" value="10" /></label>
+      </div>
+      <div class="bulk-folder">
+        <button id="bulkWorkspacePick" class="workspace-field" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h4l1-1h6v8.5h-11z"/></svg>
+          <span id="bulkWorkspaceLabel">Choose project folder</span>
+        </button>
+      </div>
+      <p id="bulkSummary" class="bulk-summary">Add prompts to start.</p>
+      <div id="bulkError" class="dialog-error" hidden></div>
+      <section id="bulkProgress" class="bulk-progress" hidden>
+        <div class="bulk-progress-head">
+          <strong id="bulkProgressLabel">Batch</strong>
+          <span id="bulkProgressCounts"></span>
+        </div>
+        <div class="bulk-bar" aria-hidden="true"><i id="bulkBar"></i></div>
+        <ol id="bulkJobs" class="bulk-jobs"></ol>
+      </section>
+      <div class="dialog-actions">
+        <button id="bulkOpenFolder" class="btn quiet" type="button" hidden>Open folder</button>
+        <button id="bulkCancelRun" class="btn quiet" type="button" hidden>Stop batch</button>
+        <button id="bulkNew" class="btn quiet" type="button" hidden>New batch</button>
+        <button id="bulkStart" class="btn primary" type="submit">Generate</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="changesDialog" class="glass-dialog changes-dialog">
     <div class="dialog-card">
       <div class="dialog-head">

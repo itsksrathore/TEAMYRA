@@ -99,7 +99,22 @@ def handle(action, payload):
     if action == "media.claim":
         return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"))
     if action == "media.status":
-        return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30))
+        return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30),
+                                       payload.get("batch_id"))
+    if action == "media.status-many":
+        return media_engine.status_many(ROOT, payload.get("job_ids") or [])
+    if action == "media.release":
+        return media_engine.release_job(ROOT, payload["job_id"], delay=payload.get("delay", 15),
+                                        reason=payload.get("reason"))
+    if action == "media.batch":
+        return media_engine.create_batch(ROOT, payload.get("requests") or [],
+                                         max_parallel=payload.get("max_parallel"))
+    if action == "media.cancel":
+        return media_engine.cancel_job(ROOT, payload["job_id"])
+    if action == "media.cancel-batch":
+        return media_engine.cancel_batch(ROOT, payload["batch_id"])
+    if action == "media.recover":
+        return media_engine.recover_job(ROOT, payload["job_id"], automatic=payload.get("automatic") is True)
     if action == "media.prepare-output":
         return media_engine.prepare_output(ROOT, payload["job_id"])
     if action == "media.update-state":

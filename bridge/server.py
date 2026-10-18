@@ -1097,6 +1097,8 @@ MEDIA_REQUEST_PROPERTIES = {
     "audio_reference": {"type": "string"},
     "video_reference": {"type": "string"},
     "generation_settings": {"type": "object"},
+    "max_parallel": {"type": "integer", "minimum": 1, "maximum": 30,
+                     "description": "Bulk throughput: how many Flow generations this job may share with other queued jobs at once. The desktop worker submits jobs back to back, waits on all of them together and adapts downward if Flow reports it is busy. Default 10."},
 }
 TOOLS = [
     {"name": "provider_list", "description": "List TEAMYRA providers/accounts as seen by the desktop app, including ChatGPT, Codex, Claude and Antigravity profiles.",
@@ -1129,11 +1131,13 @@ TOOLS = [
     {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings.",
      "inputSchema": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
                      "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
-    {"name": "media_batch", "description": "Queue independent media jobs and auto-wake each required worker. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames.",
+    {"name": "media_batch", "description": "Bulk-generate up to 50 images/videos/sound effects in parallel. Jobs share one batch_id; the desktop worker submits them back to back so Flow generates many at once (e.g. 10-30 videos in minutes rather than one by one), then downloads and verifies each result. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames. Poll media_status with batch_id.",
      "inputSchema": {"type": "object", "properties": {
          "requests": {"type": "array", "minItems": 1, "maxItems": 50,
                       "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
-                                "required": ["type", "prompt", "project_path"], "additionalProperties": False}}},
+                                "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
+         "max_parallel": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10,
+                          "description": "Concurrent Flow generations for this batch; adapts downward automatically when Flow is busy."}},
          "required": ["requests"], "additionalProperties": False}},
     {"name": "media_transform", "description": "Queue an edit/variation/extend/remix operation against an exact TEAMYRA asset id.",
      "inputSchema": {"type": "object", "properties": {
@@ -1163,9 +1167,10 @@ TOOLS = [
          "required": ["operation", "asset_id"], "additionalProperties": False}},
     {"name": "media_capabilities", "description": "Read enforced media workflow rules without loading the browser: video native 720p then 1080p upscale; SFX 360p source video then audio extraction; Omni image ingredients with no exact first/end Frames.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "media_status", "description": "Read one TEAMYRA media job or recent media jobs, including durable state and completed asset metadata.",
+    {"name": "media_status", "description": "Read media job progress, asset metadata and recovery_plan with error category, safe next action and automatic retry budget. Poll the same job during recovery; do not create replacement generations.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
+         "batch_id": {"type": "string", "description": "Summarize every job of a media_batch: counts by status, done flag and per-job assets."},
          "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 30}},
          "additionalProperties": False}},
     {"name": "media_assets", "description": "Resolve/list TEAMYRA generated assets by persistent asset id, project, or media type.",
@@ -1175,12 +1180,14 @@ TOOLS = [
          "type": {"type": "string", "enum": MEDIA_TYPE_ENUM},
          "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}},
          "additionalProperties": False}},
-    {"name": "media_cancel", "description": "Request cancellation of a queued or in-progress TEAMYRA media job.",
-     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
-                     "required": ["job_id"], "additionalProperties": False}},
+    {"name": "media_cancel", "description": "Request cancellation of a queued or in-progress TEAMYRA media job, or every unfinished job of a batch_id.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "batch_id": {"type": "string"}},
+                     "additionalProperties": False}},
     {"name": "media_resume_auth", "description": "Resume media jobs after Google authentication is restored. Jobs already submitted to a provider are preserved for reconciliation and are never blindly resubmitted.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "media_resume_download", "description": "Resume a failed/auth-blocked/rate-limited media job with an identified provider submission. Reconciles and downloads its existing result without generating again.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
+    {"name": "media_recover", "description": "Safely recover a stopped media job using its durable checkpoints. Retries confirmed pre-submission failures or reconciles/downloads an existing submission; never blindly clicks Generate twice. Returns recovery_plan when login, credits, policy refusal or missing identity require attention. Use after inspecting media_status, then poll the same job_id.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
     {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
      "inputSchema": {"type": "object", "properties": {
@@ -1544,7 +1551,7 @@ def tool_call(name, a):
         result["runtime"] = wake_media_surface(surface)
         return result
     if name == "media_batch":
-        result = media_engine.create_batch(ROOT, a["requests"])
+        result = media_engine.create_batch(ROOT, a["requests"], max_parallel=a.get("max_parallel"))
         surfaces = {
             "music" if item.get("provider_surface") == "google-flow-music" else "visual"
             for item in result["jobs"]
@@ -1567,12 +1574,22 @@ def tool_call(name, a):
                                     "first_frame_alias": "Accepted as an image ingredient, without an exact opening-frame guarantee", "last_frame": "Rejected before generation"},
                 "runtime": "Desktop-dependent requests cold-start the app hidden; active jobs retain the browser, idle views unload after a grace period"}
     if name == "media_status":
-        return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30))
+        return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30), a.get("batch_id"))
+    if name == "media_recover":
+        result = media_engine.recover_job(ROOT, a["job_id"])
+        if result["recovered"]:
+            job = media_engine.load_job(ROOT, a["job_id"])
+            result["runtime"] = wake_media_surface(job["request"]["surface"])
+        return result
     if name == "media_assets":
         return media_engine.list_assets(
             ROOT, a.get("project_path"), a.get("asset_id"), a.get("type"), a.get("limit", 100)
         )
     if name == "media_cancel":
+        if a.get("batch_id") and not a.get("job_id"):
+            return media_engine.cancel_batch(ROOT, a["batch_id"])
+        if not a.get("job_id"):
+            raise ValueError("job_id or batch_id is required")
         return media_engine.cancel_job(ROOT, a["job_id"])
     if name == "media_resume_auth":
         result = media_engine.resume_auth_jobs(ROOT)

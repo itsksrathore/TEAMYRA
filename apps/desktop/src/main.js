@@ -5,6 +5,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createStartupLog, loadDesktopWindow } = require('./startup-diagnostics');
 
+// Keep hidden embedded workers running before Chromium starts any renderer.
+for (const name of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows']) {
+  app.commandLine.appendSwitch(name);
+}
+const { DesktopControlPoller } = require('./desktop-control-poller');
+
 const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
 
 function looksLikeTeamyraRoot(candidate) {
@@ -549,6 +555,7 @@ function createWindow(background = false) {
     icon: windowIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -684,6 +691,45 @@ ipcMain.handle('teamyra:media-visible', async (_event, visible) => {
 ipcMain.handle('teamyra:media-bounds', (_event, bounds = {}) => {
   if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
   return googleMediaEngine.setBounds(bounds);
+});
+
+const BULK_MEDIA_TYPES = new Set(['image', 'video', 'sound_effect']);
+const BULK_REQUEST_KEYS = ['prompt', 'aspect_ratio', 'duration', 'format', 'download_quality', 'generation_resolution', 'references'];
+ipcMain.handle('teamyra:media-batch', async (_event, options = {}) => {
+  const type = String(options.type || '');
+  if (!BULK_MEDIA_TYPES.has(type)) throw new Error('Bulk generation supports images, videos and sound effects');
+  const projectPath = String(options.projectPath || '').trim();
+  if (!projectPath || !fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) throw new Error('Choose an existing project folder');
+  const items = Array.isArray(options.requests) ? options.requests : [];
+  if (!items.length || items.length > 50) throw new Error('A bulk run takes 1 to 50 generations');
+  const requests = items.map(item => {
+    const request = { type, project_path: projectPath };
+    for (const key of BULK_REQUEST_KEYS) {
+      if (item?.[key] !== undefined && item[key] !== null && item[key] !== '') request[key] = item[key];
+    }
+    return request;
+  });
+  const result = await callCore('media.batch', { requests, max_parallel: Number(options.maxParallel) || undefined }, { timeout: 60000 });
+  let runtime = null;
+  try {
+    runtime = googleMediaEngine ? googleMediaEngine.wake('visual', options.profileId || googleMediaEngine.activeProfileId || 'google') : null;
+  } catch (error) {
+    runtime = { error: String(error?.message || error) };
+  }
+  return { ...result, runtime };
+});
+ipcMain.handle('teamyra:media-batch-status', (_event, batchId) =>
+  callCore('media.status', { batch_id: String(batchId || '') }, { timeout: 20000 }));
+ipcMain.handle('teamyra:media-batch-cancel', (_event, batchId) =>
+  callCore('media.cancel-batch', { batch_id: String(batchId || '') }, { timeout: 30000 }));
+ipcMain.handle('teamyra:media-open-folder', async (_event, projectPath) => {
+  const root = path.resolve(String(projectPath || ''));
+  const generated = path.join(root, 'Generated Assets');
+  const target = fs.existsSync(generated) ? generated : root;
+  if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error('Project folder is unavailable');
+  const error = await shell.openPath(target);
+  if (error) throw new Error(error);
+  return { ok: true, path: target };
 });
 ipcMain.handle('teamyra:mcp-connections', async () => {
   const state = await getMcpConnections();
@@ -1134,7 +1180,7 @@ function safeSettingToken(value, field, maxLength = 120) {
 
 
 const DESKTOP_CONTROL_DIR = path.join(ROOT, '.teamyra-desktop', 'control');
-let desktopControlTimer = null;
+let desktopControlPoller = null;
 
 async function desktopCreateAccount(providerId, requestedName) {
   const provider = providerById(providerId);
@@ -1225,6 +1271,19 @@ async function dispatchDesktopControl(action, payload = {}) {
         return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
       }
       let diagnosticAction = null;
+      if (payload.prepare_workspace || (Array.isArray(payload.radio_patterns) && payload.radio_patterns.length)) {
+        if (runtime.visualConsumer.busy || runtime.musicConsumer.busy) throw new Error('Media worker is busy; settings diagnostics must wait');
+      }
+      if (payload.surface !== 'music' && payload.prepare_workspace === true) {
+        diagnosticAction = await surface.adapter.browser.withActivePage(async () => {
+          await surface.adapter.ensureWorkspace();
+          if (payload.verify_video_settings === true) {
+            return surface.adapter.selectIntent({ type: 'video', aspect_ratio: '16:9', output_count: 1,
+              generation_settings: { generation_resolution: '720p' } });
+          }
+          return { workspace_ready: true };
+        }).catch(error => ({ ok: false, error: String(error?.message || error).slice(0, 1200) }));
+      }
       if (payload.surface !== 'music' && Array.isArray(payload.radio_patterns) && payload.radio_patterns.length) {
         diagnosticAction = await surface.adapter.selectRadioSetting(
           payload.radio_patterns.map(value => String(value)),
@@ -1293,7 +1352,7 @@ async function dispatchDesktopControl(action, payload = {}) {
   const cmd = action.slice('chatgpt.'.length);
   const profileId = String(payload.profile_id || 'web');
   const provider = await ensureChatgptProvider(profileId);
-  if (cmd === 'status') return provider.refreshStatus();
+  if (cmd === 'status') return provider.getStatus();
   if (cmd === 'open') {
     activeChatgptProfileId = profileId;
     for (const [id, other] of chatgptProviders) other.setVisible(id === profileId);
@@ -1301,7 +1360,10 @@ async function dispatchDesktopControl(action, payload = {}) {
   }
   if (cmd === 'close') return provider.close();
   if (cmd === 'reload') return provider.reload();
-  if (cmd === 'reconnect') return provider.reconnect();
+  if (cmd === 'reconnect') {
+    void provider.reconnect().catch(() => {});
+    return { ok: true };
+  }
   if (cmd === 'new_chat') return provider.createConversation();
   if (cmd === 'stop') return provider.stopGeneration();
   if (cmd === 'send') return provider.sendTask(String(payload.text || ''));
@@ -1334,46 +1396,16 @@ async function dispatchDesktopControl(action, payload = {}) {
   throw new Error('Unsupported ChatGPT control action');
 }
 
-async function processDesktopControlRequests() {
-  if (desktopReady && Date.now() - desktopStateWrittenAt >= 5000) publishDesktopState();
-  fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
-  const files = fs.readdirSync(DESKTOP_CONTROL_DIR).filter(name => name.endsWith('.request.json')).slice(0, 20);
-  for (const name of files) {
-    const requestPath = path.join(DESKTOP_CONTROL_DIR, name);
-    const responsePath = requestPath.replace(/\.request\.json$/, '.response.json');
-    let req = null;
-    try { req = JSON.parse(fs.readFileSync(requestPath, 'utf8')); } catch {}
-    if (!req?.id || !req?.action) {
-      try { fs.unlinkSync(requestPath); } catch {}
-      continue;
-    }
-    try {
-      const result = await dispatchDesktopControl(String(req.action), req.payload || {});
-      fs.writeFileSync(responsePath, JSON.stringify({ id: req.id, ok: true, result }), 'utf8');
-    } catch (error) {
-      fs.writeFileSync(responsePath, JSON.stringify({ id: req.id, ok: false, error: String(error?.message || error) }), 'utf8');
-    }
-    try { fs.unlinkSync(requestPath); } catch {}
-  }
-  return files.length;
-}
-
-function scheduleDesktopControlLoop(delayMs = 500) {
-  if (isQuitting) return;
-  clearTimeout(desktopControlTimer);
-  desktopControlTimer = setTimeout(async () => {
-    desktopControlTimer = null;
-    let processed = 0;
-    try { processed = await processDesktopControlRequests(); } catch {}
-    scheduleDesktopControlLoop(processed > 0 ? 100 : 500);
-  }, Math.max(50, Number(delayMs) || 500));
-  desktopControlTimer.unref?.();
-}
-
 function startDesktopControlLoop() {
-  if (desktopControlTimer) return;
-  fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
-  scheduleDesktopControlLoop(100);
+  if (desktopControlPoller) return;
+  desktopControlPoller = new DesktopControlPoller({
+    directory: DESKTOP_CONTROL_DIR,
+    dispatch: dispatchDesktopControl,
+    onTick: () => {
+      if (desktopReady && Date.now() - desktopStateWrittenAt >= 5000) publishDesktopState();
+    }
+  });
+  desktopControlPoller.start();
 }
 
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
@@ -1484,8 +1516,8 @@ app.on('before-quit', () => {
   isQuitting = true;
   if (gotSingleInstanceLock) { try { publishDesktopState(false); } catch {} }
   clearDesktopIdleExit();
-  if (desktopControlTimer) clearTimeout(desktopControlTimer);
-  desktopControlTimer = null;
+  desktopControlPoller?.stop();
+  desktopControlPoller = null;
   try { googleMediaEngine?.destroy(); } catch {}
   googleMediaEngine = null;
   stopOwnedMcp();

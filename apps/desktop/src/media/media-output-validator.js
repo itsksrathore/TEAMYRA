@@ -47,4 +47,50 @@ function verifyMediaOutput(file, request, downloadAction = {}) {
   });
 }
 
-module.exports = { verifyMediaOutput, convertImage };
+// Same 9x8 difference hash as the Flow tile thumbnail: area-scale to 72x64,
+// average 8x8 blocks, compare horizontal neighbours. Videos hash one frame per
+// second (plus the first) because a tile poster may come from any moment.
+function dHashFromGray(gray) {
+  const blocks = new Array(72).fill(0);
+  for (let y = 0; y < 64; y += 1) for (let x = 0; x < 72; x += 1) {
+    blocks[Math.floor(y / 8) * 9 + Math.floor(x / 8)] += gray[y * 72 + x];
+  }
+  let hex = '';
+  for (let row = 0; row < 8; row += 1) {
+    let byte = 0;
+    for (let col = 0; col < 8; col += 1) byte = (byte << 1) | (blocks[row * 9 + col] > blocks[row * 9 + col + 1] ? 1 : 0);
+    hex += byte.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+function mediaFingerprints(file, { maxFrames = 12 } = {}) {
+  const ffmpeg = resolveFfmpeg();
+  if (!ffmpeg) return Promise.resolve([]);
+  const frameBytes = 72 * 64;
+  return new Promise(resolve => {
+    execFile(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-i', file,
+      '-vf', "select='eq(n\,0)+gte(t-prev_selected_t\,1)',scale=72:64:flags=area,format=gray",
+      '-vsync', 'vfr', '-frames:v', String(maxFrames), '-f', 'rawvideo', '-'],
+    { windowsHide: true, timeout: 60000, encoding: 'buffer', maxBuffer: frameBytes * (maxFrames + 1) }, (error, stdout) => {
+      if (error || !stdout?.length) return resolve([]);
+      const hashes = [];
+      for (let offset = 0; offset + frameBytes <= stdout.length; offset += frameBytes) {
+        hashes.push(dHashFromGray(stdout.subarray(offset, offset + frameBytes)));
+      }
+      resolve([...new Set(hashes)]);
+    });
+  });
+}
+
+function hammingDistance(a, b) {
+  if (!a || !b || a.length !== b.length) return 64;
+  let distance = 0;
+  for (let i = 0; i < a.length; i += 2) {
+    let x = parseInt(a.slice(i, i + 2), 16) ^ parseInt(b.slice(i, i + 2), 16);
+    while (x) { distance += x & 1; x >>= 1; }
+  }
+  return distance;
+}
+
+module.exports = { verifyMediaOutput, convertImage, mediaFingerprints, hammingDistance, dHashFromGray };

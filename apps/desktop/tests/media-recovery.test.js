@@ -58,9 +58,10 @@ async function main() {
   // state, and an uncertain acknowledged click may only reconcile on restart.
   const consumerSource = fs.readFileSync(path.join(__dirname, '../src/media/media-job-consumer.js'), 'utf8');
   const consumerRequire = createRequire(path.join(__dirname, '../src/media/media-job-consumer.js'));
-  async function workerFailure(kind, priorSubmission = null) {
+  async function workerFailure(kind, priorSubmission = null, recovery = null) {
     const record = { job_id: 'failure-test', request: { type: kind === 'image-fallback' ? 'image' : 'video', prompt: 'test' }, provider_submission: priorSubmission || {} };
     const calls = [];
+    record.recovery = recovery;
     const core = async (name, args) => {
       calls.push({ name, args });
       if (name === 'media.status') return { ...record };
@@ -73,6 +74,7 @@ async function main() {
     vm.runInNewContext(consumerSource, { module, require: name => name === '../core-api' ? { callCore: core } : consumerRequire(name), setTimeout, clearTimeout, console });
     let submissions = 0;
     let reconciliations = 0;
+    let browserResets = 0;
     const downloads = [];
     const adapter = {
       probe: async () => ({ buttonLabels: kind === 'auth' ? ['Sign in'] : [] }),
@@ -92,9 +94,9 @@ async function main() {
         return { quality: kind === 'image-fallback' ? (downloads.length === 1 ? '4x' : '2x') : '1080p' };
       }
     };
-    const consumer = new module.exports.MediaJobConsumer({ surface: 'visual', provider: { ensureLoaded: async () => {}, adapter, view: { webContents: { id: 7 } } }, downloadManager: { expect: () => Promise.reject(new Error('download_failure: interrupted')), cancelJob() {} } });
+    const consumer = new module.exports.MediaJobConsumer({ surface: 'visual', provider: { destroy: () => { browserResets++; }, ensureLoaded: async () => {}, adapter, view: { webContents: { id: 7 } } }, downloadManager: { expect: () => Promise.reject(new Error('download_failure: interrupted')), cancelJob() {} } });
     await consumer.process(record);
-    return { record, submissions, reconciliations, calls, downloads };
+    return { record, submissions, reconciliations, calls, downloads, browserResets };
   }
   for (const [kind, state] of [['auth', 'needs_user_auth'], ['credits', 'failed'], ['rate', 'rate_limited']]) {
     const run = await workerFailure(kind);
@@ -108,7 +110,11 @@ async function main() {
   assert.equal(fallback.submissions, 1, 'upscale fallback never submits another generation');
   const uncertain = await workerFailure('uncertain');
   assert.equal(uncertain.record.provider_submission.submitted_at, 1);
-  const restarted = await workerFailure('restart', uncertain.record.provider_submission);
+  assert.equal(uncertain.record.submission_phase, 'may_have_submitted');
+  assert.equal(uncertain.calls.some(call => call.name === 'media.recover' && call.args.automatic), true);
+  const restarted = await workerFailure('restart', uncertain.record.provider_submission, { reset_browser: true, auto_attempts: 1 });
+  assert.equal(restarted.browserResets, 1);
+  assert.equal(restarted.record.recovery.reset_browser, false);
   assert.equal(restarted.submissions, 0);
   assert.equal(restarted.reconciliations, 1);
 
