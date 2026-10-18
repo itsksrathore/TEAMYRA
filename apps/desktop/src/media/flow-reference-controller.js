@@ -15,6 +15,19 @@ function canonicalSource(value) {
   catch { return ''; }
 }
 
+// A project file uploaded once is reused by its unique upload title for later
+// jobs in the same Flow project instead of being uploaded (and added to the
+// project grid) again. Keyed by project, file path, size and modification time.
+const uploadedReferences = new Map();
+
+function uploadKey(projectUrl, file) {
+  const project = String(projectUrl || '').match(/\/project\/([^/?#]+)/)?.[1] || '';
+  try {
+    const stat = fs.statSync(file);
+    return project ? [project, path.resolve(file).toLowerCase(), stat.size, Math.round(stat.mtimeMs)].join('|') : '';
+  } catch { return ''; }
+}
+
 // Omni references are prompt ingredients. Never promise exact first/end frames.
 class FlowReferenceController {
   constructor(adapter) { this.adapter = adapter; }
@@ -58,11 +71,81 @@ class FlowReferenceController {
       throw new Error('selector_failure: old reference ingredients cannot be cleared safely');
     }
   }
+  async pickerState() {
+    return this.adapter.executePageScript(`(() => {
+      const trigger = document.querySelector('button[aria-label="Add ingredients to the prompt box"]');
+      const list = document.querySelector('[role="listbox"][aria-label="Asset list"]');
+      const uploadControl = [...document.querySelectorAll('button')].some(el => {
+        const clone = el.cloneNode(true);
+        clone.querySelectorAll('mat-icon,[aria-hidden="true"]').forEach(icon => icon.remove());
+        const name = (el.getAttribute('aria-label') || el.getAttribute('mattooltip') || clone.textContent || '').trim().toLowerCase();
+        return name === 'upload media' && el.getBoundingClientRect().width > 0;
+      });
+      return { trigger: Boolean(trigger), expanded: trigger?.getAttribute('aria-expanded') || null, upload: uploadControl,
+        disabled: Boolean(trigger?.disabled || trigger?.getAttribute('aria-disabled') === 'true'),
+        list: Boolean(list), options: list ? list.querySelectorAll('[role="option"]').length : 0,
+        overlays: [...document.querySelectorAll('.cdk-overlay-pane,[role="dialog"],flow-info-panel')]
+          .filter(el => el.getBoundingClientRect().width > 0)
+          .map(el => String(el.getAttribute('aria-label') || el.tagName.toLowerCase()).slice(0, 60) + ': ' +
+            String(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)).slice(0, 8) };
+    })()`).catch(error => ({ error: String(error?.message || error).slice(0, 200) }));
+  }
+  // Leftover menus, info panels or a half-closed picker intercept the trigger
+  // after busy bulk activity; close them before trying again.
+  async dismissOverlays() {
+    await this.adapter.executePageScript(`(() => {
+      document.querySelectorAll('.cdk-overlay-backdrop').forEach(el => el.click());
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+      return true;
+    })()`).catch(() => false);
+    await new Promise(resolve => setTimeout(resolve, 400));
+  }
+  async nativeClickTrigger() {
+    const selector = await this.adapter.executePageScript(`(() => {
+      const el = document.querySelector('button[aria-label="Add ingredients to the prompt box"]');
+      if (!el || el.disabled) return '';
+      el.setAttribute('data-teamyra-ingredient-trigger', '1');
+      return 'button[data-teamyra-ingredient-trigger="1"]';
+    })()`).catch(() => '');
+    if (!selector) return false;
+    return this.adapter.browser.clickSelector(selector).catch(() => false);
+  }
   async openPicker() {
-    if (!await this.clickButton('Add ingredients to the prompt box')) {
-      throw new Error('selector_failure: Omni prompt ingredient picker is unavailable');
+    let last = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const state = await this.pickerState();
+      if (state.list || (state.expanded === 'true' && state.upload)) return;
+      if (attempt || state.expanded === 'true' || state.overlays?.length) await this.dismissOverlays();
+      const clicked = attempt < 2 ? await this.clickButton('Add ingredients to the prompt box') : await this.nativeClickTrigger();
+      if (!clicked) {
+        last = await this.pickerState();
+        continue;
+      }
+      try {
+        // A project with no assets yet opens on its Upload view, without a list.
+        await this.waitFor(async () => {
+          const current = await this.pickerState();
+          return current.list || (current.expanded === 'true' && current.upload);
+        }, 'ingredient asset picker', attempt < 2 ? 15000 : 30000);
+        return;
+      } catch { last = await this.pickerState(); }
     }
-    await this.waitFor(() => this.adapter.executePageScript(`Boolean(document.querySelector('[role="listbox"][aria-label="Asset list"]'))`), 'ingredient asset picker');
+    if (last && last.trigger === false) throw new Error('selector_failure: Omni prompt ingredient picker is unavailable; state=' + JSON.stringify(last).slice(0, 600));
+    throw new Error('selector_failure: ingredient asset picker did not become ready after 3 attempts; state=' + JSON.stringify(last).slice(0, 600));
+  }
+  async selectUploaded(cached) {
+    const rows = await this.candidates();
+    // Flow may list the upload with or without its file extension.
+    const titles = (cached.titles || [cached.title]).map(title => String(title).toLowerCase());
+    const row = rows.find(item => titles.includes(item.title.toLowerCase()));
+    if (!row) return null;
+    await this.adapter.executePageScript(`document.querySelector('[data-teamyra-reference-option="' + ${JSON.stringify(row.marker)} + '"]')?.click()`);
+    const preview = await this.waitFor(async () => {
+      const current = await this.preview();
+      return current?.title === row.title ? current : null;
+    }, 'reused reference preview', 45000).catch(() => null);
+    return preview ? cached.identity : null;
   }
   async candidates() {
     return this.adapter.executePageScript(`(() => [...document.querySelectorAll('[role="listbox"][aria-label="Asset list"] [role="option"]')].map((el, index) => {
@@ -128,7 +211,13 @@ class FlowReferenceController {
           error => error ? reject(error) : resolve()));
         if (fs.statSync(file).size > 10 * 1024 * 1024) throw new Error('selector_failure: prepared reference is still too large to upload');
       } else fs.copyFileSync(reference.path, file, fs.constants.COPYFILE_EXCL);
-      await this.adapter.browser.uploadFiles(() => this.clickButton('Upload media'), [file]);
+      await this.adapter.browser.uploadFiles(async () => {
+        if (await this.clickButton('Upload media')) return true;
+        // The empty-project view keeps Upload media behind its Upload tab.
+        if (!await this.clickButton('Upload')) return false;
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return this.clickButton('Upload media');
+      }, [file]);
       let selectedTitle = '';
       const selected = await this.waitFor(async () => {
         const rows = await this.candidates();
@@ -144,6 +233,7 @@ class FlowReferenceController {
       // Its opaque thumbnail is tied to the unique upload; the composer reveals
       // the canonical UUID after Add to prompt, checked in attach().
       return { source: canonicalSource(selected.source), uploaded_name: uniqueName,
+        uploaded_titles: [...new Set([selectedTitle, uniqueName, path.basename(file)])],
         preparation: { optimized, original_bytes: originalBytes, upload_bytes: fs.statSync(file).size } };
     } finally {
       try { fs.unlinkSync(file); } catch {}
@@ -152,9 +242,26 @@ class FlowReferenceController {
   }
   async attach(reference) {
     const before = await this.attachments();
+    const expected = mediaId(reference.provider_asset_id);
+    // Bring a TEAMYRA asset's grid tile into the virtualized grid before the
+    // picker opens; selectExisting binds the picker row through that tile.
+    if (expected) await this.adapter.revealResult?.(expected)?.catch?.(() => false);
     await this.openPicker();
     let identity = await this.selectExisting(reference);
     let uploaded = null;
+    let reused = false;
+    const cacheKey = reference.path ? uploadKey(this.adapter.webContents?.getURL?.(), reference.path) : '';
+    const cached = cacheKey ? uploadedReferences.get(cacheKey) : null;
+    if (!identity && cached) {
+      identity = await this.selectUploaded(cached);
+      reused = Boolean(identity);
+      if (!identity) {
+        // A half-finished reuse leaves the picker on its preview; start the
+        // upload from a freshly opened picker.
+        await this.dismissOverlays();
+        await this.openPicker();
+      }
+    }
     if (!identity) uploaded = await this.uploadFile(reference);
     if (!identity && !uploaded) throw new Error('selector_failure: reference image identity is unavailable');
     if (!await this.clickButton('Add to prompt')) throw new Error('selector_failure: Add to prompt is unavailable');
@@ -169,9 +276,14 @@ class FlowReferenceController {
     }, 'verified prompt image ingredient');
     if (!identity) identity = attached.map(item => mediaId(item.source)).find(id => !beforeIds.includes(id));
     if (!identity) throw new Error('selector_failure: uploaded ingredient lacks a stable image ID');
+    if (uploaded && cacheKey) {
+      if (uploadedReferences.size > 500) uploadedReferences.delete(uploadedReferences.keys().next().value);
+      uploadedReferences.set(cacheKey, { title: uploaded.uploaded_name, titles: uploaded.uploaded_titles || [uploaded.uploaded_name], identity });
+    }
     return { asset_id: reference.asset_id || null, path: reference.path,
       requested_roles: reference.roles || ['ingredient'], effective_role: 'ingredient',
-      provider_asset_id: identity, verified: true, upload_preparation: uploaded?.preparation || null };
+      provider_asset_id: identity, verified: true, upload_preparation: uploaded?.preparation || null,
+      reused_upload: reused };
   }
   async matches(items = []) {
     const attached = await this.attachments();
@@ -188,4 +300,4 @@ class FlowReferenceController {
   }
 }
 
-module.exports = { FlowReferenceController, mediaId, canonicalSource };
+module.exports = { FlowReferenceController, mediaId, canonicalSource, uploadedReferences, uploadKey };

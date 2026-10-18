@@ -10,7 +10,7 @@ const STATUS_CACHE_MS = 15000;
 const BROWSER_IDLE_MS = 45000;
 
 class GoogleMediaProfileRuntime {
-  constructor({ window, profileId }) {
+  constructor({ window, profileId, ready = Promise.resolve() }) {
     this.window = window;
     this.profileId = safeProfileId(profileId);
     this.sessionManager = new GoogleMediaSessionManager(this.profileId);
@@ -23,6 +23,7 @@ class GoogleMediaProfileRuntime {
       provider: this.visual,
       downloadManager: this.downloadManager,
       profileId: this.profileId,
+      ready,
       onActivity: () => this.touch()
     });
     this.musicConsumer = new MediaJobConsumer({
@@ -31,6 +32,7 @@ class GoogleMediaProfileRuntime {
       provider: this.music,
       downloadManager: this.downloadManager,
       profileId: this.profileId,
+      ready,
       onActivity: () => this.touch()
     });
     this.started = false;
@@ -370,13 +372,16 @@ class GoogleMediaEngine {
     this.profiles = new Map();
     this.activeProfileId = 'google';
     this.started = false;
+    this.recoveryDone = () => {};
+    // Workers claim nothing until the previous process's jobs are recovered.
+    this.ready = new Promise(resolve => { this.recoveryDone = resolve; });
   }
 
   ensureProfile(profileId = 'google') {
     const id = safeProfileId(profileId);
     let runtime = this.profiles.get(id);
     if (!runtime) {
-      runtime = new GoogleMediaProfileRuntime({ window: this.window, profileId: id });
+      runtime = new GoogleMediaProfileRuntime({ window: this.window, profileId: id, ready: this.ready });
       runtime.initialize();
       this.profiles.set(id, runtime);
     }
@@ -387,7 +392,11 @@ class GoogleMediaEngine {
     if (this.started) return;
     this.started = true;
     const runtime = this.ensureProfile('google');
-    callCore('media.connection-status', {}).then(saved => {
+    // Jobs the previous desktop process left mid-flight are requeued (or marked
+    // for reconciliation if Generate may have run) before any worker claims.
+    callCore('media.recover-incomplete', {}, { timeout: 30000 }).catch(() => null)
+      .finally(() => this.recoveryDone())
+      .then(() => callCore('media.connection-status', {})).then(saved => {
       if (!saved || saved.provider !== 'google-media') return;
       runtime.lastStatus = {
         ...runtime.lastStatus,

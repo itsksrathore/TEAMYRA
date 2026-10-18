@@ -33,6 +33,9 @@ class MediaDownloadManager {
     this.inbox = new Set();
     this.held = [];
     this.sequence = 0;
+    // Once a download was abandoned (timeout/cancel) while files were in flight,
+    // a held file may belong to it, so "only candidate left" proves nothing.
+    this.untrusted = new Map();
     this.sessionManager.setDownloadHandler((event, item, webContents) => this.handleDownload(event, item, webContents));
   }
 
@@ -53,6 +56,7 @@ class MediaDownloadManager {
           this.expected = this.expected.filter(item => item !== record);
           this.active.delete(record);
           record.item?.cancel();
+          this.markAbandoned(record);
           reject(new Error('download_failure: Timed out waiting for Google media download completion'));
           this.settleHeld(record.webContentsId);
         }, timeoutMs)
@@ -161,23 +165,33 @@ class MediaDownloadManager {
     return margin >= MATCH_MARGIN ? { ...best, attribution: 'fingerprint' } : null;
   }
 
+  markAbandoned(record) {
+    const id = record.webContentsId;
+    const busy = this.pendingFor(id).length || this.held.some(entry => entry.webContentsId === id) ||
+      [...this.inbox].some(entry => entry.webContentsId === id);
+    if (!busy) return;
+    if (!this.untrusted.has(id)) this.untrusted.set(id, new Set());
+    this.untrusted.get(id).add(record.signature);
+  }
+
   settleHeld(webContentsId) {
     for (;;) {
       const files = this.held.filter(entry => entry.webContentsId === webContentsId);
-      if (!files.length) return;
+      if (!files.length) return this.restoreTrustIfIdle(webContentsId);
       const pending = this.pendingFor(webContentsId);
       const arriving = [...this.inbox].some(entry => entry.webContentsId === webContentsId);
       if (!pending.length) {
         if (!arriving) for (const file of files) this.discard(file);
-        return;
+        return this.restoreTrustIfIdle(webContentsId);
       }
       let choice = this.choosePair(files, pending);
-      if (!choice && pending.length === 1 && files.length === 1 && !arriving) {
+      if (!choice && pending.length === 1 && files.length === 1 && !arriving && !this.untrusted.has(webContentsId)) {
         choice = { file: files[0], record: pending[0], attribution: 'only_candidate' };
       }
       if (!choice) {
         const signatures = new Set(pending.map(record => record.signature));
-        if (signatures.size === 1 && pending[0].signature) {
+        const abandoned = this.untrusted.get(webContentsId) || new Set();
+        if (signatures.size === 1 && pending[0].signature && [...abandoned].every(item => item === pending[0].signature)) {
           // Identical requests (bulk copies) are interchangeable.
           const oldest = [...pending].sort((a, b) => a.order - b.order)[0];
           choice = { file: files[0], record: oldest, attribution: 'identical_request' };
@@ -194,8 +208,14 @@ class MediaDownloadManager {
         for (const record of pending) this.rejectRecord(record, new Error('download_failure: concurrent downloads could not be attributed to their results'));
         for (const file of files) this.discard(file);
       }
-      return;
+      return this.restoreTrustIfIdle(webContentsId);
     }
+  }
+
+  restoreTrustIfIdle(webContentsId) {
+    const idle = !this.pendingFor(webContentsId).length && !this.held.some(entry => entry.webContentsId === webContentsId) &&
+      ![...this.inbox].some(entry => entry.webContentsId === webContentsId);
+    if (idle) this.untrusted.delete(webContentsId);
   }
 
   assignHeld({ file, record, attribution, distance }) {
@@ -230,7 +250,10 @@ class MediaDownloadManager {
 
   cancelJob(jobId) {
     const matches = [...this.expected, ...this.active].filter(entry => entry.jobId === String(jobId));
-    for (const record of matches) this.rejectRecord(record, new Error('Media download cancelled'));
+    for (const record of matches) {
+      this.rejectRecord(record, new Error('Media download cancelled'));
+      this.markAbandoned(record);
+    }
     for (const id of new Set(matches.map(record => record.webContentsId))) this.settleHeld(id);
   }
 }

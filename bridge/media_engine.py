@@ -94,7 +94,7 @@ def recovery_plan(job):
     text = str(job.get("error") or job.get("detail") or "").lower()
     category = failure.get("category") or next((name for name in (
         "human_verification", "login_required", "credits_exhausted", "policy_refusal",
-        "rate_limited", "selector_failure", "output_mismatch", "download_failure", "browser_probe_failed",
+        "rate_limited", "selector_failure", "output_mismatch", "provider_no_result", "download_failure", "browser_probe_failed",
     ) if name in text), "generation_failure")
     submission = job.get("provider_submission") or {}
     submitted = bool(submission.get("submitted_at"))
@@ -110,6 +110,9 @@ def recovery_plan(job):
         plan.update(action="wait", instruction="Poll teamyra.media_status for this job; do not create a replacement.")
     elif state == "needs_user_auth" or category in {"human_verification", "login_required"}:
         plan.update(action="restore_auth", instruction="Ask the user to sign in or finish verification, then call teamyra.media_resume_auth.")
+    elif category == "provider_no_result":
+        plan.update(action="revise_request", can_recover=submitted, automatic=False,
+                    instruction="Flow accepted the generation but no result appeared and a full project search found none; this is usually a silent moderation refusal. Reword the prompt and queue a new job. teamyra.media_recover only waits for the same submission again.")
     elif category == "output_mismatch":
         plan.update(action="revise_request",
                     instruction="Flow produced media that does not match the requested aspect ratio. Recovery would download the same result again; queue a new job if the output is still needed.")
@@ -866,6 +869,39 @@ def status_many(root, job_ids):
             "provider_submission": dict(job.get("provider_submission") or {}),
         }
     return {"jobs": result}
+
+
+_FLOW_PROJECT_RE = re.compile(r"^(https://flow\.google\.com/project/[A-Za-z0-9-]+)")
+
+
+def flow_project_for(root, project_path):
+    """Most recent Flow project used by jobs of this local project folder.
+
+    Keeping one folder in one Flow project keeps its uploads and results
+    together, so reference pickers see them and no empty projects are created.
+    """
+    try:
+        wanted = str(Path(project_path).expanduser().resolve()).lower()
+    except (OSError, ValueError, TypeError):
+        return {"provider_url": None}
+    # The project holding most of the folder's results wins; recency breaks ties.
+    usage = {}
+    for path in _jobs_dir(root).glob("media-*.json"):
+        job = _read_json(path, None)
+        if not isinstance(job, dict):
+            continue
+        if str((job.get("request") or {}).get("project_path") or "").lower() != wanted:
+            continue
+        submission = job.get("provider_submission") or {}
+        match = _FLOW_PROJECT_RE.match(str(submission.get("provider_url") or ""))
+        if not match:
+            continue
+        count, latest = usage.get(match.group(1), (0, 0.0))
+        usage[match.group(1)] = (count + 1, max(latest, float(submission.get("submitted_at") or 0)))
+    if not usage:
+        return {"provider_url": None, "jobs": 0}
+    url, (count, latest) = max(usage.items(), key=lambda item: item[1])
+    return {"provider_url": url, "jobs": count, "submitted_at": latest or None}
 
 
 def release_job(root, job_id, *, delay=15.0, reason=None):

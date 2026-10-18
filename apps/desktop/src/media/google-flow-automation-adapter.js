@@ -617,7 +617,13 @@ class GoogleFlowAutomationAdapter {
     return current;
   }
 
-  async ensureWorkspace(timeoutMs = 30000) {
+  async ensureWorkspace(timeoutMs = 30000, { preferredUrl = '', allowNavigation = true } = {}) {
+    // A local folder keeps using the Flow project its earlier jobs used.
+    const preferred = String(preferredUrl || '').match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1] || '';
+    if (preferred && allowNavigation && projectId(preferred) !== projectId(this.webContents.getURL())) {
+      await this.loadProjectUrl(preferred);
+      return { ready: true, existing: true, project_url: preferred, preferred: true };
+    }
     const currentPrompt = await this.promptSelector();
     if (currentPrompt) return { ready: true, existing: true };
 
@@ -632,7 +638,14 @@ class GoogleFlowAutomationAdapter {
       return { ready: true, existing: true, project_url: baseProjectUrl };
     }
 
-    const existingUrls = await this.projectUrls();
+    // The home page renders its project list asynchronously; creating a new
+    // (empty) project because links were not drawn yet scatters a folder's assets.
+    let existingUrls = await this.projectUrls();
+    const listDeadline = Date.now() + 8000;
+    while (!existingUrls.length && Date.now() < listDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      existingUrls = await this.projectUrls();
+    }
     if (existingUrls.length) {
       const base = String(existingUrls[0]).match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1] || existingUrls[0];
       await this.loadProjectUrl(base);
@@ -958,9 +971,10 @@ class GoogleFlowAutomationAdapter {
       let key = image?.getAttribute('data-media-id') || '';
       if (!key && image?.src) { try { key = new URL(image.src).pathname; } catch {} }
       const text = tile.textContent || '';
+      const settled = Boolean(key && tile.querySelector('button[aria-label="More options"]') && !/generating|processing|[0-9]+%/i.test(text));
+      const failed = !settled && /\\bfailed\\b|violate|polic(?:y|ies)|couldn.?t generate|can.?t generate|not allowed/i.test(text);
       return { key, type: tile.tagName === 'FLOW-VIDEO-TILE' ? 'video' : 'image',
-        text: text.trim().slice(0, 2000), ready: Boolean(key && image?.complete && image.naturalWidth > 0 &&
-          tile.querySelector('button[aria-label="More options"]') && !/generating|processing|[0-9]+%/i.test(text)) };
+        text: text.trim().slice(0, 2000), ready: settled && Boolean(image?.complete && image.naturalWidth > 0), actionable: settled, failed };
     }))()`);
   }
 
@@ -969,7 +983,8 @@ class GoogleFlowAutomationAdapter {
     const submission = job?.provider_submission || {};
     const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
     if (submission.result_key) {
-      const saved = results.find(result => result.key === submission.result_key && result.type === type && result.ready);
+      // A known result only needs its menu; a lazy thumbnail may still be loading.
+      const saved = results.find(result => result.key === submission.result_key && result.type === type && (result.ready || result.actionable));
       if (saved) return saved;
     }
     // Thumbnail URLs can change on reload. Match the provider's full prompt,
@@ -1143,7 +1158,8 @@ class GoogleFlowAutomationAdapter {
 
   async submitToWorkspace(job, beforeSubmit) {
     const request = job.request;
-    await this.stage('workspace', () => this.ensureWorkspace());
+    await this.stage('workspace', () => this.ensureWorkspace(30000, {
+      preferredUrl: job.preferred_project_url, allowNavigation: job.allow_navigation !== false }));
     await this.stage('workspace_ready', async () => {
       const deadline = Date.now() + 20000;
       while (await this.executePageScript(`Boolean(document.querySelector('flow-loading-page'))`)) {
@@ -1171,7 +1187,7 @@ class GoogleFlowAutomationAdapter {
       throw new Error('selector_failure: prompt reference identities changed before generation');
     }
     const baselineResults = await this.resultSnapshot();
-    const baselineFailures = failureSignalCount(await this.executePageScript("document.body?.innerText || ''").catch(() => ''));
+    const baselineFailures = await this.failedTileCount();
     const generation = await this.stage('generation_click', () => this.startGenerationVerified(async before => {
       await beforeSubmit({
         submitted_at: Date.now() / 1000,
@@ -1197,6 +1213,73 @@ class GoogleFlowAutomationAdapter {
       reference_attachments: references?.items || [],
       reference_mode: 'ingredients'
     };
+  }
+
+  // Flow virtualizes the result grid: only tiles near the viewport exist in the
+  // DOM. These helpers scroll its container to search beyond that window.
+  async scrollGrid(mode = 'next') {
+    return this.executePageScript(`(() => {
+      const tile = document.querySelector('flow-image-tile,flow-video-tile');
+      let node = tile?.parentElement || null;
+      let box = null;
+      while (node && node !== document.body) {
+        const style = getComputedStyle(node);
+        if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 20) { box = node; break; }
+        node = node.parentElement;
+      }
+      box = box || document.scrollingElement || document.documentElement;
+      const before = box.scrollTop;
+      if (${JSON.stringify(mode)} === 'top') box.scrollTop = 0;
+      else box.scrollTop = before + Math.max(200, Math.floor(box.clientHeight * 0.75));
+      const after = box.scrollTop;
+      return { moved: Math.abs(after - before) > 1, atEnd: after + box.clientHeight >= box.scrollHeight - 4, top: after };
+    })()`).catch(() => ({ moved: false, atEnd: true, top: 0 }));
+  }
+
+  async resetGrid() {
+    const result = await this.scrollGrid('top');
+    if (result.moved) await new Promise(resolve => setTimeout(resolve, 500));
+    return result;
+  }
+
+  // Visit the grid page by page from the top; stops (leaving the match
+  // rendered) as soon as visit() returns true.
+  async scanGrid(visit, { maxSteps = 24 } = {}) {
+    await this.resetGrid();
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (await visit(await this.resultSnapshot())) return true;
+      const next = await this.scrollGrid('next');
+      if (!next.moved) break;
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+    return false;
+  }
+
+  async revealResult(key) {
+    if (!key) return false;
+    if ((await this.resultSnapshot()).some(result => result.key === key)) return true;
+    return this.scanGrid(results => results.some(result => result.key === key));
+  }
+
+  async resultForJobDeep(job, options = {}) {
+    const direct = await this.resultForJob(job, options);
+    if (direct) return direct;
+    let found = null;
+    await this.scanGrid(async results => {
+      found = await this.resultForJob(job, { ...options, results });
+      return Boolean(found);
+    });
+    return found;
+  }
+
+  // Refused generations, counted once per tile (Flow's wording repeats several
+  // refusal words inside one tile, so page-text matching would over-count).
+  async failedTileCount() {
+    return this.executePageScript(`(() => [...document.querySelectorAll('flow-image-tile,flow-video-tile')].filter(tile => {
+      const text = String(tile.innerText || tile.textContent || '');
+      return !tile.querySelector('button[aria-label="More options"]') &&
+        /\\bfailed\\b|violate|polic(?:y|ies)|couldn.?t generate|can.?t generate|not allowed/i.test(text);
+    }).length)()`).then(Number).catch(() => 0);
   }
 
   async pageState(expectedUrl = '', acceptableUrls = null, { allowNavigation = true } = {}) {
@@ -1228,7 +1311,7 @@ class GoogleFlowAutomationAdapter {
       state: 'ok',
       rate_limited: cls.rateLimited,
       credits_exhausted: cls.creditsExhausted,
-      failure_signals: failureSignalCount(probe.text),
+      failure_signals: await this.failedTileCount(),
       project_id: projectId(probe.url || this.webContents.getURL())
     };
   }
@@ -1252,7 +1335,7 @@ class GoogleFlowAutomationAdapter {
   // One page inspection for every in-flight bulk job. Jobs are matched oldest
   // first and each tile is assigned at most once, so copies of one prompt and
   // already-claimed tiles never satisfy two jobs.
-  async generationStates(jobs = [], { claimedKeys = [], allowNavigation = true } = {}) {
+  async generationStates(jobs = [], { claimedKeys = [], allowNavigation = true, deepJobIds = [] } = {}) {
     const ordered = [...jobs].sort((a, b) =>
       Number(a?.provider_submission?.submitted_at || 0) - Number(b?.provider_submission?.submitted_at || 0));
     const current = projectId(this.webContents.getURL());
@@ -1264,6 +1347,7 @@ class GoogleFlowAutomationAdapter {
       for (const job of ordered) states.set(job.job_id, { state: page.state, reason: page.reason });
       return { page, states };
     }
+    await this.resetGrid();
     const results = await this.resultSnapshot();
     const taken = new Set(claimedKeys);
     for (const job of ordered) {
@@ -1280,6 +1364,28 @@ class GoogleFlowAutomationAdapter {
         states.set(job.job_id, { state: 'generating' });
       }
     }
+    // Overdue jobs may have finished outside the rendered window: search the
+    // whole grid before anyone concludes Flow returned nothing.
+    const deep = new Set(deepJobIds);
+    const overdue = ordered.filter(job => deep.has(job.job_id) && states.get(job.job_id)?.state === 'generating' &&
+      states.get(job.job_id)?.reason !== 'other_project');
+    if (overdue.length) {
+      await this.scanGrid(async snapshot => {
+        for (const job of overdue) {
+          if (states.get(job.job_id).state !== 'generating') continue;
+          const result = await this.resultForJob(job, { results: snapshot, excludeKeys: taken });
+          if (result) {
+            taken.add(result.key);
+            states.set(job.job_id, { state: 'ready_to_download', result_key: result.key, found_by: 'grid_scan' });
+          }
+        }
+        return overdue.every(job => states.get(job.job_id).state !== 'generating');
+      });
+      for (const job of overdue) {
+        if (states.get(job.job_id).state === 'generating') states.set(job.job_id, { state: 'generating', searched: true });
+      }
+      await this.resetGrid();
+    }
     return { page, states };
   }
 
@@ -1291,6 +1397,7 @@ class GoogleFlowAutomationAdapter {
   async resultFingerprint(key) {
     this.lastFingerprint = { key, source: null, reason: '' };
     if (!key) return null;
+    await this.revealResult(key);
     const page = await this.executePageScript(`(async () => {
       const key = ${JSON.stringify(key)};
       const tile = [...document.querySelectorAll('flow-image-tile,flow-video-tile')].find(tile => {
@@ -1349,6 +1456,50 @@ class GoogleFlowAutomationAdapter {
     } finally {
       try { fs.unlinkSync(temp); } catch {}
     }
+  }
+
+  // Read-only page report for diagnosing tile states and the ingredient picker.
+  async inspectPage({ probePicker = false } = {}) {
+    const tiles = await this.executePageScript(`(() => [...document.querySelectorAll('flow-image-tile,flow-video-tile')].map((tile, index) => {
+      const image = tile.querySelector('img[src]');
+      let key = image?.getAttribute('data-media-id') || '';
+      if (!key && image?.src) { try { key = new URL(image.src).pathname; } catch {} }
+      const rect = tile.getBoundingClientRect();
+      return { index, tag: tile.tagName.toLowerCase(), key: key.slice(-40),
+        img: Boolean(image), loaded: Boolean(image?.complete && image.naturalWidth), loading: image?.getAttribute('loading') || '',
+        menu: Boolean(tile.querySelector('button[aria-label="More options"]')),
+        visible: rect.width > 0 && rect.height > 0, top: Math.round(rect.top),
+        text: String(tile.innerText || tile.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        aria: [...tile.querySelectorAll('[aria-label]')].map(el => el.getAttribute('aria-label')).slice(0, 8),
+        cls: String(tile.className || '').slice(0, 120) };
+    }))()`).catch(error => ({ error: String(error?.message || error) }));
+    const report = { url: this.webContents.getURL(), tiles };
+    if (!probePicker) return report;
+    const controller = new FlowReferenceController(this);
+    const state = () => this.executePageScript(`(() => {
+      const trigger = document.querySelector('button[aria-label="Add ingredients to the prompt box"]');
+      const list = document.querySelector('[role="listbox"][aria-label="Asset list"]');
+      return { trigger: Boolean(trigger), expanded: trigger?.getAttribute('aria-expanded') || null,
+        disabled: Boolean(trigger?.disabled || trigger?.getAttribute('aria-disabled') === 'true'),
+        list: Boolean(list), options: list ? list.querySelectorAll('[role="option"]').length : 0,
+        titles: list ? [...list.querySelectorAll('[role="option"] .asset-title')].map(el => el.textContent.trim()).slice(0, 20) : [],
+        dialogs: [...document.querySelectorAll('[role="dialog"],[role="listbox"],.cdk-overlay-pane')]
+          .map(el => (el.getAttribute('aria-label') || el.getAttribute('role') || el.className || '').toString().slice(0, 80) + ': ' +
+            String(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300)).slice(0, 10) };
+    })()`).catch(error => ({ error: String(error?.message || error) }));
+    report.picker_before = await state();
+    const started = Date.now();
+    report.picker_clicked = await controller.clickButton('Add ingredients to the prompt box').catch(error => String(error?.message || error));
+    const timeline = [];
+    while (Date.now() - started < 30000) {
+      const current = await state();
+      timeline.push({ ms: Date.now() - started, ...current });
+      if (current.list && current.options) break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    report.picker_timeline = timeline.filter((item, index) => index < 3 || index === timeline.length - 1 || index % 10 === 0);
+    await controller.clearComposer().catch(error => { report.picker_close_error = String(error?.message || error); });
+    return report;
   }
 
   async openGeneratedAssetMenu(resultKey = null) {
@@ -1434,7 +1585,9 @@ class GoogleFlowAutomationAdapter {
   async startDownload(job = null, { excludeKeys = null } = {}) {
     const type = job?.request?.type;
     if (!type) throw new Error('download_failure: media request is missing');
-    const result = await this.resultForJob(job, { excludeKeys });
+    const saved = job.provider_submission?.result_key;
+    if (saved) await this.revealResult(saved);
+    const result = await this.resultForJobDeep(job, { excludeKeys });
     if (!result) throw new Error('download_failure: submitted result identity is unavailable');
     const choices = await this.openDownloadChoices(result.key);
     const quality = job.request.generation_settings?.download_quality ||

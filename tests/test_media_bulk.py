@@ -110,6 +110,31 @@ class MediaBulkTests(unittest.TestCase):
         self.assertFalse(plan['can_recover'])
         self.assertFalse(media_engine.recover_job(self.root, job_id, automatic=True)['recovered'])
 
+    def test_no_result_is_not_auto_retried(self):
+        job_id = self.claimed()
+        media_engine.update_job_state(self.root, job_id, 'failed', 'provider_no_result: no result after 400s',
+                                      extra={'failure': {'category': 'provider_no_result'},
+                                             'provider_submission': {'submitted_at': 1.0, 'provider_url': 'https://flow.google.com/project/p'}})
+        plan = media_engine.recovery_plan(media_engine.load_job(self.root, job_id))
+        self.assertEqual(plan['action'], 'revise_request')
+        self.assertFalse(plan['automatic'], 'silent moderation is not retried automatically')
+        self.assertFalse(media_engine.recover_job(self.root, job_id, automatic=True)['recovered'])
+        self.assertTrue(media_engine.recover_job(self.root, job_id)['recovered'], 'a caller may still wait on it explicitly')
+
+    def test_folder_keeps_its_flow_project(self):
+        def submitted(url, at):
+            job = media_engine.create_job(self.root, self.request())
+            media_engine.append_job_metadata(self.root, job['job_id'], {
+                'provider_submission': {'submitted_at': at, 'provider_url': url + '/edit/x'}})
+        main = 'https://flow.google.com/project/aaaa-main'
+        submitted(main, 1.0)
+        submitted(main, 2.0)
+        submitted('https://flow.google.com/project/bbbb-stray', 3.0)
+        result = media_engine.flow_project_for(self.root, str(self.project))
+        self.assertEqual(result['provider_url'], main, 'the project with most of the folder results wins')
+        self.assertEqual(result['jobs'], 2)
+        self.assertIsNone(media_engine.flow_project_for(self.root, str(self.root))['provider_url'])
+
     def test_status_many(self):
         job = media_engine.create_job(self.root, self.request())
         media_engine.cancel_job(self.root, job['job_id'])

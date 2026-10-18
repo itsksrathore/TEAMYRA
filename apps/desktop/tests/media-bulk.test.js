@@ -30,6 +30,7 @@ function fakeItem() {
 }
 
 const HASH = { A: '0000000000000000', B: 'ffffffffffffffff', C: '00000000ffffffff' };
+const DISTINCT = ['0000000000000000', 'ffffffffffffffff', '00000000ffffffff', 'ffffffff00000000', '0f0f0f0f0f0f0f0f', 'f0f0f0f0f0f0f0f0'];
 
 async function downloadManagerTests(temp) {
   // Content decides ownership when two downloads are in flight.
@@ -82,10 +83,11 @@ async function downloadManagerTests(temp) {
   assert.equal(copies[0].attribution, 'identical_request');
   assert.deepEqual(copies.map(item => fs.readFileSync(item.path, 'utf8')), ['one', 'two']);
 
-  // A held file goes to the only job left once the other is cancelled.
+  // A held file may belong to a cancelled job: it is never handed to the job left over.
   const keep = manager.expect({ jobId: 'keep', webContentsId: 4, destination: path.join(temp, 'keep.mp4'), signature: 'k' });
   const drop = manager.expect({ jobId: 'drop', webContentsId: 4, destination: path.join(temp, 'drop.mp4'), signature: 'd' });
   const dropped = assert.rejects(drop, /cancelled/);
+  const kept = assert.rejects(keep, /could not be attributed/);
   const lone = fakeItem();
   manager.handleDownload({}, lone, { id: 4 });
   fs.writeFileSync(lone.savePath, 'C');
@@ -93,7 +95,23 @@ async function downloadManagerTests(temp) {
   await sleep(20);
   manager.cancelJob('drop');
   await dropped;
-  assert.equal((await keep).attribution, 'only_candidate');
+  await kept;
+  assert.equal(fs.existsSync(path.join(temp, 'keep.mp4')), false);
+  assert.equal(manager.untrusted.size, 0, 'trust is restored once the queue drains');
+
+  // With nothing abandoned, the last held file does belong to the last job.
+  const solo = manager.expect({ jobId: 'solo', webContentsId: 5, destination: path.join(temp, 'solo.mp4'), fingerprint: HASH.A, signature: 's' });
+  const other = manager.expect({ jobId: 'other', webContentsId: 5, destination: path.join(temp, 'other.mp4'), fingerprint: HASH.B, signature: 'o' });
+  const lateItem = fakeItem();
+  manager.handleDownload({}, lateItem, { id: 5 });
+  fs.writeFileSync(lateItem.savePath, 'B');
+  lateItem.emit('done', {}, 'completed');
+  assert.equal((await other).attribution, 'fingerprint');
+  const soloItem = fakeItem();
+  manager.handleDownload({}, soloItem, { id: 5 });
+  fs.writeFileSync(soloItem.savePath, 'C');
+  soloItem.emit('done', {}, 'completed');
+  assert.equal((await solo).attribution, 'single');
   assert.ok(hammingDistance(HASH.A, HASH.B) === 64 && hammingDistance(HASH.A, HASH.A) === 0);
 }
 
@@ -142,6 +160,68 @@ async function adapterTests() {
   assert.match(portrait.text, /9:16/, '9:16 never selects the 3:4 portrait option');
   assert.equal(aspect.aspectRatioPatterns('16:9').includes('landscape'), false, '16:9 never matches the 4:3 landscape option');
 
+  // The ingredient picker retries past leftover overlays, finally with a native click.
+  const { FlowReferenceController, uploadedReferences, uploadKey } = require('../src/media/flow-reference-controller');
+  const picker = new FlowReferenceController({ executePageScript: async () => true, browser: {} });
+  const pickerCalls = [];
+  let opens = 0;
+  picker.pickerState = async () => ({ trigger: true, expanded: 'false', list: opens >= 3, overlays: opens ? ['cdk-overlay-pane'] : [] });
+  picker.dismissOverlays = async () => { pickerCalls.push('dismiss'); };
+  picker.clickButton = async () => { pickerCalls.push('click'); opens++; return true; };
+  picker.nativeClickTrigger = async () => { pickerCalls.push('native'); opens++; return true; };
+  picker.waitFor = async read => { if (opens < 3) throw new Error('not ready'); return read(); };
+  await picker.openPicker();
+  assert.deepEqual(pickerCalls, ['click', 'dismiss', 'click', 'dismiss', 'native']);
+  const stuck = new FlowReferenceController({ executePageScript: async () => true, browser: {} });
+  stuck.pickerState = async () => ({ trigger: true, expanded: 'true', list: false, overlays: ['flow-info-panel'] });
+  stuck.dismissOverlays = async () => {};
+  stuck.clickButton = async () => true;
+  stuck.nativeClickTrigger = async () => true;
+  stuck.waitFor = async () => { throw new Error('not ready'); };
+  await assert.rejects(stuck.openPicker(), /after 3 attempts; state=.*flow-info-panel/, 'a persistent failure reports the page state');
+
+  // An empty Flow project opens the picker on its Upload view, with no asset list.
+  const empty = new FlowReferenceController({ executePageScript: async () => true, browser: {} });
+  let emptyClicks = 0;
+  empty.pickerState = async () => ({ trigger: true, expanded: emptyClicks ? 'true' : 'false', list: false, upload: emptyClicks > 0, overlays: [] });
+  empty.clickButton = async () => { emptyClicks++; return true; };
+  await empty.openPicker();
+  assert.equal(emptyClicks, 1, 'the Upload view counts as an open picker');
+
+  // A folder's jobs return to the Flow project they used before.
+  const navigations = [];
+  const workspace = new GoogleFlowAutomationAdapter({ getURL: () => 'https://flow.google.com/project/other' });
+  workspace.loadProjectUrl = async url => { navigations.push(url); return url; };
+  workspace.promptSelector = async () => '#prompt';
+  const preferredResult = await workspace.ensureWorkspace(1000, { preferredUrl: 'https://flow.google.com/project/main/edit/1' });
+  assert.deepEqual(navigations, ['https://flow.google.com/project/main']);
+  assert.equal(preferredResult.preferred, true);
+  await workspace.ensureWorkspace(1000, { preferredUrl: 'https://flow.google.com/project/main', allowNavigation: false });
+  assert.equal(navigations.length, 1, 'no navigation while downloads are running');
+
+  // A project file uploaded once is reused by its unique title, not uploaded again.
+  const referenceFile = path.join(os.tmpdir(), 'teamyra-reference-reuse-test.png');
+  fs.writeFileSync(referenceFile, 'png');
+  const projectUrl = 'https://flow.google.com/project/reuse';
+  const reuse = new FlowReferenceController({ webContents: { getURL: () => projectUrl } });
+  let uploads = 0;
+  let attached = [];
+  reuse.attachments = async () => attached;
+  reuse.openPicker = async () => {};
+  reuse.selectExisting = async () => null;
+  reuse.uploadFile = async () => { uploads++; return { uploaded_name: 'teamyra-abc', preparation: null }; };
+  reuse.selectUploaded = async cached => cached.identity;
+  reuse.clickButton = async () => { attached = [{ source: 'https://x/image/11111111-2222-3333-4444-555555555555', busy: false }]; return true; };
+  const first = await reuse.attach({ kind: 'file', path: referenceFile });
+  assert.equal(uploads, 1);
+  assert.equal(uploadedReferences.get(uploadKey(projectUrl, referenceFile)).title, 'teamyra-abc');
+  attached = [];
+  const second = await reuse.attach({ kind: 'file', path: referenceFile });
+  assert.equal(uploads, 1, 'the second job reuses the upload');
+  assert.equal(second.reused_upload, true);
+  assert.equal(second.provider_asset_id, first.provider_asset_id);
+  fs.rmSync(referenceFile, { force: true });
+
   // Single-job polling ignores refusal text that existed before submission.
   const single = new GoogleFlowAutomationAdapter({ getURL: () => 'https://flow.google.com/project/p' });
   single.pageState = async () => ({ state: 'ok', failure_signals: 1 });
@@ -157,7 +237,7 @@ function loadConsumer(core) {
   const module = { exports: {} };
   const stubs = {
     '../core-api': { callCore: core },
-    './media-output-validator': { verifyMediaOutput: async () => ({ decoded: true }), convertImage: async () => {} },
+    './media-output-validator': { verifyMediaOutput: async () => ({ decoded: true }), convertImage: async () => {}, hammingDistance },
     './media-audio-processor': { extractAudio: async () => {} }
   };
   vm.runInNewContext(source, { module, require: name => stubs[name] || localRequire(name), setTimeout, clearTimeout, console, Date, Promise });
@@ -236,7 +316,8 @@ async function pipelineTests(temp) {
       }
       return { page: { state: 'ok', failure_signals: 0 }, states };
     }),
-    resultFingerprint: key => page(async () => key),
+    // Distinct thumbnails (pairwise >= 32 bits apart) may download together.
+    resultFingerprint: key => page(async () => DISTINCT[Number(key.slice(-1))]),
     startDownload: job => page(async () => {
       activeDownloads++;
       maxDownloads = Math.max(maxDownloads, activeDownloads);
@@ -252,6 +333,8 @@ async function pipelineTests(temp) {
   const downloadManager = {
     expect: ({ jobId, destination, fingerprint }) => {
       assert.ok(fingerprint, 'bulk downloads carry the tile fingerprint');
+      assert.ok(destination.length < 200 && destination.includes('.staging-' + jobId), 'downloads land in a short per-job staging path');
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
       return new Promise(resolve => pending.set(jobId, { destination, resolve }));
     },
     cancelJob() {}
@@ -274,6 +357,7 @@ async function pipelineTests(temp) {
   assert.ok(maxDownloads > 1 && maxDownloads <= DOWNLOAD_PARALLEL, 'fingerprinted downloads overlap within the download limit');
   assert.equal(new Set([...records.values()].map(item => item.asset_id)).size, 6);
   assert.equal(records.get('job-0').provider_submission.result_key, 'key-job-0');
+  assert.equal(fs.readFileSync(path.join(temp, 'job-3.mp4'), 'utf8'), 'video job-3', 'verified staging output is moved to the project path');
   assert.equal(consumer.busy, false);
 
   // Flow refusing another generation before Generate returns the job to the queue.
@@ -305,6 +389,45 @@ async function pipelineTests(temp) {
   assert.ok(busyConsumer.pausedUntil > Date.now(), 'new submissions pause briefly');
   busyConsumer.inFlight.clear();
 
+  // Look-alike thumbnails never download side by side; distinct ones do, up to 8.
+  const slots = new loaded.MediaJobConsumer({ surface: 'visual', provider, downloadManager });
+  slots.activeDownloads.add({ fingerprint: '0000000000000000' });
+  assert.equal(slots.canStartDownload({ fingerprint: '0000000000000003' }), false, 'near-identical shots wait');
+  assert.equal(slots.canStartDownload({ fingerprint: 'ffffffffffffffff' }), true);
+  assert.equal(slots.canStartDownload({ fingerprint: null }), false);
+  for (let i = 1; i < loaded.DOWNLOAD_PARALLEL; i += 1) slots.activeDownloads.add({ fingerprint: DISTINCT[i % DISTINCT.length] });
+  assert.equal(slots.canStartDownload({ fingerprint: 'ffffffffffffffff' }), false, 'download slots are capped');
+  assert.equal(loaded.DOWNLOAD_PARALLEL, 8);
+
+  // Patience scales with how fast Flow has been this session.
+  const patient = new loaded.MediaJobConsumer({ surface: 'visual', provider, downloadManager });
+  assert.equal(patient.patience().noResultMs, 6 * 60 * 1000);
+  patient.generationTimes = [100000, 120000, 200000, 240000];
+  assert.equal(patient.patience().noResultMs, 4 * 240000);
+  assert.equal(patient.patience().overdueMs, 2 * 240000);
+
+  // A job with no result after a full grid search fails fast and frees its slot.
+  const { core: staleCore, records: staleRecords } = fakeCore(temp, [{ job_id: 'stale-0', request: { type: 'video', prompt: 'refused' } }]);
+  const staleLoaded = loadConsumer(staleCore);
+  let deepRequested = [];
+  const staleConsumer = new staleLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,
+    generationStates: async (list, options) => {
+      deepRequested = options.deepJobIds;
+      return { page: { state: 'ok', failure_signals: 0 }, states: new Map(list.map(job => [job.job_id, { state: 'generating', searched: options.deepJobIds.includes(job.job_id) }])) };
+    } } } });
+  const staleFailures = [];
+  staleConsumer.handleFailure = async (jobId, error) => { staleFailures.push([jobId, String(error.message)]); };
+  staleConsumer.inFlight.set('stale-0', { jobId: 'stale-0', phase: 'generating', submittedAt: Date.now() - 7 * 60 * 1000,
+    baselineFailures: 0, submission: {}, job: { job_id: 'stale-0', request: { type: 'video', prompt: 'refused' } } });
+  staleRecords.get('stale-0').state = 'generating';
+  await staleConsumer.pollOnce();
+  assert.deepEqual([...deepRequested], ['stale-0'], 'an overdue job triggers a full grid search');
+  assert.equal(staleFailures.length, 1);
+  assert.match(staleFailures[0][1], /provider_no_result/);
+  assert.equal(staleConsumer.inFlight.size, 0, 'its slot is released immediately');
+  assert.equal(staleLoaded.classifyError(new Error("ERR_NAME_NOT_RESOLVED (-105) loading 'https://www.flowmusic.app/'")).category, 'browser_failure');
+  assert.equal(staleLoaded.classifyError(new Error('references: Reference Upload media control unavailable')).category, 'selector_failure', 'pre-Generate reference errors are retryable');
+
   // Page-wide refusal text is attributed only once it accounts for every candidate.
   const attribution = new loaded.MediaJobConsumer({ surface: 'visual', provider, downloadManager });
   const failed = [];
@@ -335,4 +458,7 @@ async function main() {
   console.log('bulk media pipeline, attribution and concurrency tests passed');
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+let finished = false;
+// An awaited download that never settles would otherwise exit silently as success.
+process.on('beforeExit', () => { if (!finished && !process.exitCode) { console.error('bulk media test stalled'); process.exitCode = 1; } });
+main().then(() => { finished = true; }, error => { finished = true; console.error(error); process.exitCode = 1; });

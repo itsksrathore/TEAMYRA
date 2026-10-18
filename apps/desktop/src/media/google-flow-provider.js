@@ -5,6 +5,11 @@ const ALLOWED_GOOGLE_HOSTS = new Set([
   'flow.google', 'www.flow.google', 'flow.google.com', 'www.flow.google.com', 'labs.google', 'accounts.google.com', 'myaccount.google.com'
 ]);
 
+// Flow's result grid only renders tiles near the viewport. While the view is
+// hidden, a tall work area keeps far more recent results in the page so bulk
+// jobs can find them without scrolling.
+const HIDDEN_WORK_BOUNDS = { x: 0, y: 0, width: 1280, height: 7200 };
+
 function safeGoogleUrl(value) {
   if (value === 'about:blank') return true;
   try {
@@ -41,7 +46,7 @@ class GoogleFlowProvider {
     // Native view muting also covers Web Audio and persists across navigation.
     this.view.webContents.setAudioMuted(true);
     this.view.setBackgroundColor('#0b0e14');
-    this.view.setBounds(this.bounds);
+    this.view.setBounds(this.visible ? this.bounds : HIDDEN_WORK_BOUNDS);
     this.view.setVisible(this.visible);
     this.window.contentView.addChildView(this.view);
     this.adapter = new GoogleFlowAutomationAdapter(this.view.webContents);
@@ -155,7 +160,7 @@ class GoogleFlowProvider {
     this.visible = value === true;
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.view.setVisible(this.visible);
-      if (this.visible) this.view.setBounds(this.bounds);
+      this.view.setBounds(this.visible ? this.bounds : HIDDEN_WORK_BOUNDS);
     }
   }
   setBounds(bounds = {}) {
@@ -215,4 +220,4 @@ class GoogleFlowProvider {
   }
 }
 
-module.exports = { GoogleFlowProvider, safeGoogleUrl, ALLOWED_GOOGLE_HOSTS };
+module.exports = { GoogleFlowProvider, safeGoogleUrl, ALLOWED_GOOGLE_HOSTS, HIDDEN_WORK_BOUNDS };

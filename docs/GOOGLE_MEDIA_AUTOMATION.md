@@ -72,6 +72,40 @@ snapshot. Music stays one song at a time.
 - **Files.** Output paths are reserved across unfinished jobs, so concurrent
   outputs never share an index or a filename.
 
+### Reliability under heavy bulk use (2026-10-18)
+
+Real teaser batches (~150 jobs) exposed failures that are now handled:
+
+- **Virtualized grid.** Flow renders only tiles near the viewport (16 in a
+  700 px view). The hidden view now uses a 1280 × 7200 work area (52+ tiles),
+  and an overdue job triggers a scroll search of the whole grid; a found tile is
+  scrolled into view before fingerprinting or download.
+- **Refused generations.** Flow replaces a refused prompt with a tile reading
+  "Failed / This prompt might violate our policies". Failed tiles are counted
+  once each and assigned with the deferred rule above, so a refusal fails its job
+  at once. A job still absent after a full search fails as `provider_no_result`
+  after max(6 min, 4 × the session's typical generation time) instead of holding
+  its slot for 20 minutes; neither is retried automatically (reword the prompt).
+- **Downloads.** 8 download slots. Look-alike results (thumbnails closer than
+  22/64 bits, e.g. shots of one battlefield) never download side by side, which
+  removed the "could not be attributed" failures. A held file is never handed to
+  the job left over after another download was abandoned.
+- **Long paths.** Downloads, conversion and verification happen in the job's
+  short staging folder; one move places the file at the project path (Chromium
+  aborted downloads to 300-character paths as "interrupted").
+- **One Flow project per folder.** Jobs from a local folder return to the Flow
+  project holding most of that folder's results. The home page's project list is
+  awaited before a new project is created; previously restarts created empty
+  projects, where the reference picker had no asset list.
+- **Reference picker.** Leftover overlays are dismissed, the trigger is retried
+  (last attempt with a native click), an empty project's Upload view counts as
+  open, and a persistent failure records the picker state. A project file
+  uploaded once is reused by its upload title (43 s → 5 s per submission).
+- **Restarts.** Desktop start requeues or reconciles jobs the previous process
+  left mid-flight before any worker claims; reconciled jobs keep their original
+  submission time. DNS/network errors (`ERR_NAME_NOT_RESOLVED`) are retried.
+- Faster turnaround: `download_quality: "source"` skips the upscale wait.
+
 ## MCP policy and references
 
 `teamyra.media_capabilities` reports the enforced workflow without opening a

@@ -1271,6 +1271,14 @@ async function dispatchDesktopControl(action, payload = {}) {
         return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
       }
       let diagnosticAction = null;
+      if (payload.surface !== 'music' && (payload.inspect_page === true || payload.probe_picker === true)) {
+        if (payload.probe_picker === true && (runtime.visualConsumer.busy || runtime.musicConsumer.busy)) throw new Error('Media worker is busy; picker diagnostics must wait');
+        if (payload.project_url && /^https:\/\/flow\.google\.com\/project\//i.test(String(payload.project_url))) {
+          await surface.adapter.loadProjectUrl(String(payload.project_url));
+          await new Promise(resolve => setTimeout(resolve, 4000));
+        }
+        return surface.adapter.browser.withActivePage(() => surface.adapter.inspectPage({ probePicker: payload.probe_picker === true }));
+      }
       if (payload.prepare_workspace || (Array.isArray(payload.radio_patterns) && payload.radio_patterns.length)) {
         if (runtime.visualConsumer.busy || runtime.musicConsumer.busy) throw new Error('Media worker is busy; settings diagnostics must wait');
       }

@@ -101,6 +101,10 @@ def handle(action, payload):
     if action == "media.status":
         return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30),
                                        payload.get("batch_id"))
+    if action == "media.recover-incomplete":
+        return media_engine.recover_incomplete_jobs(ROOT)
+    if action == "media.flow-project":
+        return media_engine.flow_project_for(ROOT, payload.get("project_path"))
     if action == "media.status-many":
         return media_engine.status_many(ROOT, payload.get("job_ids") or [])
     if action == "media.release":

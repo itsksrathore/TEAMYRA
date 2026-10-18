@@ -1,15 +1,25 @@
 const fs = require('node:fs');
+const path = require('node:path');
 const { callCore } = require('../core-api');
 const { extractAudio } = require('./media-audio-processor');
-const { convertImage, verifyMediaOutput } = require('./media-output-validator');
+const { convertImage, verifyMediaOutput, hammingDistance } = require('./media-output-validator');
 const { mediaId } = require('./flow-reference-controller');
 
 // Visual jobs are pipelined: each one is submitted as soon as the composer is
 // free, then every in-flight generation is watched by one shared monitor.
 const DEFAULT_PARALLEL = 10;
 const MAX_PARALLEL = 30;
-const DOWNLOAD_PARALLEL = 4;
+const DOWNLOAD_PARALLEL = 8;
+// Concurrent downloads are attributed by thumbnail; only look-alike results
+// closer than this (of 64 bits) wait for each other.
+const DOWNLOAD_SEPARATION = 22;
 const GENERATION_TIMEOUT_MS = 20 * 60 * 1000;
+// Flow usually finishes in 1-2 minutes. Past these ages a job is searched for
+// across the whole grid, and if it is still absent, failed instead of holding
+// its slot for the full timeout (silent moderation returns no tile at all).
+const OVERDUE_MIN_MS = 150 * 1000;
+const NO_RESULT_MIN_MS = 6 * 60 * 1000;
+const DEEP_SEARCH_EVERY_MS = 60 * 1000;
 const MONITOR_MS = 2500;
 const MONITOR_MAX_ERRORS = 12;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
@@ -23,9 +33,11 @@ function classifyError(error) {
   if (text.includes('rate_limited') || text.includes('rate limit') || text.includes('capacity_limited')) return { state: 'rate_limited', category: 'rate_limited' };
   if (text.includes('credits_exhausted') || text.includes('credits')) return { state: 'failed', category: 'credits_exhausted' };
   if (text.includes('policy_refusal') || text.includes('policy')) return { state: 'failed', category: 'policy_refusal' };
+  if (text.includes('provider_no_result')) return { state: 'failed', category: 'provider_no_result' };
   if (text.includes('browser_probe_failed')) return { state: 'failed', category: 'browser_probe_failed' };
-  if (/execution context was destroyed|frame was detached|webcontents.*destroyed|err_(?:connection|internet|network)|browser_failure/.test(text)) return { state: 'failed', category: 'browser_failure' };
-  if (text.includes('selector_failure')) return { state: 'failed', category: 'selector_failure' };
+  if (/execution context was destroyed|frame was detached|webcontents.*destroyed|err_(?:connection|internet|network|name_not_resolved|address_unreachable|timed_out)|browser_failure/.test(text)) return { state: 'failed', category: 'browser_failure' };
+  // Reference attachment happens before Generate; its errors are UI failures.
+  if (text.includes('selector_failure') || text.startsWith('references:') || text.includes('upload media control')) return { state: 'failed', category: 'selector_failure' };
   // A wrong-shaped result is the provider's output, not a transfer problem;
   // downloading it again cannot fix it.
   if (text.includes('does not match request')) return { state: 'failed', category: 'output_mismatch' };
@@ -44,6 +56,16 @@ function requestSignature(job) {
   ]);
 }
 
+function moveFile(source, destination) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  try { fs.renameSync(source, destination); }
+  catch (error) {
+    if (error?.code !== 'EXDEV') throw error;
+    fs.copyFileSync(source, destination);
+    fs.unlinkSync(source);
+  }
+}
+
 function clampParallel(value, fallback) {
   const number = Math.round(Number(value));
   return Number.isFinite(number) && number > 0 ? Math.min(MAX_PARALLEL, number) : fallback;
@@ -60,7 +82,7 @@ class Mutex {
 }
 
 class MediaJobConsumer {
-  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS }) {
+  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null }) {
     this.surface = surface;
     this.workerName = workerName;
     this.provider = provider;
@@ -86,9 +108,12 @@ class MediaJobConsumer {
     this.monitorRunning = false;
     this.monitorErrors = 0;
     this.monitorMs = monitorMs;
+    this.ready = ready || Promise.resolve();
     this.capabilitiesSignature = '';
     // Result tiles already given to a job in this session (bulk copies share a prompt).
     this.assignedKeys = new Map();
+    // Recent submit-to-result times; they set how long a job may stay unseen.
+    this.generationTimes = [];
     this.ui = new Mutex();
   }
 
@@ -141,6 +166,7 @@ class MediaJobConsumer {
 
   async tick() {
     if (!this.running) return;
+    await this.ready;
     if (!this.pipeline) return this.serialTick();
     if (this.submitting || this.inFlight.size >= this.parallelLimit || Date.now() < this.pausedUntil) {
       this.schedule(Date.now() < this.pausedUntil ? Math.min(this.pollMs, this.pausedUntil - Date.now() + 50) : this.pollMs);
@@ -285,7 +311,11 @@ class MediaJobConsumer {
       await this.update(jobId, 'submitting', this.inFlight.size
         ? 'Submitting generation request (' + (this.inFlight.size + 1) + ' running in parallel)'
         : 'Submitting generation request');
-      submission = await this.ui.run(() => adapter.submit(job, async pendingSubmission => {
+      const preferred = await callCore('media.flow-project', { project_path: job.request?.project_path }, { timeout: 15000 })
+        .catch(() => null);
+      const submitJob = { ...job, preferred_project_url: preferred?.provider_url || null,
+        allow_navigation: !this.activeDownloads.size };
+      submission = await this.ui.run(() => adapter.submit(submitJob, async pendingSubmission => {
         submission = pendingSubmission;
         ctx.checkpointed = true;
         await callCore('media.patch', { job_id: jobId, patch: {
@@ -303,7 +333,8 @@ class MediaJobConsumer {
     return Object.assign(ctx, {
       job, jobId, planned, submission,
       phase: 'generating',
-      submittedAt: Date.now(),
+      // A reconciled job keeps its original submission time for overdue checks.
+      submittedAt: Number(submission.submitted_at) > 0 ? Math.min(Date.now(), Number(submission.submitted_at) * 1000) : Date.now(),
       baselineFailures: Number.isFinite(baseline) && submission.baseline_failure_signals !== null ? baseline : null,
       resultKey: submission.result_key || null,
       fingerprint: null
@@ -351,7 +382,9 @@ class MediaJobConsumer {
     const request = job.request;
     const isSfx = request.type === 'sound_effect';
     const isImage = request.type === 'image';
-    const downloadPath = isSfx ? planned.temporary_video_path : isImage ? planned.path + '.provider-download' : planned.path;
+    const staging = planned.staging_dir || path.join(path.dirname(planned.path), '.staging-' + jobId);
+    const downloadPath = isSfx ? planned.temporary_video_path
+      : path.join(staging, isImage ? 'provider-download' : 'download' + (path.extname(planned.path) || '.mp4'));
     const downloadJob = { ...job, ...await callCore('media.status', { job_id: jobId }, { timeout: 10000 }), request };
     if (ctx.resultKey) downloadJob.provider_submission = { ...downloadJob.provider_submission, result_key: ctx.resultKey };
     const excludeKeys = this.otherAssignedKeys(jobId);
@@ -403,19 +436,19 @@ class MediaJobConsumer {
       }});
     }
 
-    let finalPath = downloaded.path;
+    let stagedPath = downloaded.path;
     if ((await callCore('media.status', { job_id: jobId })).cancel_requested) return this.update(jobId, 'cancelled', 'Cancelled after download');
-    if (isImage) {
-      await convertImage(downloaded.path, planned.path, planned.format);
-      finalPath = planned.path;
-    }
+    if (isImage || isSfx) stagedPath = path.join(path.dirname(downloadPath), 'output.' + planned.format);
+    if (isImage) await convertImage(downloaded.path, stagedPath, planned.format);
     if (isSfx) {
       await this.update(jobId, 'extracting_audio', 'Extracting sound effect audio');
-      await extractAudio(downloaded.path, planned.path, planned.format);
-      finalPath = planned.path;
+      await extractAudio(downloaded.path, stagedPath, planned.format);
     }
 
-    const outputInfo = await verifyMediaOutput(finalPath, request, downloadAction);
+    const outputInfo = await verifyMediaOutput(stagedPath, request, downloadAction);
+    // Verified in staging; a single move places it at the (possibly long) project path.
+    const finalPath = planned.path;
+    if (path.resolve(stagedPath) !== path.resolve(finalPath)) moveFile(stagedPath, finalPath);
 
     await this.update(jobId, 'organizing', 'Registering generated asset');
     const latestJob = await callCore('media.status', { job_id: jobId });
@@ -431,7 +464,7 @@ class MediaJobConsumer {
       metadata: { reference_attachments: providerSubmission.reference_attachments || [], reference_mode: providerSubmission.reference_mode || 'ingredients', mime: isImage ? 'image/' + (['jpg', 'jpeg'].includes(planned.format) ? 'jpeg' : planned.format) : isSfx ? (planned.format === 'wav' ? 'audio/wav' : 'audio/' + planned.format) : downloaded.mime || '', bytes: fs.statSync(finalPath).size, google_profile_id: this.profileId, download_action: downloadAction || null, download_attribution: downloaded.attribution || null, verified_output: outputInfo, selected_settings: providerSubmission.selected_settings || null, actual_model: providerSubmission.actual_model || null, batch_id: job.batch_id || null }
     }, { timeout: 20000 });
     if (isSfx) await callCore('media.cleanup-staging', { job_id: jobId });
-    if (isImage) { try { fs.unlinkSync(downloadPath); } catch {} }
+    else { try { fs.unlinkSync(downloadPath); } catch {} }
     return asset;
   }
 
@@ -578,9 +611,14 @@ class MediaJobConsumer {
     const adapter = this.provider.adapter;
     if (!adapter) throw new Error('browser_failure: Google Flow view is unavailable');
     const claimedKeys = [...this.assignedKeys.keys()];
+    const now = Date.now();
+    const { overdueMs } = this.patience();
+    const deepJobIds = live.filter(ctx => now - ctx.submittedAt > overdueMs &&
+      now - (ctx.lastDeepSearch || 0) > DEEP_SEARCH_EVERY_MS).map(ctx => ctx.jobId);
+    for (const ctx of live) if (deepJobIds.includes(ctx.jobId)) ctx.lastDeepSearch = now;
     const { page, states } = await this.ui.run(() => adapter.generationStates(
       live.map(ctx => ({ ...ctx.job, provider_submission: ctx.submission, request: ctx.job.request })),
-      { claimedKeys, allowNavigation: !this.activeDownloads.size }));
+      { claimedKeys, allowNavigation: !this.activeDownloads.size, deepJobIds }));
     if (page.state === 'needs_user_auth') {
       await callCore('media.connection-update', { patch: { connected: false, needs_user_auth: true,
         challenged: page.reason === 'human_verification', detail: 'Google Media sign-in is required' } }).catch(() => {});
@@ -600,6 +638,7 @@ class MediaJobConsumer {
       if (state?.state !== 'ready_to_download') continue;
       ctx.resultKey = state.result_key;
       this.assignKey(ctx.jobId, ctx.resultKey);
+      this.generationTimes = [...this.generationTimes.slice(-49), Date.now() - ctx.submittedAt];
       ctx.submission = { ...ctx.submission, result_key: state.result_key };
       ctx.phase = 'ready';
       // A re-download after an attribution failure runs alone.
@@ -617,6 +656,23 @@ class MediaJobConsumer {
       this.enqueueDownload(ctx);
     }
     await this.attributeFailures(page.failure_signals);
+    const { noResultMs } = this.patience();
+    for (const ctx of this.waiting()) {
+      const age = Date.now() - ctx.submittedAt;
+      if (!states.get(ctx.jobId)?.searched || age < noResultMs) continue;
+      await this.failJob(ctx, new Error('provider_no_result: Flow accepted this generation but no result appeared after ' +
+        Math.round(age / 1000) + 's, and a full search of the project found none. This is usually a silent moderation refusal; reword the prompt and queue a new job.'));
+    }
+  }
+
+  // Waiting limits scale with how fast Flow has been this session.
+  patience() {
+    const times = [...this.generationTimes].sort((a, b) => a - b);
+    const typical = times.length >= 3 ? times[Math.floor(times.length * 0.75)] : 0;
+    return {
+      overdueMs: Math.max(OVERDUE_MIN_MS, 2 * typical),
+      noResultMs: Math.min(GENERATION_TIMEOUT_MS - 60000, Math.max(NO_RESULT_MIN_MS, 4 * typical))
+    };
   }
 
   // Flow's refusal text is page-wide, not per tile. New failure signals are
@@ -633,7 +689,7 @@ class MediaJobConsumer {
     const fresh = count - Math.min(...candidates.map(ctx => ctx.baselineFailures));
     if (fresh < candidates.length) return;
     for (const ctx of candidates) {
-      await this.failJob(ctx, new Error('policy_refusal: Google Flow refused or failed this generation'));
+      await this.failJob(ctx, new Error('policy_refusal: Google Flow marked this generation Failed (the prompt might violate its policies); reword the prompt and queue a new job'));
     }
   }
 
@@ -644,15 +700,22 @@ class MediaJobConsumer {
 
   canStartDownload(ctx) {
     if (!this.activeDownloads.size) return true;
+    if (this.activeDownloads.size >= DOWNLOAD_PARALLEL) return false;
     // Without a thumbnail fingerprint a download cannot be told apart from
-    // another concurrent one, so it runs alone.
-    if (!ctx.fingerprint || [...this.activeDownloads].some(active => !active.fingerprint)) return false;
-    return this.activeDownloads.size < DOWNLOAD_PARALLEL;
+    // another concurrent one, so it runs alone. Look-alike results (e.g. shots
+    // of one battlefield) also wait, so every overlapping download stays
+    // clearly attributable by content.
+    if (!ctx.fingerprint) return false;
+    return [...this.activeDownloads].every(active => active.fingerprint &&
+      hammingDistance(active.fingerprint, ctx.fingerprint) >= DOWNLOAD_SEPARATION);
   }
 
   pumpDownloads() {
-    while (this.downloadQueue.length && this.canStartDownload(this.downloadQueue[0])) {
-      const ctx = this.downloadQueue.shift();
+    for (;;) {
+      // Oldest first, but a look-alike waiting its turn does not block others.
+      const index = this.downloadQueue.findIndex(ctx => this.canStartDownload(ctx));
+      if (index < 0) return;
+      const [ctx] = this.downloadQueue.splice(index, 1);
       ctx.phase = 'downloading';
       this.activeDownloads.add(ctx);
       this.runDownload(ctx).finally(() => {
@@ -672,4 +735,4 @@ class MediaJobConsumer {
   }
 }
 
-module.exports = { MediaJobConsumer, classifyError, requestSignature, DEFAULT_PARALLEL, MAX_PARALLEL, DOWNLOAD_PARALLEL };
+module.exports = { MediaJobConsumer, classifyError, requestSignature, DEFAULT_PARALLEL, MAX_PARALLEL, DOWNLOAD_PARALLEL, DOWNLOAD_SEPARATION };
