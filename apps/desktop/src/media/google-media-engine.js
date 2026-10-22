@@ -5,6 +5,24 @@ const { GoogleFlowProvider } = require('./google-flow-provider');
 const { GoogleFlowMusicProvider } = require('./google-flow-music-provider');
 const { MediaJobConsumer } = require('./media-job-consumer');
 
+const HUNG_RELOAD_GAP_MS = 3 * 60 * 1000;
+
+// A probe that failed (page busy, navigating or hung) says nothing about the
+// Google session. Keep the last known sign-in state instead of reporting a
+// logout, which would park every job in needs_user_auth.
+function observedStatus(status = {}, last = {}, surface = 'visual') {
+  if (status.probe_ok !== false) return status;
+  const visual = surface !== 'music';
+  return {
+    ...status,
+    loaded: true,
+    unknown: true,
+    signedIn: visual ? last.connected === true : last.music_signed_in === true,
+    challenged: visual ? last.challenged === true : false,
+    promptFound: visual ? last.flow_ready === true : last.music_ready === true
+  };
+}
+
 const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fflow.google.com%2F';
 const STATUS_CACHE_MS = 15000;
 const BROWSER_IDLE_MS = 45000;
@@ -153,11 +171,12 @@ class GoogleMediaProfileRuntime {
         await this.visual.ensureLoaded().catch(() => {});
       }
       if (this.visual.view) {
-        const inspection = await this.visual.inspect(force ? 15000 : 8000).catch(() => ({
-          status: { loaded: true, signedIn: false },
+        const inspection = await this.visual.inspect(force ? 15000 : 8000).catch(error => ({
+          status: { loaded: true, probe_ok: false, probe_error: String(error?.message || error) },
           capabilities: {}
         }));
-        visualStatus = inspection.status || { loaded: true, signedIn: false };
+        if (inspection.status?.probe_ok === false) this.recoverHungPage(this.visual, inspection.status.probe_error);
+        visualStatus = observedStatus(inspection.status || { loaded: true, signedIn: false }, this.lastStatus, 'visual');
         if (force || this.visual.visible || !Object.keys(visualCapabilities).length) {
           visualCapabilities = Object.keys(inspection.capabilities || {}).length
             ? inspection.capabilities
@@ -174,11 +193,12 @@ class GoogleMediaProfileRuntime {
       }
 
       if (this.music.view) {
-        const inspection = await this.music.inspect(force ? 15000 : 8000).catch(() => ({
-          status: { loaded: true, signedIn: false },
+        const inspection = await this.music.inspect(force ? 15000 : 8000).catch(error => ({
+          status: { loaded: true, probe_ok: false, probe_error: String(error?.message || error) },
           capabilities: {}
         }));
-        musicStatus = inspection.status || { loaded: true, signedIn: false };
+        if (inspection.status?.probe_ok === false) this.recoverHungPage(this.music, inspection.status.probe_error);
+        musicStatus = observedStatus(inspection.status || { loaded: true, signedIn: false }, this.lastStatus, 'music');
         if (force || this.music.visible || !Object.keys(musicCapabilities).length) {
           musicCapabilities = Object.keys(inspection.capabilities || {}).length
             ? inspection.capabilities
@@ -220,10 +240,10 @@ class GoogleMediaProfileRuntime {
         music_url: musicStatus.url || this.lastStatus.music_url || '',
         visual_probe_ok: visualStatus.probe_ok === true,
         visual_probe_error: visualStatus.probe_error || '',
-        visual_detected_signed_in: visualStatus.signedIn === true,
+        visual_detected_signed_in: visualStatus.unknown ? null : visualStatus.signedIn === true,
         music_probe_ok: musicStatus.probe_ok === true,
         music_probe_error: musicStatus.probe_error || '',
-        music_detected_signed_in: musicStatus.signedIn === true,
+        music_detected_signed_in: musicStatus.unknown ? null : musicStatus.signedIn === true,
         detail: connected ? 'Google Media account connected' : 'Google sign-in required'
       };
       if (visualStatus.loaded || musicStatus.loaded) {
@@ -371,6 +391,19 @@ class GoogleMediaProfileRuntime {
   setBounds(bounds) {
     this.visual.setBounds(bounds);
     this.music.setBounds(bounds);
+  }
+
+  // A page script that timed out means the Flow renderer is hung; a reload
+  // alone cannot reach it, so end the renderer and load the page again.
+  recoverHungPage(provider, error) {
+    if (!/timed out/i.test(String(error || ''))) return;
+    const contents = provider.view?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    if (Date.now() - (provider.hungRecoveredAt || 0) < HUNG_RELOAD_GAP_MS) return;
+    provider.hungRecoveredAt = Date.now();
+    console.warn('[google-media] page did not answer a status probe; restarting its renderer');
+    try { contents.forcefullyCrashRenderer(); } catch {}
+    try { contents.reload(); } catch {}
   }
 
   async reconnect() {
@@ -549,4 +582,4 @@ class GoogleMediaEngine {
   }
 }
 
-module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL };
+module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus };
