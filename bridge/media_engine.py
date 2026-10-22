@@ -262,7 +262,7 @@ def _atomic_write(path, payload):
 
 
 @contextmanager
-def _state_lock(root, timeout=5.0):
+def _state_lock(root, timeout=15.0):
     lock = _lock_file(root)
     deadline = time.time() + timeout
     fd = None
@@ -270,7 +270,9 @@ def _state_lock(root, timeout=5.0):
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, f"{os.getpid()} {time.time()}".encode("ascii", errors="ignore"))
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # Windows reports PermissionError while another process is deleting
+            # the lock file; both mean "held right now", so wait and retry.
             try:
                 age = time.time() - lock.stat().st_mtime
                 if age > 30:

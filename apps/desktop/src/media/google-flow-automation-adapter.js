@@ -41,6 +41,17 @@ function normalizePrompt(value) {
     .replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
 }
 
+// Word-set overlap of two prompts (0..1).
+function promptSimilarity(a, b) {
+  const words = value => new Set(normalizePrompt(value).toLowerCase().split(/[^a-z0-9']+/).filter(word => word.length > 2));
+  const left = words(a);
+  const right = words(b);
+  if (!left.size || !right.size) return 0;
+  let shared = 0;
+  for (const word of left) if (right.has(word)) shared += 1;
+  return shared / Math.max(left.size, right.size);
+}
+
 function projectId(url) {
   return String(url || '').match(/^https:\/\/flow\.google\.com\/project\/([^/?#]+)/i)?.[1] || '';
 }
@@ -1477,8 +1488,13 @@ class GoogleFlowAutomationAdapter {
         // Finished tiles newer than this job's submission that no prompt matched.
         const baseline = new Set(job?.provider_submission?.baseline_result_keys || []);
         const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
+        // Only tiles whose prompt closely resembles this job's (Flow may have
+        // altered it) are evidence of a result that failed to match; other
+        // agents' newer outputs in a busy project are not.
+        const prompt = job?.request?.provider_prompt || job?.request?.prompt;
         const unmatched = this.newerThanSubmission(job, [...seen.values()]).filter(result => result.type === type &&
-          result.ready && !taken.has(result.key) && !baseline.has(result.key)).length;
+          result.ready && !taken.has(result.key) && !baseline.has(result.key) &&
+          promptSimilarity(this.resultInfoCache.get(result.key)?.prompt, prompt) >= 0.6).length;
         states.set(job.job_id, { ...states.get(job.job_id), state: 'generating', searched: true, unmatched_results: unmatched });
       }
       await this.resetGrid();
@@ -1773,4 +1789,4 @@ class GoogleFlowAutomationAdapter {
   }
 }
 
-module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId, normalizePrompt };
+module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId, normalizePrompt, promptSimilarity };

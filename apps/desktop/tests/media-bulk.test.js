@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { createRequire } = require('node:module');
 const { MediaDownloadManager } = require('../src/media/media-download-manager');
-const { GoogleFlowAutomationAdapter, failureSignalCount, capacitySignal } = require('../src/media/google-flow-automation-adapter');
+const { GoogleFlowAutomationAdapter, failureSignalCount, capacitySignal, promptSimilarity } = require('../src/media/google-flow-automation-adapter');
 const { hammingDistance } = require('../src/media/media-output-validator');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -164,6 +164,9 @@ async function adapterTests() {
   assert.equal(await scoped.resultForJob(scopedJob, { results: grid.filter(item => item.key !== 'mine') }), null,
     'an older identical prompt below the submission point is not this job output');
   assert.equal(scoped.newerThanSubmission(scopedJob, [{ key: 'ancient' }], { pastTop: true }).length, 0);
+
+  assert.ok(promptSimilarity('Shot C14 take 4 candy castle with gumdrop towers at sunset', 'Shot C14 take 4 candy castle with gumdrop towers at dusk') >= 0.6);
+  assert.ok(promptSimilarity('Shot C14 take 4 candy castle with gumdrop towers', 'Girl and puppy arriving at rainbow island beach') < 0.6);
 
   // Flow's image aspect radios (DOM order). "Portrait" is 3:4, not 9:16.
   const radios = ['crop_16_9 16:9', 'crop_landscape 4:3', 'crop_square 1:1', 'crop_portrait 3:4', 'crop_9_16 9:16'].map(text => {
