@@ -50,11 +50,14 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         self.assertIn("WorkspaceToolService", self.server)
         self.assertIn("execute_in_workspace", self.server)
 
-    def test_mcp_workspace_tool_cannot_self_confirm_destructive_actions(self):
+    def test_mcp_workspace_tool_uses_stored_permissions_and_explicit_confirm(self):
         workspace_tool_block = self.server.split('if name == "workspace_tool":', 1)[1].split('if name == "memory_add":', 1)[0]
-        self.assertIn('permissions={"terminal": True}', workspace_tool_block)
-        self.assertIn("confirm=False", workspace_tool_block)
-        self.assertNotIn('a.get("confirm")', workspace_tool_block)
+        self.assertIn("permissions=mcp_workspace_permissions(service)", workspace_tool_block)
+        self.assertIn('confirm=a.get("confirm") is True', workspace_tool_block)
+        self.assertNotIn('permissions={"terminal": True}', workspace_tool_block)
+        helper = self.server.split("def mcp_workspace_permissions(service):", 1)[1].split("def tool_call(", 1)[0]
+        self.assertIn('stored["full_access"] = False', helper)
+        self.assertIn('stored["outside_workspace"] = False', helper)
 
     def test_sensitive_roots_and_confirmation_gates_exist(self):
         for marker in (
@@ -87,7 +90,7 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
         self.assertIn("TEAMYRA_TOOL_REQUEST", self.automation)
         self.assertIn("TEAMYRA_CANCELLED", self.automation)
         self.assertIn("Array.isArray(data.args)", self.automation)
-        self.assertIn("for (let step = 0; step < 16; step += 1)", self.provider)
+        self.assertIn("step < MAX_TOOL_STEPS", self.provider)
         self.assertIn("MAX_TOOL_RESULT_CHARS", self.provider)
         self.assertIn("next_offset", self.provider)
         self.assertIn("before-input-event", self.provider)

@@ -87,7 +87,10 @@ function gatewayIdentityError(health) {
     const normalize = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
     return normalize(a) === normalize(b);
   };
-  if (!samePath(health.runtime_root, ROOT) || (PACKAGED_CORE && !samePath(health.core_exe, PACKAGED_CORE))) {
+  // In a source checkout PACKAGED_CORE names a file that does not exist and the
+  // gateway runs from Python (core_exe empty): only a real bundled core is compared.
+  const bundledCore = PACKAGED_CORE && fs.existsSync(PACKAGED_CORE) ? PACKAGED_CORE : '';
+  if (!samePath(health.runtime_root, ROOT) || (bundledCore && !samePath(health.core_exe, bundledCore))) {
     return 'Port 8787 is owned by another or older TEAMYRA runtime. Close that runtime before reconnecting this installation.';
   }
   return null;

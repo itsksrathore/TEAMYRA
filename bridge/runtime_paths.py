@@ -1,7 +1,13 @@
 """Resolve TEAMYRA runtime executables without user-specific hard-coded paths."""
 import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
+
+WINDOWS_LAUNCH_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
+CLAUDE_NPM_PACKAGE_EXE = ("node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+_COMMAND_CACHE = {}
 
 
 def first_existing(values):
@@ -73,18 +79,130 @@ def agy_launch(env=None, home=None):
     return [binary] if binary else []
 
 
-def claude_launch(env=None, home=None):
-    env = env or os.environ
+def _launchable(path, windows):
+    """A file the OS can start directly (no extensionless sh shims on Windows)."""
+    if not path:
+        return False
+    candidate = Path(path)
+    if not candidate.is_file():
+        return False
+    if windows:
+        return candidate.suffix.lower() in WINDOWS_LAUNCH_SUFFIXES
+    return os.access(str(candidate), os.X_OK)
+
+
+def _command_lines(argv, env):
+    """stdout lines of a short discovery command (cached per process)."""
+    key = (tuple(str(part) for part in argv), (env or {}).get("PATH"))
+    if key not in _COMMAND_CACHE:
+        merged = dict(os.environ)
+        merged.update(env or {})
+        try:
+            cp = subprocess.run(
+                [str(part) for part in argv], capture_output=True, text=True, timeout=15,
+                env=merged, stdin=subprocess.DEVNULL, shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            lines = []
+            if cp.returncode == 0:
+                lines = [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
+        except (OSError, subprocess.SubprocessError, ValueError):
+            lines = []
+        _COMMAND_CACHE[key] = lines
+    return _COMMAND_CACHE[key]
+
+
+def _version_key(name):
+    return tuple(int(part) for part in re.findall(r"\d+", name)) or (0,)
+
+
+def _claude_desktop_bundled(env, home, windows):
+    """Claude desktop ships the Claude Code CLI under
+    <app data>/Claude/claude-code/<version>/<build>/claude(.exe); newest wins."""
+    roots = []
+    if windows:
+        appdata = env.get("APPDATA")
+        roots.append(Path(appdata) / "Claude" / "claude-code" if appdata else None)
+        roots.append(home / "AppData" / "Roaming" / "Claude" / "claude-code")
+    else:
+        roots.append(home / "Library" / "Application Support" / "Claude" / "claude-code")
+        roots.append(home / ".config" / "Claude" / "claude-code")
+    name = "claude.exe" if windows else "claude"
+    for root in roots:
+        if not root or not root.is_dir():
+            continue
+        try:
+            versions = sorted((item for item in root.iterdir() if item.is_dir()),
+                              key=lambda item: _version_key(item.name), reverse=True)
+        except OSError:
+            continue
+        for version in versions:
+            for found in sorted(version.glob(f"*/{name}")) + [version / name]:
+                if _launchable(found, windows):
+                    return str(found)
+    return ""
+
+
+def find_claude(env=None, home=None, windows=None):
+    """Return (path, source) of the Claude Code CLI, or ("", None).
+
+    Order: TEAMYRA_CLAUDE, PATH (PATHEXT variants), `where claude`, the npm
+    global prefix (`npm prefix -g`), %APPDATA%/npm, %LOCALAPPDATA%/Programs,
+    ~/.claude/local, ~/.local/bin, then the Claude desktop bundled CLI."""
+    env = os.environ if env is None else env
     home = Path(home) if home else Path.home()
+    windows = (os.name == "nt") if windows is None else windows
+    explicit = env.get("TEAMYRA_CLAUDE")
+    if explicit:
+        return explicit, "TEAMYRA_CLAUDE"
+    names = ("claude.exe", "claude.cmd", "claude.bat", "claude") if windows else ("claude",)
+    for name in names:
+        found = which(name, env)
+        if _launchable(found, windows):
+            return found, "PATH"
+    if windows:
+        for line in _command_lines(["where", "claude"], env):
+            if _launchable(line, windows):
+                return line, "where claude"
+    npm = which("npm", env)
+    if npm:
+        for line in _command_lines([npm, "prefix", "-g"], env)[:1]:
+            prefix = Path(line)
+            candidates = (
+                [prefix / "claude.cmd", prefix / "claude.exe", prefix.joinpath(*CLAUDE_NPM_PACKAGE_EXE)]
+                if windows else [prefix / "bin" / "claude"]
+            )
+            for candidate in candidates:
+                if _launchable(candidate, windows):
+                    return str(candidate), "npm prefix -g"
     appdata = env.get("APPDATA")
-    binary = (
-        env.get("TEAMYRA_CLAUDE")
-        or which("claude", env)
-        or first_existing([
-            Path(appdata) / "npm" / "claude.cmd" if appdata else None,
-            home / "AppData" / "Roaming" / "npm" / "claude.cmd",
-            home / ".local" / "bin" / "claude.exe",
-            home / ".local" / "bin" / "claude",
-        ])
-    )
-    return [binary] if binary else []
+    local = env.get("LOCALAPPDATA")
+    static = []
+    for npm_root in ([Path(appdata) / "npm"] if appdata else []) + [home / "AppData" / "Roaming" / "npm"]:
+        static.append((npm_root / "claude.cmd", "npm global"))
+        static.append((npm_root.joinpath(*CLAUDE_NPM_PACKAGE_EXE), "npm global"))
+    for programs in ([Path(local) / "Programs"] if local else []) + [home / "AppData" / "Local" / "Programs"]:
+        for folder in ("claude", "Claude", "claude-code", "Claude Code"):
+            static.append((programs / folder / "claude.exe", "LOCALAPPDATA Programs"))
+    for name in ("claude.cmd", "claude.exe", "claude"):
+        static.append((home / ".claude" / "local" / name, ".claude/local"))
+    for name in ("claude.exe", "claude"):
+        static.append((home / ".local" / "bin" / name, ".local/bin"))
+    for candidate, source in static:
+        if _launchable(candidate, windows):
+            return str(candidate), source
+    bundled = _claude_desktop_bundled(env, home, windows)
+    if bundled:
+        return bundled, "Claude desktop bundled CLI"
+    return "", None
+
+
+def claude_launch_info(env=None, home=None, windows=None):
+    """Which Claude Code CLI TEAMYRA uses and how it was found."""
+    path, source = find_claude(env, home, windows)
+    return {"argv": [path] if path else [], "path": path or None, "source": source}
+
+
+def claude_launch(env=None, home=None):
+    path, _ = find_claude(env, home)
+    return [path] if path else []

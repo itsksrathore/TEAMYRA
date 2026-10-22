@@ -5,6 +5,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createStartupLog, loadDesktopWindow } = require('./startup-diagnostics');
 
+// Keep hidden embedded workers running before Chromium starts any renderer.
+for (const name of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows']) {
+  app.commandLine.appendSwitch(name);
+}
+const { DesktopControlPoller } = require('./desktop-control-poller');
+
 const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
 
 function looksLikeTeamyraRoot(candidate) {
@@ -38,6 +44,44 @@ function resolveTeamyraRoot() {
 const RUNTIME_ROOT = path.resolve(resolveTeamyraRoot());
 process.env.TEAMYRA_ROOT = RUNTIME_ROOT;
 fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
+
+// One TEAMYRA per PC. When ~/.teamyra/runtime.json names the canonical
+// checkout, any other copy (installed/portable build, a worktree or another
+// branch checkout) refuses to start: each copy has its own runtime and Google
+// /ChatGPT sign-ins, so agents opening different copies saw different logins.
+function canonicalRuntimeRoot() {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(require('node:os').homedir(), '.teamyra', 'runtime.json'), 'utf8'));
+    const root = config?.root ? path.resolve(String(config.root)) : '';
+    return root && looksLikeTeamyraRoot(root) ? root : '';
+  } catch { return ''; }
+}
+
+const CANONICAL_ROOT = canonicalRuntimeRoot();
+const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+if (CANONICAL_ROOT && (app.isPackaged || !samePath(SOURCE_ROOT, CANONICAL_ROOT) || !samePath(RUNTIME_ROOT, CANONICAL_ROOT))) {
+  if (!process.argv.includes('--background')) {
+    dialog.showErrorBox('Use the main TEAMYRA',
+      'This copy of TEAMYRA is disabled so that every agent uses one app and one set of sign-ins.\n\n' +
+      'Open TEAMYRA from the Start menu (it runs from ' + CANONICAL_ROOT + ').');
+  }
+  app.exit(0);
+}
+
+// A source checkout rebuilds its renderer bundle when app.mjs changed, so a
+// shortcut launch never shows stale UI.
+if (!app.isPackaged) {
+  try {
+    const rendererDir = path.join(__dirname, '..', 'renderer');
+    const entry = path.join(rendererDir, 'app.mjs');
+    const bundle = path.join(rendererDir, 'bundle.js');
+    const stale = !fs.existsSync(bundle) || ['app.mjs', 'agent-icons.mjs'].some(name =>
+      fs.statSync(path.join(rendererDir, name)).mtimeMs > fs.statSync(bundle).mtimeMs);
+    if (stale) {
+      require('esbuild').buildSync({ entryPoints: [entry], bundle: true, platform: 'browser', format: 'iife', outfile: bundle, logLevel: 'silent' });
+    }
+  } catch { /* npm start builds it as well */ }
+}
 
 const DESKTOP_USER_DATA = path.join(RUNTIME_ROOT, '.teamyra-desktop');
 fs.mkdirSync(DESKTOP_USER_DATA, { recursive: true });
@@ -81,6 +125,17 @@ let mcpBootError = null;
 let desktopIdleTimer = null;
 
 const DESKTOP_IDLE_SECONDS = Math.max(30, Number(process.env.TEAMYRA_DESKTOP_IDLE_SECONDS) || 600);
+let desktopReady = false;
+let desktopStateWrittenAt = 0;
+function publishDesktopState(ready = desktopReady) {
+  desktopReady = ready;
+  const state = { protocol: 1, pid: process.pid, ready, runtime_root: RUNTIME_ROOT, updated_at: Date.now() / 1000 };
+  const file = path.join(DESKTOP_USER_DATA, 'runtime.json');
+  const temporary = file + '.tmp-' + process.pid;
+  fs.writeFileSync(temporary, JSON.stringify(state), 'utf8');
+  fs.renameSync(temporary, file);
+  desktopStateWrittenAt = Date.now();
+}
 const ROOT = RUNTIME_ROOT;
 const JOBS = path.join(ROOT, 'jobs');
 const APP_ICON = app.isPackaged
@@ -374,9 +429,20 @@ function jobBlocksDesktopSleep(job) {
 
 function hasActiveDesktopWork() {
   if (TERMINALS.size > 0) return true;
+  try {
+    if (fs.readdirSync(DESKTOP_CONTROL_DIR).some(name => name.endsWith('.request.json'))) return true;
+    const states = new Set(['queued', 'preparing', 'waiting_for_browser', 'submitting', 'generating', 'processing', 'downloading', 'extracting_audio', 'organizing']);
+    const mediaJobs = path.join(ROOT, 'media', 'jobs');
+    if (fs.existsSync(mediaJobs) && fs.readdirSync(mediaJobs).filter(name => name.endsWith('.json')).some(name => {
+      try {
+        const job = JSON.parse(fs.readFileSync(path.join(mediaJobs, name), 'utf8'));
+        return states.has(job.state) && (Date.now() / 1000 - Number(job.updated_at || job.created_at || 0)) < DESKTOP_IDLE_SECONDS;
+      } catch { return false; }
+    })) return true;
+  } catch {}
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
-  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumer?.busy === true || runtime.musicConsumer?.busy === true)) return true;
+  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumer?.busy === true || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
   return false;
 }
 
@@ -400,6 +466,7 @@ function scheduleDesktopIdleExit(delayMs = DESKTOP_IDLE_SECONDS * 1000) {
       return;
     }
     isQuitting = true;
+    startupLog('idle-exit', { idle_seconds: DESKTOP_IDLE_SECONDS });
     app.quit();
   }, Math.max(1000, Number(delayMs) || DESKTOP_IDLE_SECONDS * 1000));
   desktopIdleTimer.unref?.();
@@ -527,6 +594,7 @@ function createWindow(background = false) {
     icon: windowIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -575,10 +643,12 @@ function createWindow(background = false) {
       googleMediaEngine?.destroy();
       googleMediaEngine = new GoogleMediaEngine({ window: win });
       googleMediaEngine.initialize();
+      publishDesktopState(true);
     } catch (error) {
       startupLog('google-media-start-failed', { error: String(error?.stack || error) });
       try { googleMediaEngine?.destroy(); } catch {}
       googleMediaEngine = null;
+      publishDesktopState(true);
     }
   });
   const webContentsId = win.webContents.id;
@@ -660,6 +730,45 @@ ipcMain.handle('teamyra:media-visible', async (_event, visible) => {
 ipcMain.handle('teamyra:media-bounds', (_event, bounds = {}) => {
   if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
   return googleMediaEngine.setBounds(bounds);
+});
+
+const BULK_MEDIA_TYPES = new Set(['image', 'video', 'sound_effect']);
+const BULK_REQUEST_KEYS = ['prompt', 'aspect_ratio', 'duration', 'format', 'download_quality', 'generation_resolution', 'references'];
+ipcMain.handle('teamyra:media-batch', async (_event, options = {}) => {
+  const type = String(options.type || '');
+  if (!BULK_MEDIA_TYPES.has(type)) throw new Error('Bulk generation supports images, videos and sound effects');
+  const projectPath = String(options.projectPath || '').trim();
+  if (!projectPath || !fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) throw new Error('Choose an existing project folder');
+  const items = Array.isArray(options.requests) ? options.requests : [];
+  if (!items.length || items.length > 50) throw new Error('A bulk run takes 1 to 50 generations');
+  const requests = items.map(item => {
+    const request = { type, project_path: projectPath };
+    for (const key of BULK_REQUEST_KEYS) {
+      if (item?.[key] !== undefined && item[key] !== null && item[key] !== '') request[key] = item[key];
+    }
+    return request;
+  });
+  const result = await callCore('media.batch', { requests, max_parallel: Number(options.maxParallel) || undefined }, { timeout: 60000 });
+  let runtime = null;
+  try {
+    runtime = googleMediaEngine ? googleMediaEngine.wake('visual', options.profileId || googleMediaEngine.activeProfileId || 'google') : null;
+  } catch (error) {
+    runtime = { error: String(error?.message || error) };
+  }
+  return { ...result, runtime };
+});
+ipcMain.handle('teamyra:media-batch-status', (_event, batchId) =>
+  callCore('media.status', { batch_id: String(batchId || '') }, { timeout: 20000 }));
+ipcMain.handle('teamyra:media-batch-cancel', (_event, batchId) =>
+  callCore('media.cancel-batch', { batch_id: String(batchId || '') }, { timeout: 30000 }));
+ipcMain.handle('teamyra:media-open-folder', async (_event, projectPath) => {
+  const root = path.resolve(String(projectPath || ''));
+  const generated = path.join(root, 'Generated Assets');
+  const target = fs.existsSync(generated) ? generated : root;
+  if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error('Project folder is unavailable');
+  const error = await shell.openPath(target);
+  if (error) throw new Error(error);
+  return { ok: true, path: target };
 });
 ipcMain.handle('teamyra:mcp-connections', async () => {
   const state = await getMcpConnections();
@@ -847,9 +956,59 @@ ipcMain.handle('teamyra:chatgpt-workspace-status', async () => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
   return provider.workspaceBridge.status();
 });
-ipcMain.handle('teamyra:chatgpt-workspace-configure', async (_event, workspace, permissions = {}) => {
+const ELEVATED_CHATGPT_PERMISSIONS = ['full_access', 'outside_workspace', 'destructive_without_confirmation'];
+
+async function storedChatgptPermissions(provider) {
+  const status = await provider.workspaceBridge.status().catch(() => null);
+  const permissions = { ...(status?.permissions || {}) };
+  if (status?.full_access === true) permissions.full_access = true;
+  return permissions;
+}
+
+// Automated callers (desktop control / MCP) may only lower the elevated
+// permissions; raising them needs the desktop UI and its confirmation dialog.
+async function lowerOnlyChatgptPermissions(provider, permissions = {}) {
+  const current = await storedChatgptPermissions(provider);
+  const next = { ...(permissions || {}) };
+  for (const key of ELEVATED_CHATGPT_PERMISSIONS) {
+    next[key] = current[key] === true && next[key] !== false;
+  }
+  return next;
+}
+
+ipcMain.handle('teamyra:chatgpt-workspace-configure', async (event, workspace, permissions = {}) => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
-  return provider.workspaceBridge.configure(String(workspace || ''), permissions || {});
+  const requested = { ...(permissions || {}) };
+  const current = await storedChatgptPermissions(provider);
+  const raised = ELEVATED_CHATGPT_PERMISSIONS.filter(key => requested[key] === true && current[key] !== true);
+  if (raised.length) {
+    const lines = [];
+    if (raised.includes('full_access') || raised.includes('outside_workspace')) {
+      lines.push('Full PC access lets ChatGPT workers read, write and delete files and run commands anywhere on this PC with your Windows account, not only in the workspace. Credential folders stay blocked.');
+    }
+    if (raised.includes('destructive_without_confirmation')) {
+      lines.push('Destructive commands (recursive delete, format, git push --force, git reset --hard, registry edits) will run without asking you first.');
+    }
+    const options = {
+      type: 'warning',
+      title: 'TEAMYRA: grant elevated access?',
+      message: raised.includes('full_access') ? 'Turn on Full PC access for ChatGPT workers?' : 'Allow destructive commands without confirmation?',
+      detail: lines.join('\n\n') + '\n\nOnly continue for tasks you trust. You can turn it off again in Workspace access.',
+      buttons: ['Cancel', 'Turn on'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    };
+    const owner = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow();
+    const answer = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+    if (answer.response !== 1) return { cancelled: true };
+  }
+  const access = {};
+  for (const key of ELEVATED_CHATGPT_PERMISSIONS) {
+    if (Object.prototype.hasOwnProperty.call(requested, key)) access[key] = requested[key] === true;
+    delete requested[key];
+  }
+  return provider.workspaceBridge.configure(String(workspace || ''), requested, access);
 });
 ipcMain.handle('teamyra:chatgpt-select-workspace', async () => {
   const provider = activeChatgptProvider() || await ensureChatgptProvider('web');
@@ -1060,7 +1219,7 @@ function safeSettingToken(value, field, maxLength = 120) {
 
 
 const DESKTOP_CONTROL_DIR = path.join(ROOT, '.teamyra-desktop', 'control');
-let desktopControlTimer = null;
+let desktopControlPoller = null;
 
 async function desktopCreateAccount(providerId, requestedName) {
   const provider = providerById(providerId);
@@ -1136,6 +1295,7 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (mediaCmd === 'status') return payload.profile_id
       ? googleMediaEngine.profileStatus(payload.profile_id)
       : googleMediaEngine.status();
+    if (mediaCmd === 'wake') return googleMediaEngine.wake(payload.surface || 'visual', payload.profile_id || 'google');
     if (mediaCmd === 'open') return googleMediaEngine.open(payload.profile_id || 'google');
     if (mediaCmd === 'login') return googleMediaEngine.login(payload.profile_id || 'google');
     if (mediaCmd === 'close') return googleMediaEngine.close();
@@ -1143,6 +1303,158 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (mediaCmd === 'visible') return googleMediaEngine.setVisible(payload.visible === true);
     if (mediaCmd === 'bounds') return googleMediaEngine.setBounds(payload.bounds || {});
     if (mediaCmd === 'music') return googleMediaEngine.showMusic(payload.profile_id);
+    if (mediaCmd === 'diagnose' && payload.__locked !== true) {
+      // Diagnostics drive the same Flow page as the worker (open panels, scroll
+      // the grid): run them inside the worker's page lock, never mid-submission.
+      const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
+      const consumer = payload.surface === 'music' ? runtime.musicConsumer : runtime.visualConsumer;
+      const lockLimit = Math.min(600000, Math.max(180000, Number(payload.timeout_ms) || 0));
+      return consumer.ui.run(() => dispatchDesktopControl(action, { ...payload, __locked: true }), lockLimit);
+    }
+    if (mediaCmd === 'diagnose') {
+      const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
+      const surface = payload.surface === 'music' ? runtime.music : runtime.visual;
+      if (!surface?.view || surface.view.webContents.isDestroyed()) {
+        return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
+      }
+      let diagnosticAction = null;
+      if (payload.surface !== 'music' && Array.isArray(payload.find_prompts)) {
+        return surface.adapter.browser.withActivePage(() => surface.adapter.findPrompts(payload.find_prompts.slice(0, 20)));
+      }
+      if (payload.surface !== 'music' && payload.match_job && typeof payload.match_job === 'object') {
+        // Read-only: how the matcher and the downloader see one job's result.
+        return surface.adapter.browser.withActivePage(async () => {
+          const job = payload.match_job;
+          const key = job.provider_submission?.result_key;
+          const snapshot = await surface.adapter.resultSnapshot();
+          const saved = snapshot.filter(item => item.key === key);
+          const direct = await surface.adapter.resultForJob(job).catch(error => ({ error: String(error?.message || error) }));
+          const deep = direct ? null : await surface.adapter.resultForJobDeep(job).catch(error => ({ error: String(error?.message || error) }));
+          // The closest tile prompts and where they first differ from this job's.
+          const { normalizePrompt, promptSimilarity } = require('./media/google-flow-automation-adapter');
+          const wanted = normalizePrompt(job.request?.provider_prompt || job.request?.prompt);
+          const closest = [...surface.adapter.resultInfoCache.entries()]
+            .map(([key, info]) => ({ key, prompt: normalizePrompt(info?.prompt), similarity: promptSimilarity(info?.prompt, wanted) }))
+            .sort((a, b) => b.similarity - a.similarity).slice(0, 3)
+            .map(item => {
+              let at = 0;
+              while (at < item.prompt.length && item.prompt[at] === wanted[at]) at += 1;
+              return { key: item.key, similarity: Number(item.similarity.toFixed(3)), tile_length: item.prompt.length,
+                job_length: wanted.length, first_difference_at: at,
+                tile_text: item.prompt.slice(Math.max(0, at - 60), at + 120), job_text: wanted.slice(Math.max(0, at - 60), at + 120) };
+            });
+          return { url: surface.view.webContents.getURL(), tiles: snapshot.length, saved, direct, deep,
+            unmatched: surface.adapter.lastUnmatchedCandidates ?? null, closest };
+        });
+      }
+      if (payload.surface !== 'music' && payload.result_info === true) {
+        // What the result matcher reads for the newest tiles (raw panel text + tile/panel DOM).
+        return surface.adapter.browser.withActivePage(async () => {
+          const results = await surface.adapter.resultSnapshot();
+          const out = [];
+          for (const result of results.slice(0, Number(payload.limit) || 4)) {
+            const info = await surface.adapter.readResultInfo(result.key).catch(error => ({ error: String(error?.message || error) }));
+            out.push({ key: result.key, type: result.type, ready: result.ready, actionable: result.actionable, info });
+          }
+          const dom = await surface.view.webContents.executeJavaScript(`(() => {
+            const tile = document.querySelector('flow-image-tile,flow-video-tile');
+            return (async () => {
+              tile?.querySelector('.footer-left')?.click();
+              await new Promise(resolve => setTimeout(resolve, 600));
+              const overlay = document.querySelector('.cdk-overlay-container');
+              const panel = [...document.querySelectorAll('flow-info-panel')][0];
+              const result = { overlay: String(overlay?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 5000),
+                panel: String(panel?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 3000) };
+              tile?.querySelector('.footer-left')?.click();
+              return result;
+            })();
+          })()`, true).catch(error => ({ error: String(error?.message || error) }));
+          return { url: surface.view.webContents.getURL(), results: out, dom };
+        });
+      }
+      if (payload.surface !== 'music' && (payload.inspect_page === true || payload.probe_picker === true)) {
+        if (payload.probe_picker === true && (runtime.visualConsumer.busy || runtime.musicConsumer.busy)) throw new Error('Media worker is busy; picker diagnostics must wait');
+        if (payload.project_url && /^https:\/\/flow\.google\.com\/project\//i.test(String(payload.project_url))) {
+          await surface.adapter.loadProjectUrl(String(payload.project_url));
+          await new Promise(resolve => setTimeout(resolve, 4000));
+        }
+        return surface.adapter.browser.withActivePage(() => surface.adapter.inspectPage({
+          probePicker: payload.probe_picker === true, probeIngredient: payload.probe_ingredient === true }));
+      }
+      if (payload.prepare_workspace || (Array.isArray(payload.radio_patterns) && payload.radio_patterns.length)) {
+        if (runtime.visualConsumer.busy || runtime.musicConsumer.busy) throw new Error('Media worker is busy; settings diagnostics must wait');
+      }
+      if (payload.surface !== 'music' && payload.prepare_workspace === true) {
+        diagnosticAction = await surface.adapter.browser.withActivePage(async () => {
+          await surface.adapter.ensureWorkspace();
+          if (payload.verify_video_settings === true) {
+            return surface.adapter.selectIntent({ type: 'video', aspect_ratio: '16:9', output_count: 1,
+              generation_settings: { generation_resolution: '720p' } });
+          }
+          return { workspace_ready: true };
+        }).catch(error => ({ ok: false, error: String(error?.message || error).slice(0, 1200) }));
+      }
+      if (payload.surface !== 'music' && Array.isArray(payload.radio_patterns) && payload.radio_patterns.length) {
+        diagnosticAction = await surface.adapter.selectRadioSetting(
+          payload.radio_patterns.map(value => String(value)),
+          { required: true, label: String(payload.radio_label || 'diagnostic radio') }
+        ).catch(error => ({ ok: false, error: String(error?.message || error).slice(0, 1200) }));
+      }
+      const probe = await surface.adapter.probe().catch(() => null);
+      const classified = probe ? surface.adapter.classifyProbe(probe) : null;
+      const generation = payload.surface === 'music'
+        ? null
+        : await surface.adapter.generationSnapshot().catch(() => null);
+      let promptSelectorDiagnostic = null;
+      if (payload.surface !== 'music') {
+        try {
+          promptSelectorDiagnostic = { ok: true, selector: await surface.adapter.promptSelector() };
+        } catch (error) {
+          promptSelectorDiagnostic = { ok: false, error: String(error?.message || error).slice(0, 1200) };
+        }
+      }
+      const createDetail = payload.surface === 'music' ? null : await surface.view.webContents.executeJavaScript(`(() => {
+        const el = document.querySelector('.create-applet-card[role="button"]')
+          || [...document.querySelectorAll('[role="button"],button')].find(node => /create new/i.test(((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim()));
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const attrs = {};
+        for (const attr of [...el.attributes]) attrs[attr.name] = String(attr.value || '').slice(0, 300);
+        return {
+          tag: el.tagName,
+          attrs,
+          cls: String(el.className || '').slice(0, 300),
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          pointerEvents: style.pointerEvents,
+          cursor: style.cursor,
+          html: String(el.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 2500),
+          parent: String(el.parentElement?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 3500)
+        };
+      })()`, true).catch(() => null);
+      const settingsOptions = payload.surface === 'music'
+        ? []
+        : await surface.adapter.settingsOptions().catch(() => []);
+      const settingsState = payload.surface === 'music'
+        ? []
+        : await surface.adapter.settingsControlState().catch(() => []);
+      return {
+        surface: payload.surface || 'visual',
+        loaded: true,
+        visible: surface.visible === true,
+        url: surface.view.webContents.getURL(),
+        classified,
+        promptFound: probe?.promptFound === true,
+        controls: (probe?.buttonLabels || probe?.labels || []).slice(0, 80),
+        text_excerpt: String(probe?.text || '').slice(0, 3000),
+        generation,
+        diagnostic_action: diagnosticAction,
+        settings_options: settingsOptions.slice(0, 120),
+        settings_state: settingsState.slice(0, 120),
+        prompt_selector: promptSelectorDiagnostic,
+        create_detail: createDetail
+      };
+    }
     throw new Error('Unsupported Google Media control action');
   }
   if (!action.startsWith('chatgpt.')) throw new Error('Unsupported desktop control action');
@@ -1150,7 +1462,7 @@ async function dispatchDesktopControl(action, payload = {}) {
   const cmd = action.slice('chatgpt.'.length);
   const profileId = String(payload.profile_id || 'web');
   const provider = await ensureChatgptProvider(profileId);
-  if (cmd === 'status') return provider.refreshStatus();
+  if (cmd === 'status') return provider.getStatus();
   if (cmd === 'open') {
     activeChatgptProfileId = profileId;
     for (const [id, other] of chatgptProviders) other.setVisible(id === profileId);
@@ -1158,7 +1470,10 @@ async function dispatchDesktopControl(action, payload = {}) {
   }
   if (cmd === 'close') return provider.close();
   if (cmd === 'reload') return provider.reload();
-  if (cmd === 'reconnect') return provider.reconnect();
+  if (cmd === 'reconnect') {
+    void provider.reconnect().catch(() => {});
+    return { ok: true };
+  }
   if (cmd === 'new_chat') return provider.createConversation();
   if (cmd === 'stop') return provider.stopGeneration();
   if (cmd === 'send') return provider.sendTask(String(payload.text || ''));
@@ -1174,7 +1489,12 @@ async function dispatchDesktopControl(action, payload = {}) {
   }
   if (cmd === 'bounds') return provider.setBounds(payload.bounds || {});
   if (cmd === 'workspace_status') return provider.workspaceBridge.status();
-  if (cmd === 'workspace_configure') return provider.workspaceBridge.configure(String(payload.workspace || ''), payload.permissions || {});
+  if (cmd === 'workspace_configure') {
+    return provider.workspaceBridge.configure(
+      String(payload.workspace || ''),
+      await lowerOnlyChatgptPermissions(provider, payload.permissions || {})
+    );
+  }
   if (cmd === 'changes') return provider.workspaceBridge.changes();
   if (cmd === 'revert') {
     if (payload.confirm !== true) throw new Error('Revert requires explicit confirmation');
@@ -1186,45 +1506,16 @@ async function dispatchDesktopControl(action, payload = {}) {
   throw new Error('Unsupported ChatGPT control action');
 }
 
-async function processDesktopControlRequests() {
-  fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
-  const files = fs.readdirSync(DESKTOP_CONTROL_DIR).filter(name => name.endsWith('.request.json')).slice(0, 20);
-  for (const name of files) {
-    const requestPath = path.join(DESKTOP_CONTROL_DIR, name);
-    const responsePath = requestPath.replace(/\.request\.json$/, '.response.json');
-    let req = null;
-    try { req = JSON.parse(fs.readFileSync(requestPath, 'utf8')); } catch {}
-    if (!req?.id || !req?.action) {
-      try { fs.unlinkSync(requestPath); } catch {}
-      continue;
-    }
-    try {
-      const result = await dispatchDesktopControl(String(req.action), req.payload || {});
-      fs.writeFileSync(responsePath, JSON.stringify({ id: req.id, ok: true, result }), 'utf8');
-    } catch (error) {
-      fs.writeFileSync(responsePath, JSON.stringify({ id: req.id, ok: false, error: String(error?.message || error) }), 'utf8');
-    }
-    try { fs.unlinkSync(requestPath); } catch {}
-  }
-  return files.length;
-}
-
-function scheduleDesktopControlLoop(delayMs = 500) {
-  if (isQuitting) return;
-  clearTimeout(desktopControlTimer);
-  desktopControlTimer = setTimeout(async () => {
-    desktopControlTimer = null;
-    let processed = 0;
-    try { processed = await processDesktopControlRequests(); } catch {}
-    scheduleDesktopControlLoop(processed > 0 ? 100 : 500);
-  }, Math.max(50, Number(delayMs) || 500));
-  desktopControlTimer.unref?.();
-}
-
 function startDesktopControlLoop() {
-  if (desktopControlTimer) return;
-  fs.mkdirSync(DESKTOP_CONTROL_DIR, { recursive: true });
-  scheduleDesktopControlLoop(100);
+  if (desktopControlPoller) return;
+  desktopControlPoller = new DesktopControlPoller({
+    directory: DESKTOP_CONTROL_DIR,
+    dispatch: dispatchDesktopControl,
+    onTick: () => {
+      if (desktopReady && Date.now() - desktopStateWrittenAt >= 5000) publishDesktopState();
+    }
+  });
+  desktopControlPoller.start();
 }
 
 ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) => {
@@ -1298,12 +1589,20 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => showMainWindow());
+  app.on('second-instance', (_event, argv) => {
+    // MCP waking a running instance must never steal desktop focus.
+    if (argv.includes('--background')) scheduleDesktopIdleExit();
+    else showMainWindow();
+  });
 
   app.whenReady().then(() => {
     if (shouldUseWindowsAppUserModelId()) app.setAppUserModelId('com.teamyra.desktop');
     ensureWindowsShortcutIdentity();
     const background = process.argv.includes('--background');
+    fs.writeFileSync(path.join(DESKTOP_USER_DATA, 'launch.json'), JSON.stringify({
+      executable: process.execPath, packaged: app.isPackaged, runtime_root: RUNTIME_ROOT
+    }), 'utf8');
+    publishDesktopState(false);
     createWindow(background);
     startDesktopControlLoop();
     if (background) scheduleDesktopIdleExit();
@@ -1323,11 +1622,16 @@ if (!gotSingleInstanceLock) {
   });
 }
 
+// An orderly exit is logged; a process that vanishes without these lines was
+// terminated from outside (task kill), which recovery then handles.
+process.on('exit', code => { try { startupLog('process-exit', { code }); } catch {} });
 app.on('before-quit', () => {
+  startupLog('before-quit', { idle: !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() });
   isQuitting = true;
+  if (gotSingleInstanceLock) { try { publishDesktopState(false); } catch {} }
   clearDesktopIdleExit();
-  if (desktopControlTimer) clearTimeout(desktopControlTimer);
-  desktopControlTimer = null;
+  desktopControlPoller?.stop();
+  desktopControlPoller = null;
   try { googleMediaEngine?.destroy(); } catch {}
   googleMediaEngine = null;
   stopOwnedMcp();

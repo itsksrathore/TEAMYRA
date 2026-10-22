@@ -38,3 +38,5 @@ build/
 dist/
 chatgpt/
 backups/
+/.review-in/
+/.review-out/

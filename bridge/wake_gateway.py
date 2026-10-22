@@ -81,9 +81,20 @@ def process_alive(pid):
 
 def active_jobs(runtime_root, max_age=600):
     jobs = Path(runtime_root) / "jobs"
+    now = time.time()
+    # Media workers also need the core for state/download bookkeeping. A cold
+    # gateway must not shut it down while a browser job is active.
+    media_states = {"queued", "preparing", "waiting_for_browser", "submitting", "generating", "processing", "downloading", "extracting_audio", "organizing"}
+    for meta in (Path(runtime_root) / "media" / "jobs").glob("media-*.json"):
+        try:
+            job = json.loads(meta.read_text(encoding="utf-8"))
+            stamp = float(job.get("updated_at") or job.get("created_at") or 0)
+            if job.get("state") in media_states and now - stamp <= max(30, int(max_age)):
+                return True
+        except (OSError, ValueError, TypeError):
+            continue
     if not jobs.exists():
         return False
-    now = time.time()
     for meta in jobs.glob("*/meta.json"):
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))

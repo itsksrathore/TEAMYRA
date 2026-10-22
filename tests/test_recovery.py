@@ -146,6 +146,68 @@ class RecoveryTests(unittest.TestCase):
             self.assertIsNone(state["monitor_pid"])
             self.assertEqual(state["active_job_id"], "job-review")
 
+    def make_state_job(self, root, job_id, state, **extra):
+        job = Path(root) / "jobs" / job_id
+        meta = {"id": job_id, "state": state, "cwd": str(root), "worker": "chatgpt-normal",
+                "provider": "chatgpt-web", "runner_pid": None, "created": time.time(), "timeout_s": 600}
+        meta.update(extra)
+        self.write_json(job / "meta.json", meta)
+        self.write_json(job / "spec.json", {"worker": meta["worker"], "provider": meta["provider"], "cmd": [],
+                                            "cwd": str(root), "timeout": 600, "resume_cmd": []})
+        return job
+
+    def test_queued_job_is_kept(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = self.make_state_job(td, "q", "queued", worker="codex1", provider="codex", queue_position=2)
+            with patch.object(recovery, "_spawn_detached") as spawn:
+                result = recovery.recover_job(td, ROOT / "bridge", sys.executable, job)
+            self.assertEqual((result["action"], result["queue_position"]), ("queued", 2))
+            self.assertFalse((job / "DONE").exists())
+            self.assertEqual(json.loads((job / "meta.json").read_text(encoding="utf-8"))["state"], "queued")
+            spawn.assert_not_called()
+
+    def test_waiting_for_desktop_is_kept_until_its_deadline(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = self.make_state_job(td, "w", "waiting_for_desktop", created=time.time() - 3600,
+                                      dispatched_at=time.time() - 60)
+            result = recovery.recover_job(td, ROOT / "bridge", sys.executable, job)
+            self.assertEqual(result["action"], "desktop_owned")
+            self.assertFalse((job / "DONE").exists())
+
+    def test_waiting_for_desktop_past_deadline_fails_with_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = self.make_state_job(td, "w", "waiting_for_desktop", created=time.time() - 3600,
+                                      attention={"kind": "chatgpt_verification"})
+            result = recovery.recover_job(td, ROOT / "bridge", sys.executable, job)
+            self.assertEqual((result["action"], result["reason"]), ("timeout", "timeout"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual((meta["state"], meta["reason"], meta["exit_code"]), ("failed", "timeout", 1))
+            self.assertIsNone(meta["attention"])
+            self.assertEqual((job / "DONE").read_text(encoding="utf-8"), "failed")
+
+    def test_needs_user_and_running_desktop_jobs_are_not_failed(self):
+        for state in ("needs_user", "running"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as td:
+                job = self.make_state_job(td, "n", state, created=time.time() - 3600,
+                                          attention={"kind": "chatgpt_verification"})
+                with patch.object(recovery, "_spawn_detached") as spawn:
+                    result = recovery.recover_job(td, ROOT / "bridge", sys.executable, job)
+                self.assertEqual(result["action"], "desktop_owned")
+                self.assertFalse((job / "DONE").exists())
+                spawn.assert_not_called()
+
+    def test_recover_all_dispatches_queued_jobs(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.make_state_job(td, "q", "queued", worker="codex1", provider="codex")
+            with patch.object(recovery.scheduler, "dispatch_once",
+                              return_value={"dispatched": [{"job_id": "q"}], "waiting": [], "skipped": None}) as dispatch, \
+                 patch.object(recovery.media_engine, "recover_incomplete_jobs", return_value={}):
+                report = recovery.recover_all(td, ROOT / "bridge", sys.executable)
+            dispatch.assert_called_once_with(Path(td), ROOT / "bridge", sys.executable)
+            self.assertEqual(report["dispatch"]["dispatched"][0]["job_id"], "q")
+            self.assertEqual(report["jobs"][0]["action"], "queued")
+            self.assertEqual(report["actions"]["jobs"], 0)
+
     def test_server_recovery_tool_is_namespaced_and_delegates(self):
         names = {tool["name"] for tool in server.mcp_tools(include_legacy=False)}
         self.assertIn("teamyra.recovery_scan", names)

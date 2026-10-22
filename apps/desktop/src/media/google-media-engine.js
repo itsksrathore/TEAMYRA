@@ -5,11 +5,32 @@ const { GoogleFlowProvider } = require('./google-flow-provider');
 const { GoogleFlowMusicProvider } = require('./google-flow-music-provider');
 const { MediaJobConsumer } = require('./media-job-consumer');
 
+const HUNG_RELOAD_GAP_MS = 3 * 60 * 1000;
+
+// A probe that failed (page busy, navigating or hung) says nothing about the
+// Google session. Keep the last known sign-in state instead of reporting a
+// logout, which would park every job in needs_user_auth.
+function observedStatus(status = {}, last = {}, surface = 'visual') {
+  if (status.probe_ok !== false) return status;
+  const visual = surface !== 'music';
+  return {
+    ...status,
+    loaded: true,
+    unknown: true,
+    signedIn: visual ? last.connected === true : last.music_signed_in === true,
+    challenged: visual ? last.challenged === true : false,
+    promptFound: visual ? last.flow_ready === true : last.music_ready === true
+  };
+}
+
 const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fflow.google.com%2F';
 const STATUS_CACHE_MS = 15000;
+const BROWSER_IDLE_MS = 45000;
+// A saved connection status older than this is re-probed at startup.
+const STALE_STATUS_MS = 10 * 60 * 1000;
 
 class GoogleMediaProfileRuntime {
-  constructor({ window, profileId }) {
+  constructor({ window, profileId, ready = Promise.resolve() }) {
     this.window = window;
     this.profileId = safeProfileId(profileId);
     this.sessionManager = new GoogleMediaSessionManager(this.profileId);
@@ -21,20 +42,27 @@ class GoogleMediaProfileRuntime {
       workerName: 'google-media-' + this.profileId + '-visual',
       provider: this.visual,
       downloadManager: this.downloadManager,
-      profileId: this.profileId
+      profileId: this.profileId,
+      ready,
+      onActivity: () => this.touch()
     });
     this.musicConsumer = new MediaJobConsumer({
       surface: 'music',
       workerName: 'google-media-' + this.profileId + '-music',
       provider: this.music,
       downloadManager: this.downloadManager,
-      profileId: this.profileId
+      profileId: this.profileId,
+      ready,
+      onActivity: () => this.touch()
     });
     this.started = false;
     this.visualConsumerStarted = false;
     this.musicConsumerStarted = false;
     this.unloadTimer = null;
+    this.activityUntil = 0;
+    this.wakingCount = 0;
     this.refreshPromise = null;
+    this.signInWatch = null;
     this.lastRefreshAt = 0;
     this.lastStatus = {
       profile_id: this.profileId,
@@ -89,18 +117,24 @@ class GoogleMediaProfileRuntime {
     this.unloadTimer = null;
   }
 
-  scheduleUnload(delayMs = 3000) {
+  touch() {
+    this.activityUntil = Date.now() + BROWSER_IDLE_MS;
+    this.cancelUnload();
+    this.scheduleUnload(BROWSER_IDLE_MS);
+  }
+
+  scheduleUnload(delayMs = BROWSER_IDLE_MS) {
     this.cancelUnload();
     this.unloadTimer = setTimeout(() => {
       this.unloadTimer = null;
-      if (this.visualConsumer.busy || this.musicConsumer.busy) {
-        this.scheduleUnload(3000);
+      if (this.visualConsumer.busy || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
+        this.scheduleUnload(BROWSER_IDLE_MS);
         return;
       }
       if (this.visual.visible || this.music.visible) return;
       this.visual.destroy();
       this.music.destroy();
-    }, Math.max(1000, Number(delayMs) || 3000));
+    }, Math.max(1000, Number(delayMs) || BROWSER_IDLE_MS));
     this.unloadTimer.unref?.();
   }
 
@@ -111,6 +145,9 @@ class GoogleMediaProfileRuntime {
       busy: this.visualConsumer.busy || this.musicConsumer.busy,
       visual_busy: this.visualConsumer.busy,
       music_busy: this.musicConsumer.busy,
+      visual_pipeline: this.visualConsumer.pipelineStatus?.() || null,
+      visual_audio_muted: this.visual.view?.webContents?.isAudioMuted?.() ?? null,
+      music_audio_muted: this.music.view?.webContents?.isAudioMuted?.() ?? null,
       current_url: this.visual.view?.webContents?.getURL?.()
         || this.music.view?.webContents?.getURL?.()
         || this.lastStatus.current_url
@@ -134,9 +171,16 @@ class GoogleMediaProfileRuntime {
         await this.visual.ensureLoaded().catch(() => {});
       }
       if (this.visual.view) {
-        visualStatus = await this.visual.status().catch(() => ({ loaded: true, signedIn: false }));
+        const inspection = await this.visual.inspect(force ? 15000 : 8000).catch(error => ({
+          status: { loaded: true, probe_ok: false, probe_error: String(error?.message || error) },
+          capabilities: {}
+        }));
+        if (inspection.status?.probe_ok === false) this.recoverHungPage(this.visual, inspection.status.probe_error);
+        visualStatus = observedStatus(inspection.status || { loaded: true, signedIn: false }, this.lastStatus, 'visual');
         if (force || this.visual.visible || !Object.keys(visualCapabilities).length) {
-          visualCapabilities = await this.visual.adapter?.capabilities().catch(() => visualCapabilities) || visualCapabilities;
+          visualCapabilities = Object.keys(inspection.capabilities || {}).length
+            ? inspection.capabilities
+            : visualCapabilities;
         }
       } else if (!allowLoad) {
         visualStatus = {
@@ -149,9 +193,16 @@ class GoogleMediaProfileRuntime {
       }
 
       if (this.music.view) {
-        musicStatus = await this.music.status().catch(() => ({ loaded: true, signedIn: false }));
+        const inspection = await this.music.inspect(force ? 15000 : 8000).catch(error => ({
+          status: { loaded: true, probe_ok: false, probe_error: String(error?.message || error) },
+          capabilities: {}
+        }));
+        if (inspection.status?.probe_ok === false) this.recoverHungPage(this.music, inspection.status.probe_error);
+        musicStatus = observedStatus(inspection.status || { loaded: true, signedIn: false }, this.lastStatus, 'music');
         if (force || this.music.visible || !Object.keys(musicCapabilities).length) {
-          musicCapabilities = await this.music.adapter?.capabilities().catch(() => musicCapabilities) || musicCapabilities;
+          musicCapabilities = Object.keys(inspection.capabilities || {}).length
+            ? inspection.capabilities
+            : musicCapabilities;
         }
       } else {
         musicStatus = {
@@ -187,8 +238,23 @@ class GoogleMediaProfileRuntime {
         current_url: visualStatus.url || musicStatus.url || '',
         visual_url: visualStatus.url || this.lastStatus.visual_url || '',
         music_url: musicStatus.url || this.lastStatus.music_url || '',
+        visual_probe_ok: visualStatus.probe_ok === true,
+        visual_probe_error: visualStatus.probe_error || '',
+        visual_detected_signed_in: visualStatus.unknown ? null : visualStatus.signedIn === true,
+        music_probe_ok: musicStatus.probe_ok === true,
+        music_probe_error: musicStatus.probe_error || '',
+        music_detected_signed_in: musicStatus.unknown ? null : musicStatus.signedIn === true,
         detail: connected ? 'Google Media account connected' : 'Google sign-in required'
       };
+      if (visualStatus.loaded || musicStatus.loaded) {
+        // Persist the live observation so a stale challenged/signed-out flag
+        // from an earlier day cannot outlive the real session state.
+        callCore('media.connection-update', { patch: {
+          connected, needs_user_auth: !connected || visualChallenged, challenged,
+          flow_ready: this.lastStatus.flow_ready, music_signed_in: musicConnected, music_ready: this.lastStatus.music_ready,
+          capabilities: this.lastStatus.capabilities, detail: this.lastStatus.detail
+        } }).catch(() => {});
+      }
       return this.snapshot();
     })();
 
@@ -197,6 +263,27 @@ class GoogleMediaProfileRuntime {
     } finally {
       this.refreshPromise = null;
     }
+  }
+
+  wake(surface = 'visual') {
+    this.touch();
+    this.wakingCount++;
+    const target = surface === 'music' ? this.music : this.visual;
+    target.ensureView();
+    void target.ensureLoaded().then(async () => {
+      await this.refreshConnection({ force: true, allowLoad: false }).catch(() => {});
+      this.setConsumerState(surface === 'music' ? 'music' : 'visual', true);
+    }).catch(() => {}).finally(() => {
+      this.wakingCount = Math.max(0, this.wakingCount - 1);
+      if (!this.visual.visible && !this.music.visible) this.scheduleUnload(BROWSER_IDLE_MS);
+    });
+    const snapshot = { ...this.snapshot(), waking: true, wake_surface: surface };
+    if (!this.lastRefreshAt) {
+      // Nothing has been checked yet in this process: unknown, not signed out.
+      snapshot.needs_user_auth = null;
+      snapshot.status_checked = false;
+    }
+    return snapshot;
   }
 
   async open() {
@@ -226,6 +313,7 @@ class GoogleMediaProfileRuntime {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       this.visual.setVisible(true);
+      this.watchSignIn();
     })();
     return {
       profile_id: this.profileId,
@@ -235,6 +323,27 @@ class GoogleMediaProfileRuntime {
       visible: true,
       detail: 'Google sign-in is opening in TEAMYRA'
     };
+  }
+
+  // After Connect/login, re-probe until the account is signed in (an account
+  // that already is gets redirected to Flow at once), then resume blocked jobs.
+  watchSignIn(timeoutMs = 5 * 60 * 1000) {
+    if (this.signInWatch) return;
+    const deadline = Date.now() + timeoutMs;
+    this.signInWatch = (async () => {
+      try {
+        while (Date.now() < deadline && this.visual.view) {
+          await new Promise(resolve => setTimeout(resolve, 4000));
+          const status = await this.refreshConnection({ force: true, allowLoad: false }).catch(() => null);
+          if (status?.connected) {
+            await callCore('media.resume-auth', {}).catch(() => {});
+            return;
+          }
+        }
+      } finally {
+        this.signInWatch = null;
+      }
+    })();
   }
 
   async showMusic() {
@@ -254,25 +363,9 @@ class GoogleMediaProfileRuntime {
           authorized: false, started: false, needs_user_action: true
         }));
       }
-      const currentUrl = this.music.view?.webContents?.getURL?.() || musicStatus.url || '';
-      const signedInNow = (await this.music.status().catch(() => musicStatus)).signedIn === true;
-      this.lastStatus = {
-        ...this.lastStatus,
-        music_signed_in: signedInNow,
-        music_needs_user_auth: !signedInNow,
-        music_url: currentUrl
-      };
-      this.lastRefreshAt = Date.now();
-      callCore('media.connection-update', { patch: {
-        connected: this.lastStatus.connected === true,
-        needs_user_auth: this.lastStatus.connected !== true,
-        challenged: this.lastStatus.challenged === true,
-        flow_ready: this.lastStatus.flow_ready === true,
-        music_signed_in: signedInNow,
-        music_ready: this.lastStatus.music_ready === true,
-        capabilities: this.lastStatus.capabilities || {},
-        detail: this.lastStatus.connected ? 'Google Media account connected' : 'Google sign-in required'
-      }}).catch(() => {});
+      // Re-probe both surfaces; the refresh persists the live state (it used to
+      // push the visual status remembered from before, however old it was).
+      await this.refreshConnection({ force: true, allowLoad: false }).catch(() => null);
       void authorization;
     }).catch(() => {
       this.music.setVisible(false);
@@ -300,6 +393,19 @@ class GoogleMediaProfileRuntime {
     this.music.setBounds(bounds);
   }
 
+  // A page script that timed out means the Flow renderer is hung; a reload
+  // alone cannot reach it, so end the renderer and load the page again.
+  recoverHungPage(provider, error) {
+    if (!/timed out/i.test(String(error || ''))) return;
+    const contents = provider.view?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    if (Date.now() - (provider.hungRecoveredAt || 0) < HUNG_RELOAD_GAP_MS) return;
+    provider.hungRecoveredAt = Date.now();
+    console.warn('[google-media] page did not answer a status probe; restarting its renderer');
+    try { contents.forcefullyCrashRenderer(); } catch {}
+    try { contents.reload(); } catch {}
+  }
+
   async reconnect() {
     await this.visual.ensureLoaded();
     this.visual.view.webContents.reload();
@@ -323,13 +429,16 @@ class GoogleMediaEngine {
     this.profiles = new Map();
     this.activeProfileId = 'google';
     this.started = false;
+    this.recoveryDone = () => {};
+    // Workers claim nothing until the previous process's jobs are recovered.
+    this.ready = new Promise(resolve => { this.recoveryDone = resolve; });
   }
 
   ensureProfile(profileId = 'google') {
     const id = safeProfileId(profileId);
     let runtime = this.profiles.get(id);
     if (!runtime) {
-      runtime = new GoogleMediaProfileRuntime({ window: this.window, profileId: id });
+      runtime = new GoogleMediaProfileRuntime({ window: this.window, profileId: id, ready: this.ready });
       runtime.initialize();
       this.profiles.set(id, runtime);
     }
@@ -340,7 +449,11 @@ class GoogleMediaEngine {
     if (this.started) return;
     this.started = true;
     const runtime = this.ensureProfile('google');
-    callCore('media.connection-status', {}).then(saved => {
+    // Jobs the previous desktop process left mid-flight are requeued (or marked
+    // for reconciliation if Generate may have run) before any worker claims.
+    callCore('media.recover-incomplete', {}, { timeout: 30000 }).catch(() => null)
+      .finally(() => this.recoveryDone())
+      .then(() => callCore('media.connection-status', {})).then(saved => {
       if (!saved || saved.provider !== 'google-media') return;
       runtime.lastStatus = {
         ...runtime.lastStatus,
@@ -358,6 +471,11 @@ class GoogleMediaEngine {
       runtime.lastRefreshAt = Date.now();
       runtime.setConsumerState('visual', runtime.lastStatus.connected);
       runtime.setConsumerState('music', runtime.lastStatus.music_signed_in);
+      const savedAt = Number(saved.updated_at || 0) * 1000;
+      if (saved.challenged === true || saved.connected !== true || Date.now() - savedAt > STALE_STATUS_MS) {
+        runtime.lastRefreshAt = 0;
+        runtime.refreshConnection({ force: true, allowLoad: true }).catch(() => {});
+      }
     }).catch(() => {});
   }
 
@@ -403,6 +521,12 @@ class GoogleMediaEngine {
     const aggregate = this.aggregateSnapshot();
     callCore('media.connection-update', { patch: aggregate }).catch(() => {});
     return aggregate;
+  }
+
+  wake(surface = 'visual', profileId = 'google') {
+    const id = safeProfileId(profileId || 'google');
+    this.activeProfileId = id;
+    return this.ensureProfile(id).wake(surface === 'music' ? 'music' : 'visual');
   }
 
   async open(profileId = 'google') {
@@ -458,4 +582,4 @@ class GoogleMediaEngine {
   }
 }
 
-module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL };
+module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus };

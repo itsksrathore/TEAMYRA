@@ -4,7 +4,20 @@ const { GoogleFlowMusicAutomationAdapter, FLOW_MUSIC_HOME } = require('../src/me
 const { classifyError } = require('../src/media/media-job-consumer');
 const { resolveFfmpeg } = require('../src/media/media-audio-processor');
 const { partitionForProfile } = require('../src/media/google-media-session-manager');
-const { GOOGLE_LOGIN_URL } = require('../src/media/google-media-engine');
+const { GOOGLE_LOGIN_URL, observedStatus } = require('../src/media/google-media-engine');
+
+// A probe that timed out is not a logout: the last known state stands.
+{
+  const failed = { loaded: true, probe_ok: false, probe_error: 'browser_failure: page script timed out' };
+  const kept = observedStatus(failed, { connected: true, flow_ready: true }, 'visual');
+  assert.equal(kept.signedIn, true);
+  assert.equal(kept.unknown, true);
+  assert.equal(kept.promptFound, true);
+  assert.equal(observedStatus(failed, {}, 'visual').signedIn, false);
+  assert.equal(observedStatus(failed, { music_signed_in: true }, 'music').signedIn, true);
+  const seen = { loaded: true, probe_ok: true, signedIn: false };
+  assert.equal(observedStatus(seen, { connected: true }, 'visual'), seen);
+}
 
 assert.equal(FLOW_HOME, 'https://flow.google.com/');
 assert.equal(FLOW_MUSIC_HOME, 'https://www.flowmusic.app/');
