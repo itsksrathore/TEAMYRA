@@ -73,11 +73,21 @@ class GoogleFlowAutomationAdapter {
       || text.includes('navigation');
   }
 
-  async executePageScript(script, attempts = 8) {
+  async executePageScript(script, attempts = 8, timeoutMs = 60000) {
     let lastError = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        return await this.webContents.executeJavaScript(script, true);
+        // An unresponsive page must not stall the worker indefinitely.
+        let timer;
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('browser_failure: page script timed out')), timeoutMs);
+          timer.unref?.();
+        });
+        try {
+          return await Promise.race([this.webContents.executeJavaScript(script, true), timeout]);
+        } finally {
+          clearTimeout(timer);
+        }
       } catch (error) {
         lastError = error;
         if (!this.isTransientPageError(error) || attempt === attempts - 1) throw error;
@@ -1352,6 +1362,34 @@ class GoogleFlowAutomationAdapter {
     return false;
   }
 
+  // Diagnostic: tiles whose prompt starts with one of the given labels, with
+  // where each first differs from the matching job prompt.
+  async findPrompts(wanted = []) {
+    const found = [];
+    const seen = new Set();
+    await this.scanGrid(async snapshot => {
+      for (const result of snapshot) {
+        if (!result.key || seen.has(result.key) || result.type !== 'video') continue;
+        seen.add(result.key);
+        const info = await this.resultInfo(result.key).catch(() => null);
+        const prompt = normalizePrompt(info?.prompt);
+        for (const item of wanted) {
+          const label = normalizePrompt(item.label);
+          if (!label || !prompt.startsWith(label)) continue;
+          const target = normalizePrompt(item.prompt);
+          let at = 0;
+          while (at < prompt.length && prompt[at] === target[at]) at += 1;
+          found.push({ label: item.label, key: result.key, ready: result.ready, exact: prompt === target,
+            tile_length: prompt.length, job_length: target.length, first_difference_at: at,
+            tile_text: prompt.slice(Math.max(0, at - 40), at + 80), job_text: target.slice(Math.max(0, at - 40), at + 80) });
+        }
+      }
+      return false;
+    }, { maxSteps: 40 });
+    await this.resetGrid();
+    return { scanned: seen.size, found };
+  }
+
   async revealResult(key) {
     if (!key) return false;
     if ((await this.resultSnapshot()).some(result => result.key === key)) return true;
@@ -1491,10 +1529,15 @@ class GoogleFlowAutomationAdapter {
         // Only tiles whose prompt closely resembles this job's (Flow may have
         // altered it) are evidence of a result that failed to match; other
         // agents' newer outputs in a busy project are not.
+        // Shared style boilerplate makes a whole series look similar, so the
+        // opening (usually the shot label) must match as well.
         const prompt = job?.request?.provider_prompt || job?.request?.prompt;
-        const unmatched = this.newerThanSubmission(job, [...seen.values()]).filter(result => result.type === type &&
-          result.ready && !taken.has(result.key) && !baseline.has(result.key) &&
-          promptSimilarity(this.resultInfoCache.get(result.key)?.prompt, prompt) >= 0.6).length;
+        const opening = normalizePrompt(prompt).slice(0, 40);
+        const unmatched = this.newerThanSubmission(job, [...seen.values()]).filter(result => {
+          const tilePrompt = this.resultInfoCache.get(result.key)?.prompt;
+          return result.type === type && result.ready && !taken.has(result.key) && !baseline.has(result.key) &&
+            normalizePrompt(tilePrompt).slice(0, 40) === opening && promptSimilarity(tilePrompt, prompt) >= 0.6;
+        }).length;
         states.set(job.job_id, { ...states.get(job.job_id), state: 'generating', searched: true, unmatched_results: unmatched });
       }
       await this.resetGrid();

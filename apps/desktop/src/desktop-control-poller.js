@@ -31,7 +31,9 @@ class DesktopControlPoller {
       Promise.race([
         Promise.resolve().then(() => this.dispatch(String(req.action), req.payload || {})),
         new Promise((_, reject) => {
-          timeout = setTimeout(() => reject(new Error('Desktop control request timed out')), this.timeoutMs);
+          // Long diagnostics may ask for more time (bounded at 10 minutes).
+          const limit = Math.min(600000, Math.max(this.timeoutMs, Number(req.payload?.timeout_ms) || 0));
+          timeout = setTimeout(() => reject(new Error('Desktop control request timed out')), limit);
         })
       ]).then(result => respond({ ok: true, result }), error => respond({ ok: false, error: String(error?.message || error) }))
         .catch(() => {})

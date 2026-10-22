@@ -74,10 +74,17 @@ function clampParallel(value, fallback) {
 }
 
 // Serializes page interaction: one composer, one menu, one info panel at a time.
+// A hung page operation must not hold the page forever: after timeoutMs the
+// caller gets an error and the next operation may run.
 class Mutex {
-  constructor() { this.tail = Promise.resolve(); }
-  run(fn) {
-    const result = this.tail.then(() => fn());
+  constructor(timeoutMs = 3 * 60 * 1000) { this.tail = Promise.resolve(); this.timeoutMs = timeoutMs; }
+  run(fn, timeoutMs = this.timeoutMs) {
+    const result = this.tail.then(() => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('browser_failure: page operation timed out after ' +
+        Math.round(timeoutMs / 1000) + ' s')), timeoutMs);
+      timer.unref?.();
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => clearTimeout(timer));
+    }));
     this.tail = result.catch(() => {});
     return result;
   }

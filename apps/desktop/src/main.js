@@ -1308,7 +1308,8 @@ async function dispatchDesktopControl(action, payload = {}) {
       // the grid): run them inside the worker's page lock, never mid-submission.
       const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
       const consumer = payload.surface === 'music' ? runtime.musicConsumer : runtime.visualConsumer;
-      return consumer.ui.run(() => dispatchDesktopControl(action, { ...payload, __locked: true }));
+      const lockLimit = Math.min(600000, Math.max(180000, Number(payload.timeout_ms) || 0));
+      return consumer.ui.run(() => dispatchDesktopControl(action, { ...payload, __locked: true }), lockLimit);
     }
     if (mediaCmd === 'diagnose') {
       const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
@@ -1317,6 +1318,9 @@ async function dispatchDesktopControl(action, payload = {}) {
         return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
       }
       let diagnosticAction = null;
+      if (payload.surface !== 'music' && Array.isArray(payload.find_prompts)) {
+        return surface.adapter.browser.withActivePage(() => surface.adapter.findPrompts(payload.find_prompts.slice(0, 20)));
+      }
       if (payload.surface !== 'music' && payload.match_job && typeof payload.match_job === 'object') {
         // Read-only: how the matcher and the downloader see one job's result.
         return surface.adapter.browser.withActivePage(async () => {
@@ -1326,8 +1330,21 @@ async function dispatchDesktopControl(action, payload = {}) {
           const saved = snapshot.filter(item => item.key === key);
           const direct = await surface.adapter.resultForJob(job).catch(error => ({ error: String(error?.message || error) }));
           const deep = direct ? null : await surface.adapter.resultForJobDeep(job).catch(error => ({ error: String(error?.message || error) }));
+          // The closest tile prompts and where they first differ from this job's.
+          const { normalizePrompt, promptSimilarity } = require('./media/google-flow-automation-adapter');
+          const wanted = normalizePrompt(job.request?.provider_prompt || job.request?.prompt);
+          const closest = [...surface.adapter.resultInfoCache.entries()]
+            .map(([key, info]) => ({ key, prompt: normalizePrompt(info?.prompt), similarity: promptSimilarity(info?.prompt, wanted) }))
+            .sort((a, b) => b.similarity - a.similarity).slice(0, 3)
+            .map(item => {
+              let at = 0;
+              while (at < item.prompt.length && item.prompt[at] === wanted[at]) at += 1;
+              return { key: item.key, similarity: Number(item.similarity.toFixed(3)), tile_length: item.prompt.length,
+                job_length: wanted.length, first_difference_at: at,
+                tile_text: item.prompt.slice(Math.max(0, at - 60), at + 120), job_text: wanted.slice(Math.max(0, at - 60), at + 120) };
+            });
           return { url: surface.view.webContents.getURL(), tiles: snapshot.length, saved, direct, deep,
-            unmatched: surface.adapter.lastUnmatchedCandidates ?? null };
+            unmatched: surface.adapter.lastUnmatchedCandidates ?? null, closest };
         });
       }
       if (payload.surface !== 'music' && payload.result_info === true) {
