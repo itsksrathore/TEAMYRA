@@ -971,6 +971,23 @@ class GoogleFlowAutomationAdapter {
     return new FlowReferenceController(this).prepare(references);
   }
 
+  // Failed tiles newer than this job's submission (above its baseline top), and
+  // whether its own in-progress tile (which shows the prompt) is visible.
+  regionFor(job, results) {
+    const top = (job?.provider_submission?.baseline_result_keys || [])[0];
+    if (!top) return null;
+    const index = results.findIndex(result => result.key === top);
+    if (index < 0) return null;
+    const region = results.slice(0, index);
+    const prefix = normalizePrompt(job?.request?.provider_prompt || job?.request?.prompt).slice(0, 80);
+    return {
+      top,
+      failed: region.filter(result => result.failed).length,
+      pending_seen: Boolean(prefix) && region.some(result => !result.ready && !result.failed &&
+        normalizePrompt(result.text).includes(prefix))
+    };
+  }
+
   async resultSnapshot() {
     return this.executePageScript(`(() => [...document.querySelectorAll('flow-image-tile,flow-video-tile')].map(tile => {
       const image = tile.querySelector('img[src]');
@@ -1252,6 +1269,9 @@ class GoogleFlowAutomationAdapter {
     }
     const baselineResults = await this.resultSnapshot();
     const baselineFailures = await this.failedTileCount();
+    const firstKeyed = baselineResults.findIndex(result => result.key);
+    const baselineFailedAbove = (firstKeyed < 0 ? baselineResults : baselineResults.slice(0, firstKeyed))
+      .filter(result => result.failed).length;
     const generation = await this.stage('generation_click', () => this.startGenerationVerified(async before => {
       await beforeSubmit({
         submitted_at: Date.now() / 1000,
@@ -1259,6 +1279,7 @@ class GoogleFlowAutomationAdapter {
         baseline_media_count: Number(before.mediaCount || 0),
         baseline_result_keys: baselineResults.map(result => result.key).filter(Boolean),
         baseline_failure_signals: baselineFailures,
+        baseline_failed_above: baselineFailedAbove,
         selected_settings: await this.settingsTriggerText(),
         actual_model: intent.actual_model,
         reference_attachments: references?.items || [],
@@ -1272,6 +1293,7 @@ class GoogleFlowAutomationAdapter {
       baseline_media_count: Number(generation?.before?.mediaCount || 0),
       baseline_result_keys: baselineResults.map(result => result.key).filter(Boolean),
       baseline_failure_signals: baselineFailures,
+      baseline_failed_above: baselineFailedAbove,
       selected_settings: await this.settingsTriggerText(),
       actual_model: intent.actual_model,
       reference_attachments: references?.items || [],
@@ -1425,7 +1447,7 @@ class GoogleFlowAutomationAdapter {
         taken.add(result.key);
         states.set(job.job_id, { state: 'ready_to_download', result_key: result.key });
       } else {
-        states.set(job.job_id, { state: 'generating' });
+        states.set(job.job_id, { state: 'generating', region: this.regionFor(job, results) });
       }
     }
     // Overdue jobs may have finished outside the rendered window: search the
@@ -1457,7 +1479,7 @@ class GoogleFlowAutomationAdapter {
         const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
         const unmatched = this.newerThanSubmission(job, [...seen.values()]).filter(result => result.type === type &&
           result.ready && !taken.has(result.key) && !baseline.has(result.key)).length;
-        states.set(job.job_id, { state: 'generating', searched: true, unmatched_results: unmatched });
+        states.set(job.job_id, { ...states.get(job.job_id), state: 'generating', searched: true, unmatched_results: unmatched });
       }
       await this.resetGrid();
     }
@@ -1546,7 +1568,8 @@ class GoogleFlowAutomationAdapter {
         visible: rect.width > 0 && rect.height > 0, top: Math.round(rect.top),
         text: String(tile.innerText || tile.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 160),
         aria: [...tile.querySelectorAll('[aria-label]')].map(el => el.getAttribute('aria-label')).slice(0, 8),
-        cls: String(tile.className || '').slice(0, 120) };
+        cls: String(tile.className || '').slice(0, 120),
+        html: key ? undefined : String(tile.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 4000) };
     }))()`).catch(error => ({ error: String(error?.message || error) }));
     const report = { url: this.webContents.getURL(), tiles };
     // Composer: attached ingredients and the controls around them.

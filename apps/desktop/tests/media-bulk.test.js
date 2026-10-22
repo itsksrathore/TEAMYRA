@@ -525,13 +525,36 @@ async function pipelineTests(temp) {
   // At decision time a Failed tile newer than the submission means a refusal.
   const refusedConsumer = new matchLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,
     generationStates: async list => ({ page: { state: 'ok', failure_signals: 3 },
-      states: new Map(list.map(job => [job.job_id, { state: 'generating', searched: true, unmatched_results: 0 }])) }) } } });
+      states: new Map(list.map(job => [job.job_id, { state: 'generating', searched: true, unmatched_results: 0,
+        region: { top: 't', failed: 1, pending_seen: false } }])) }) } } });
   const refusals = [];
   refusedConsumer.handleFailure = async (jobId, error) => { refusals.push(String(error.message)); };
   refusedConsumer.inFlight.set('match-0', { jobId: 'match-0', phase: 'generating', submittedAt: Date.now() - 7 * 60 * 1000,
-    watchStartedAt: Date.now() - 60000, baselineFailures: 2, submission: {}, job: { job_id: 'match-0', request: { type: 'video', prompt: 'x' } } });
+    watchStartedAt: Date.now() - 60000, baselineFailures: 0, submission: { baseline_failed_above: 0 }, job: { job_id: 'match-0', request: { type: 'video', prompt: 'x' } } });
   await refusedConsumer.pollOnce();
   assert.match(refusals[0], /policy_refusal/);
+
+  // Region-scoped refusals: an old Failed tile scrolling into view never fails a
+  // new job, and a job whose own in-progress tile is visible is not refused.
+  const regionFlow = new GoogleFlowAutomationAdapter({});
+  const regionJob = { request: { type: 'video', prompt: 'Shot C29 (take 4) - candy land' }, provider_submission: { baseline_result_keys: ['top'] } };
+  assert.deepEqual(JSON.parse(JSON.stringify(regionFlow.regionFor(regionJob, [
+    { key: '', failed: true, text: 'Failed' }, { key: 'top', ready: true }, { key: '', failed: true, text: 'Failed old' }]))),
+    { top: 'top', failed: 1, pending_seen: false });
+  assert.equal(regionFlow.regionFor(regionJob, [{ key: '', ready: false, failed: false, text: 'play_circle 26% Shot C29 (take 4) - candy land' },
+    { key: 'top', ready: true }]).pending_seen, true);
+  const regional = new matchLoaded.MediaJobConsumer({ surface: 'visual', provider, downloadManager });
+  const regionalFailures = [];
+  regional.handleFailure = async jobId => { regionalFailures.push(jobId); };
+  const regionalCtx = (jobId, above) => ({ jobId, phase: 'generating', submittedAt: Date.now(), submission: { baseline_failed_above: above }, job: { request: {} } });
+  regional.inFlight.set('r1', regionalCtx('r1', 0));
+  regional.inFlight.set('r2', regionalCtx('r2', 1));
+  regional.inFlight.set('r3', regionalCtx('r3', 0));
+  await regional.attributeRegionFailures(new Map([
+    ['r1', { region: { top: 'a', failed: 1, pending_seen: false } }],
+    ['r2', { region: { top: 'a', failed: 1, pending_seen: false } }],
+    ['r3', { region: { top: 'a', failed: 1, pending_seen: true } }]]));
+  assert.deepEqual(regionalFailures, ['r1'], 'only the job submitted before the Failed tile appeared, and not one already generating');
 
   // A resumed job is searched before it can time out or be given up.
   const resumed = new matchLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,

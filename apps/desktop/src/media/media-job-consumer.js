@@ -668,7 +668,7 @@ class MediaJobConsumer {
       }).catch(() => {});
       this.enqueueDownload(ctx);
     }
-    await this.attributeFailures(page.failure_signals);
+    await this.attributeRegionFailures(states);
     const { noResultMs } = this.patience();
     for (const ctx of this.waiting()) {
       const age = Date.now() - ctx.submittedAt;
@@ -676,7 +676,7 @@ class MediaJobConsumer {
       if (!state?.searched || age < noResultMs) continue;
       // A resumed job gets at least one full search before it is given up.
       if (Date.now() - (ctx.watchStartedAt || ctx.submittedAt) < 20000) continue;
-      const freshFailures = Number(page.failure_signals) - Number(ctx.baselineFailures);
+      const freshFailures = state.region && !state.region.pending_seen ? Number(ctx.regionFresh) : 0;
       if (Number.isFinite(freshFailures) && freshFailures > 0) {
         // A Failed tile appeared after this submission and no result did: the
         // deferred attribution never got to decide while other jobs ran.
@@ -705,6 +705,32 @@ class MediaJobConsumer {
       overdueMs: Math.max(OVERDUE_MIN_MS, 2 * typical),
       noResultMs: Math.min(GENERATION_TIMEOUT_MS - 60000, Math.max(NO_RESULT_MIN_MS, 4 * typical))
     };
+  }
+
+  // Failed tiles carry no identity. Each job only counts failed tiles above the
+  // newest tile at its submission (minus those already there), so failures that
+  // scroll into view later never land on new jobs; jobs whose own in-progress
+  // tile is visible are excluded. Jobs sharing a region use the deferred rule.
+  async attributeRegionFailures(states) {
+    const groups = new Map();
+    for (const ctx of this.waiting()) {
+      const region = states.get(ctx.jobId)?.region;
+      if (!region || region.pending_seen) continue;
+      const baseline = Number(ctx.submission?.baseline_failed_above);
+      ctx.regionBaseline = Number.isFinite(baseline) ? baseline : (ctx.regionBaseline ?? region.failed);
+      ctx.regionFresh = region.failed - ctx.regionBaseline;
+      if (!groups.has(region.top)) groups.set(region.top, { count: region.failed, jobs: [] });
+      groups.get(region.top).jobs.push(ctx);
+    }
+    for (const group of groups.values()) {
+      const candidates = group.jobs.filter(ctx => ctx.regionBaseline < group.count);
+      if (!candidates.length) continue;
+      const fresh = group.count - Math.min(...candidates.map(ctx => ctx.regionBaseline));
+      if (fresh < candidates.length) continue;
+      for (const ctx of candidates) {
+        await this.failJob(ctx, new Error('policy_refusal: Google Flow marked this generation Failed (the prompt might violate its policies or third-party content rules); reword the prompt and queue a new job'));
+      }
+    }
   }
 
   // Flow's refusal text is page-wide, not per tile. New failure signals are
