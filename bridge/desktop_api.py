@@ -103,6 +103,8 @@ def handle(action, payload):
                                        payload.get("batch_id"))
     if action == "media.recover-incomplete":
         return media_engine.recover_incomplete_jobs(ROOT)
+    if action == "media.claimed-keys":
+        return media_engine.claimed_result_keys(ROOT, payload.get("provider_url"))
     if action == "media.flow-project":
         return media_engine.flow_project_for(ROOT, payload.get("project_path"))
     if action == "media.status-many":

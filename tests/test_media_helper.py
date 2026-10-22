@@ -172,6 +172,72 @@ class MediaHelperTests(unittest.TestCase):
                                                              'take_over': False})
             self.assertTrue(logged['logged'])
 
+    def test_helper_can_recover_its_own_assisted_jobs(self):
+        job_id = self.job(category='download_failure')
+        media_engine.append_job_metadata(self.root, job_id, {'provider_submission': {
+            'submitted_at': 1.0, 'provider_url': 'https://flow.google.com/project/p', 'baseline_result_keys': ['a', 'b']}})
+        ticket = media_support.create_ticket(self.root, kind='issue', reporter='a', description='x', job_ids=[job_id])
+        self.assertFalse(media_engine.recover_job(self.root, job_id)['recovered'], 'others still wait for the helper')
+        recovered = media_engine.recover_job(self.root, job_id, helper_ticket=ticket['ticket_id'])
+        self.assertTrue(recovered['recovered'])
+        job = media_engine.load_job(self.root, job_id)
+        self.assertEqual(job['assisted_by'], ticket['ticket_id'], 'the reporter keeps seeing the helper')
+        media_engine.update_job_state(self.root, job_id, 'failed', 'download_failure: again')
+        self.assertEqual(media_engine.load_job(self.root, job_id)['state'], 'assisted')
+        self.assertEqual(media_engine.resume_download_job(self.root, job_id, helper_ticket=ticket['ticket_id'])['status'],
+                         'waiting_for_browser')
+        compact = media_engine.job_status(self.root, job_id, compact=True)['provider_submission']
+        self.assertEqual(compact['baseline_result_keys_count'], 2)
+        self.assertNotIn('baseline_result_keys', compact)
+        self.assertIn('baseline_result_keys', media_engine.job_status(self.root, job_id)['provider_submission'],
+                      'the desktop worker still reads the full baseline')
+
+    def test_sweeper_closes_tickets_whose_helper_ended(self):
+        job_id = self.job()
+        ticket = media_support.create_ticket(self.root, kind='issue', reporter='a', description='x', job_ids=[job_id])
+        media_support.record_dispatch(self.root, ticket['ticket_id'], worker='codex1', job_id='helper-1')
+        closed = media_support.sweep_tickets(self.root, lambda t: {'worker': 'codex1', 'state': 'failed', 'reason': 'runner_crash'})
+        self.assertEqual(closed[0]['status'], 'failed')
+        self.assertIn('runner_crash', closed[0]['reason'])
+        job = media_engine.load_job(self.root, job_id)
+        self.assertEqual(job['state'], 'failed', 'the reporter is not left waiting on a dead helper')
+        self.assertIsNone(job['assisted_by'])
+        self.assertEqual(media_support.list_issues(self.root, category='helper_incomplete')['total'], 1)
+        running = media_support.create_ticket(self.root, kind='issue', reporter='a', description='y', job_ids=[self.job('z')])
+        media_support.record_dispatch(self.root, running['ticket_id'], worker='codex1', job_id='helper-2')
+        self.assertEqual(media_support.sweep_tickets(self.root, lambda t: {'worker': 'codex1', 'state': 'running'}), [])
+
+    def test_partially_delivered_ticket_releases_undelivered_jobs(self):
+        first, second = self.job('one'), self.job('two')
+        ticket = media_support.create_ticket(self.root, kind='issue', reporter='a', description='x', job_ids=[first, second])
+        media_support.deliver(self.root, ticket['ticket_id'], self.asset()['asset_id'], original_job_id=first)
+        media_support.update_ticket(self.root, ticket['ticket_id'], status='partially_delivered', summary='one left')
+        self.assertEqual(media_engine.load_job(self.root, first)['state'], 'completed')
+        self.assertEqual(media_engine.load_job(self.root, second)['state'], 'failed')
+
+    def test_any_agent_can_note_a_maintenance_issue(self):
+        with patch.object(server, 'ROOT', self.root):
+            logged = server.tool_call('maintenance_report', {'summary': 'codex exec rejected non-Git folder', 'area': 'worker',
+                                                             'severity': 'high', 'refs': ['1018-160201-codex1-7a7d']})
+            self.assertTrue(logged['logged'])
+            issues = server.tool_call('maintenance_issues', {'area': 'worker'})
+            self.assertEqual(issues['total'], 1)
+            self.assertEqual(issues['issues'][0]['severity'], 'high')
+            self.assertEqual(server.tool_call('maintenance_issues', {'area': 'media'})['total'], 0)
+        names = {tool['name'] for tool in server.mcp_tools(include_legacy=False)}
+        self.assertIn('teamyra.maintenance_report', names)
+
+    def test_long_tasks_travel_as_a_file(self):
+        jobs = self.root / 'jobs'
+        jobs.mkdir()
+        registry = {'codex1': {'provider': 'codex', 'home': str(self.root)}}
+        with patch.object(server, 'JOBS', jobs), patch.object(server, 'worker_registry', return_value=registry),                 patch.object(server, 'worker_auth_status', return_value=(True, '')),                 patch.object(server, 'cooldown_left', return_value=0), patch.object(server, 'worker_settings', return_value={}),                 patch.object(server, 'codex_launch', return_value=['codex']), patch.object(server, 'git', return_value=''),                 patch.object(server, 'spawn_runner', return_value=1234):
+            job_id, _ = server.start_job('codex1', 'x' * 50000, str(self.project))
+        spec = json.loads((jobs / job_id / 'spec.json').read_text(encoding='utf-8'))
+        self.assertLess(sum(len(part) for part in spec['cmd']), 8000, 'the command line stays far below the Windows limit')
+        self.assertIn('task.txt', spec['cmd'][-1])
+        self.assertEqual(len((jobs / job_id / 'task.txt').read_text(encoding='utf-8')), 50000)
+
     def test_cli_tool_command(self):
         output = io.StringIO()
         with patch.object(teamyra_cli, 'call', side_effect=lambda name, args: {'name': name, 'args': args}), \

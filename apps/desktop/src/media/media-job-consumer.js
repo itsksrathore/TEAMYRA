@@ -31,9 +31,11 @@ function classifyError(error) {
   if (text.includes('human_verification') || text.includes('captcha')) return { state: 'needs_user_auth', category: 'human_verification' };
   if (text.includes('login_required') || text.includes('sign-in') || text.includes('sign in')) return { state: 'needs_user_auth', category: 'login_required' };
   if (text.includes('rate_limited') || text.includes('rate limit') || text.includes('capacity_limited')) return { state: 'rate_limited', category: 'rate_limited' };
+  // Explicit categories first: their messages mention credits/policy in passing.
+  if (text.includes('result_match_failed')) return { state: 'failed', category: 'result_match_failed' };
+  if (text.includes('provider_no_result')) return { state: 'failed', category: 'provider_no_result' };
   if (text.includes('credits_exhausted') || text.includes('credits')) return { state: 'failed', category: 'credits_exhausted' };
   if (text.includes('policy_refusal') || text.includes('policy')) return { state: 'failed', category: 'policy_refusal' };
-  if (text.includes('provider_no_result')) return { state: 'failed', category: 'provider_no_result' };
   if (text.includes('browser_probe_failed')) return { state: 'failed', category: 'browser_probe_failed' };
   if (/execution context was destroyed|frame was detached|webcontents.*destroyed|err_(?:connection|internet|network|name_not_resolved|address_unreachable|timed_out)|browser_failure/.test(text)) return { state: 'failed', category: 'browser_failure' };
   // Reference attachment happens before Generate; its errors are UI failures.
@@ -333,8 +335,10 @@ class MediaJobConsumer {
     return Object.assign(ctx, {
       job, jobId, planned, submission,
       phase: 'generating',
-      // A reconciled job keeps its original submission time for overdue checks.
+      // A reconciled job keeps its original submission time for overdue checks;
+      // its watch (timeout) starts now so a resumed job is searched first.
       submittedAt: Number(submission.submitted_at) > 0 ? Math.min(Date.now(), Number(submission.submitted_at) * 1000) : Date.now(),
+      watchStartedAt: Date.now(),
       baselineFailures: Number.isFinite(baseline) && submission.baseline_failure_signals !== null ? baseline : null,
       resultKey: submission.result_key || null,
       fingerprint: null
@@ -387,7 +391,7 @@ class MediaJobConsumer {
       : path.join(staging, isImage ? 'provider-download' : 'download' + (path.extname(planned.path) || '.mp4'));
     const downloadJob = { ...job, ...await callCore('media.status', { job_id: jobId }, { timeout: 10000 }), request };
     if (ctx.resultKey) downloadJob.provider_submission = { ...downloadJob.provider_submission, result_key: ctx.resultKey };
-    const excludeKeys = this.otherAssignedKeys(jobId);
+    const excludeKeys = this.otherAssignedKeys(jobId, await this.durableClaims());
     if (downloadJob.cancel_requested) return this.update(jobId, 'cancelled', 'Cancelled before download');
     await this.update(jobId, 'downloading', this.activeDownloads.size > 1
       ? 'Downloading generated media (' + this.activeDownloads.size + ' downloads in parallel)'
@@ -406,7 +410,9 @@ class MediaJobConsumer {
           jobId,
           webContentsId: this.provider.view.webContents.id,
           destination: downloadPath,
-          timeoutMs: waitsForUpscale ? 600000 : 180000,
+          // Upscaled downloads usually land within 1-2 minutes; a stuck one is
+          // re-downloaded by automatic recovery instead of blocking for 10.
+          timeoutMs: waitsForUpscale ? 360000 : 180000,
           fingerprint: ctx.fingerprint || null,
           signature: requestSignature(job)
         });
@@ -546,8 +552,15 @@ class MediaJobConsumer {
     if (this.assignedKeys.size > 2000) this.assignedKeys.delete(this.assignedKeys.keys().next().value);
   }
 
-  otherAssignedKeys(jobId) {
-    return new Set([...this.assignedKeys].filter(([, owner]) => owner !== jobId).map(([key]) => key));
+  otherAssignedKeys(jobId, durable = {}) {
+    const owners = new Map([...Object.entries(durable), ...this.assignedKeys]);
+    return new Set([...owners].filter(([, owner]) => owner !== jobId).map(([key]) => key));
+  }
+
+  // Tiles owned by jobs persisted in core (survives desktop restarts).
+  async durableClaims() {
+    const result = await callCore('media.claimed-keys', {}, { timeout: 15000 }).catch(() => null);
+    return result?.claimed && typeof result.claimed === 'object' ? result.claimed : {};
   }
 
   waiting() {
@@ -602,7 +615,7 @@ class MediaJobConsumer {
         continue;
       }
       if (status.provider_submission) ctx.submission = { ...ctx.submission, ...status.provider_submission };
-      if (Date.now() - ctx.submittedAt > GENERATION_TIMEOUT_MS) {
+      if (Date.now() - (ctx.watchStartedAt || ctx.submittedAt) > GENERATION_TIMEOUT_MS) {
         await this.failJob(ctx, new Error('generation_failure: timed out waiting for provider result'));
       }
     }
@@ -610,7 +623,7 @@ class MediaJobConsumer {
     if (!live.length) return;
     const adapter = this.provider.adapter;
     if (!adapter) throw new Error('browser_failure: Google Flow view is unavailable');
-    const claimedKeys = [...this.assignedKeys.keys()];
+    const claimedKeys = [...new Set([...this.assignedKeys.keys(), ...Object.keys(await this.durableClaims())])];
     const now = Date.now();
     const { overdueMs } = this.patience();
     const deepJobIds = live.filter(ctx => now - ctx.submittedAt > overdueMs &&
@@ -659,7 +672,18 @@ class MediaJobConsumer {
     const { noResultMs } = this.patience();
     for (const ctx of this.waiting()) {
       const age = Date.now() - ctx.submittedAt;
-      if (!states.get(ctx.jobId)?.searched || age < noResultMs) continue;
+      const state = states.get(ctx.jobId);
+      if (!state?.searched || age < noResultMs) continue;
+      // A resumed job gets at least one full search before it is given up.
+      if (Date.now() - (ctx.watchStartedAt || ctx.submittedAt) < 20000) continue;
+      if (state.unmatched_results > 0) {
+        // Flow did produce results; only the attribution failed. Rewording and
+        // resubmitting would pay for the same output again.
+        await this.failJob(ctx, new Error('result_match_failed: Flow shows ' + state.unmatched_results + ' finished ' +
+          (ctx.job.request?.type || 'media') + ' result(s) newer than this submission that TEAMYRA could not match to its prompt. ' +
+          'Do not resubmit (credits were already used); report it with teamyra.media_report_issue.'));
+        continue;
+      }
       await this.failJob(ctx, new Error('provider_no_result: Flow accepted this generation but no result appeared after ' +
         Math.round(age / 1000) + 's, and a full search of the project found none. This is usually a silent moderation refusal; reword the prompt and queue a new job.'));
     }

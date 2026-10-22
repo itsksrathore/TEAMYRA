@@ -124,17 +124,18 @@ async function adapterTests() {
 
   const flow = new GoogleFlowAutomationAdapter({ getURL: () => 'https://flow.google.com/project/p' });
   flow.pageState = async () => ({ state: 'ok', failure_signals: 0, project_id: 'p' });
+  // Flow lists results newest first: k2 is the newest tile, 'old' predates the jobs.
   flow.resultSnapshot = async () => [
-    { key: 'old', type: 'video', ready: true },
+    { key: 'k2', type: 'video', ready: true },
     { key: 'k1', type: 'video', ready: true },
-    { key: 'k2', type: 'video', ready: true }
+    { key: 'old', type: 'video', ready: true }
   ];
   let infoReads = 0;
-  flow.readResultInfo = async () => { infoReads++; return { prompt: 'same scene' }; };
+  flow.readResultInfo = async key => { infoReads++; return { prompt: key === 'old' ? 'an earlier scene' : 'same scene' }; };
   const job = (id, at) => ({ job_id: id, request: { type: 'video', prompt: 'same scene' },
     provider_submission: { submitted_at: at, provider_url: 'https://flow.google.com/project/p', baseline_result_keys: ['old'] } });
   const { states } = await flow.generationStates([job('j2', 2), job('j1', 1)]);
-  assert.equal(states.get('j1').result_key, 'k1', 'oldest submission matches first');
+  assert.equal(states.get('j1').result_key, 'k1', 'the oldest copy takes the oldest tile made after it');
   assert.equal(states.get('j2').result_key, 'k2', 'two copies of one prompt never share a tile');
   const reads = infoReads;
   const claimed = await flow.generationStates([job('j3', 3)], { claimedKeys: ['k1'] });
@@ -142,6 +143,15 @@ async function adapterTests() {
   assert.equal(infoReads, reads, 'tile prompts are cached instead of reopening the info panel');
   const none = await flow.generationStates([job('j4', 4)], { claimedKeys: ['k1', 'k2'] });
   assert.equal(none.states.get('j4').state, 'generating');
+
+  // Copy swap repair: an earlier copy took this job's newer tile; the earlier
+  // copy's own tile sits in this job's baseline and is still unclaimed.
+  const swap = await flow.generationStates([{ ...job('j5', 5), provider_submission: {
+    submitted_at: 5, provider_url: 'https://flow.google.com/project/p', baseline_result_keys: ['k1', 'old'] } }], { claimedKeys: ['k2'] });
+  assert.equal(swap.states.get('j5').result_key, 'k1');
+  const noSwap = await flow.generationStates([{ ...job('j6', 6), provider_submission: {
+    submitted_at: 6, provider_url: 'https://flow.google.com/project/p', baseline_result_keys: ['k1', 'old'] } }], { claimedKeys: [] });
+  assert.equal(noSwap.states.get('j6').result_key, 'k2', 'without a swap the baseline stays excluded');
 
   // Flow's image aspect radios (DOM order). "Portrait" is 3:4, not 9:16.
   const radios = ['crop_16_9 16:9', 'crop_landscape 4:3', 'crop_square 1:1', 'crop_portrait 3:4', 'crop_9_16 9:16'].map(text => {
@@ -221,6 +231,47 @@ async function adapterTests() {
   assert.equal(second.reused_upload, true);
   assert.equal(second.provider_asset_id, first.provider_asset_id);
   fs.rmSync(referenceFile, { force: true });
+
+  // Flow's footer is now <button class="footer-left"> opening a CDK overlay with
+  // flow-info-panel; the full prompt lives in .prompt-text .text-part.
+  const panelState = { open: false };
+  const promptText = "Premium Pixar-quality 3D children's film: a sunny backyard garden.";
+  const panel = {
+    getBoundingClientRect: () => ({ width: panelState.open ? 300 : 0 }),
+    querySelector: selector => selector === '.prompt-text'
+      ? { textContent: promptText + ' Reuse prompt', querySelector: inner => inner === '.text-part' ? { textContent: promptText } : null }
+      : selector === '.title' ? { textContent: 'Sunny backyard garden view' } : selector === '.metadata' ? { textContent: 'Created Oct 22' } : null
+  };
+  const footerButton = { click: () => { panelState.open = !panelState.open; }, getAttribute: name => name === 'aria-label' ? 'Sunny backyard garden view' : null };
+  const tile = { querySelector: selector => selector === 'img[src]' ? { getAttribute: () => 'media-1', src: '' }
+    : selector.includes('footer-left') ? (selector.startsWith('button.footer-left') ? footerButton : null) : null };
+  const footerFlow = new GoogleFlowAutomationAdapter({});
+  footerFlow.executePageScript = async script => vm.runInNewContext(script, {
+    document: {
+      querySelectorAll: selector => selector.includes('flow-image-tile') ? [tile] : selector === 'flow-info-panel' ? [panel] : [],
+      dispatchEvent: () => { panelState.open = false; }
+    },
+    KeyboardEvent: class { constructor(type, init) { Object.assign(this, { type }, init); } },
+    setTimeout, String, Promise
+  });
+  const info = await footerFlow.readResultInfo('media-1');
+  assert.equal(info.prompt, promptText, 'the prompt comes from the new footer overlay, without the button labels');
+  assert.equal(info.title, 'Sunny backyard garden view');
+  assert.equal(panelState.open, false, 'the info overlay is closed again');
+
+  // Lossy text (Flow surfaces that drop lowercase "s") matches only when unambiguous.
+  const lossy = new GoogleFlowAutomationAdapter({});
+  const tileInfo = { a: 'Puppy  itting with blue bandana', b: 'Puppy  itting with red bandana' };
+  lossy.resultInfo = async key => ({ prompt: tileInfo[key] });
+  const lossyJob = prompt => ({ request: { type: 'image', prompt }, provider_submission: { baseline_result_keys: [] } });
+  const lossyResults = [{ key: 'a', type: 'image', ready: true }, { key: 'b', type: 'image', ready: true }];
+  assert.equal((await lossy.resultForJob(lossyJob('Puppy sitting with blue bandana'), { results: lossyResults })).key, 'a');
+  tileInfo.b = 'Puppy  itting with blue bandana';
+  assert.equal(await lossy.resultForJob(lossyJob('Puppy sitting with blue bandana'), { results: lossyResults }), null,
+    'two tiles that only match loosely are ambiguous, never guessed');
+  tileInfo.a = 'Puppy sitting with blue bandana';
+  assert.equal((await lossy.resultForJob(lossyJob('Puppy sitting with blue bandana'), { results: lossyResults })).key, 'a',
+    'an exact prompt still wins');
 
   // Single-job polling ignores refusal text that existed before submission.
   const single = new GoogleFlowAutomationAdapter({ getURL: () => 'https://flow.google.com/project/p' });
@@ -427,6 +478,32 @@ async function pipelineTests(temp) {
   assert.equal(staleConsumer.inFlight.size, 0, 'its slot is released immediately');
   assert.equal(staleLoaded.classifyError(new Error("ERR_NAME_NOT_RESOLVED (-105) loading 'https://www.flowmusic.app/'")).category, 'browser_failure');
   assert.equal(staleLoaded.classifyError(new Error('references: Reference Upload media control unavailable')).category, 'selector_failure', 'pre-Generate reference errors are retryable');
+
+  // Finished but unmatched results are reported as such, not as moderation.
+  const { core: matchCore } = fakeCore(temp, [{ job_id: 'match-0', request: { type: 'image', prompt: 'garden' } }]);
+  const matchLoaded = loadConsumer(matchCore);
+  const matchConsumer = new matchLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,
+    generationStates: async list => ({ page: { state: 'ok', failure_signals: 0 },
+      states: new Map(list.map(job => [job.job_id, { state: 'generating', searched: true, unmatched_results: 2 }])) }) } } });
+  const matchFailures = [];
+  matchConsumer.handleFailure = async (jobId, error) => { matchFailures.push(String(error.message)); };
+  matchConsumer.inFlight.set('match-0', { jobId: 'match-0', phase: 'generating', submittedAt: Date.now() - 7 * 60 * 1000,
+    watchStartedAt: Date.now() - 60000, baselineFailures: 0, submission: {}, job: { job_id: 'match-0', request: { type: 'image', prompt: 'garden' } } });
+  await matchConsumer.pollOnce();
+  assert.match(matchFailures[0], /result_match_failed/);
+  assert.doesNotMatch(matchFailures[0], /moderation/);
+  assert.equal(matchLoaded.classifyError(new Error(matchFailures[0])).category, 'result_match_failed');
+
+  // A resumed job is searched before it can time out or be given up.
+  const resumed = new matchLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,
+    generationStates: async list => ({ page: { state: 'ok', failure_signals: 0 },
+      states: new Map(list.map(job => [job.job_id, { state: 'generating', searched: true, unmatched_results: 0 }])) }) } } });
+  const resumedFailures = [];
+  resumed.handleFailure = async (jobId, error) => { resumedFailures.push(String(error.message)); };
+  resumed.inFlight.set('match-0', { jobId: 'match-0', phase: 'generating', submittedAt: Date.now() - 3 * 3600 * 1000,
+    watchStartedAt: Date.now(), baselineFailures: 0, submission: {}, job: { job_id: 'match-0', request: { type: 'image', prompt: 'garden' } } });
+  await resumed.pollOnce();
+  assert.equal(resumedFailures.length, 0, 'an hours-old submission resumed now is not failed before it is searched');
 
   // Page-wide refusal text is attributed only once it accounts for every candidate.
   const attribution = new loaded.MediaJobConsumer({ surface: 'visual', provider, downloadManager });

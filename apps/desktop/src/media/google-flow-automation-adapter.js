@@ -35,6 +35,18 @@ function capacitySignal(text) {
   return match ? match[0].slice(0, 200) : '';
 }
 
+// Prompt comparison: Unicode/quote/whitespace differences are not mismatches.
+function normalizePrompt(value) {
+  return String(value || '').normalize('NFKC').replace(/[\u2018\u2019\u02bc]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
+}
+
+// Some Flow surfaces render text without lowercase "s" in the DOM ("Puppy
+// itting"). Only used when exactly one candidate matches this way.
+function loosePrompt(value) {
+  return normalizePrompt(value).replace(/s/gi, '').replace(/\s+/g, ' ').trim();
+}
+
 function projectId(url) {
   return String(url || '').match(/^https:\/\/flow\.google\.com\/project\/([^/?#]+)/i)?.[1] || '';
 }
@@ -989,17 +1001,45 @@ class GoogleFlowAutomationAdapter {
     }
     // Thumbnail URLs can change on reload. Match the provider's full prompt,
     // including on fresh tiles, rather than choosing any key outside baseline.
-    const prompt = String(job?.request?.provider_prompt || job?.request?.prompt || '').replace(/\s+/g, ' ').trim();
+    const raw = job?.request?.provider_prompt || job?.request?.prompt;
+    const prompt = normalizePrompt(raw);
     if (!prompt) return null;
     const baseline = new Set(submission.baseline_result_keys || []);
     // In a bulk run, tiles already matched to other jobs (including copies of
     // the same prompt) belong to them.
     const taken = excludeKeys instanceof Set ? excludeKeys : new Set(excludeKeys || []);
-    for (const result of results.filter(result => result.type === type && result.ready && !taken.has(result.key) &&
-      (submission.result_key || !Array.isArray(submission.baseline_result_keys) || !baseline.has(result.key)))) {
+    const loose = loosePrompt(raw);
+    const looseMatches = [];
+    let candidates = 0;
+    let swapped = false;
+    // Flow lists newest first. Copies of one prompt take the oldest unclaimed
+    // tile after their submission, so an earlier copy never takes a later one's.
+    const fresh = results.filter(result => result.type === type && result.ready &&
+      (submission.result_key || !Array.isArray(submission.baseline_result_keys) || !baseline.has(result.key))).reverse();
+    for (const result of fresh) {
       const info = await this.resultInfo(result.key);
-      if (String(info?.prompt || '').replace(/\s+/g, ' ').trim() === prompt) return result;
+      if (taken.has(result.key)) {
+        // A tile made after this submission but owned by an identical copy.
+        if (normalizePrompt(info?.prompt) === prompt) swapped = true;
+        continue;
+      }
+      candidates += 1;
+      if (normalizePrompt(info?.prompt) === prompt) return result;
+      if (info?.prompt && loosePrompt(info.prompt) === loose) looseMatches.push(result);
     }
+    // A lossy rendering may only decide when it is unambiguous: two near-identical
+    // prompts in one bulk run must never cross-match.
+    if (looseMatches.length === 1) return { ...looseMatches[0], matched: 'loose' };
+    if (swapped && Array.isArray(submission.baseline_result_keys)) {
+      // An identical copy took this job's tile earlier; its own older tile is
+      // still unclaimed and is the same request's output.
+      for (const result of results.filter(result => result.type === type && result.ready &&
+        baseline.has(result.key) && !taken.has(result.key)).reverse()) {
+        const info = await this.resultInfo(result.key);
+        if (normalizePrompt(info?.prompt) === prompt) return { ...result, matched: 'copy_swap' };
+      }
+    }
+    this.lastUnmatchedCandidates = candidates;
     return null;
   }
 
@@ -1022,13 +1062,36 @@ class GoogleFlowAutomationAdapter {
         if (!id && image?.src) { try { id = new URL(image.src).pathname; } catch {} }
         return id === key;
       });
-      const footer = tile?.querySelector('.footer-left[role="button"]');
+      // Flow's footer is a plain <button class="footer-left"> (older builds used
+      // a div with role="button"); it opens a CDK overlay with flow-info-panel.
+      const footer = tile?.querySelector('button.footer-left, .footer-left[role="button"], .footer-left');
       if (!footer) return null;
+      const visiblePanel = () => [...document.querySelectorAll('flow-info-panel')].find(el => el.getBoundingClientRect().width > 0) || null;
+      const closePanel = async () => {
+        for (let i = 0; i < 6 && visiblePanel(); i++) {
+          document.querySelectorAll('.cdk-overlay-backdrop').forEach(el => el.click());
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      };
+      // Another tile's panel must not be read as this one's.
+      await closePanel();
       footer.click();
-      await new Promise(resolve => setTimeout(resolve, 200));
-      const panel = [...document.querySelectorAll('flow-info-panel')].find(el => el.getBoundingClientRect().width > 0);
-      const info = { prompt: panel?.querySelector('.prompt-text')?.textContent || '', metadata: panel?.querySelector('.metadata')?.textContent || '' };
-      footer.click();
+      let panel = null;
+      for (let i = 0; i < 12 && !panel; i++) {
+        await new Promise(resolve => setTimeout(resolve, 125));
+        panel = visiblePanel();
+      }
+      const text = el => String(el?.textContent || '');
+      const promptNode = panel?.querySelector('.prompt-text');
+      const info = panel ? {
+        prompt: text(promptNode?.querySelector('.text-part')) || text(promptNode),
+        title: text(panel.querySelector('.title')).trim(),
+        label: footer.getAttribute('aria-label') || '',
+        metadata: text(panel.querySelector('.metadata'))
+      } : null;
+      if (visiblePanel()) footer.click();
+      await closePanel();
       return info;
     })()`);
   }
@@ -1370,7 +1433,9 @@ class GoogleFlowAutomationAdapter {
     const overdue = ordered.filter(job => deep.has(job.job_id) && states.get(job.job_id)?.state === 'generating' &&
       states.get(job.job_id)?.reason !== 'other_project');
     if (overdue.length) {
+      const seen = new Map();
       await this.scanGrid(async snapshot => {
+        for (const result of snapshot) if (result.key) seen.set(result.key, result);
         for (const job of overdue) {
           if (states.get(job.job_id).state !== 'generating') continue;
           const result = await this.resultForJob(job, { results: snapshot, excludeKeys: taken });
@@ -1382,7 +1447,13 @@ class GoogleFlowAutomationAdapter {
         return overdue.every(job => states.get(job.job_id).state !== 'generating');
       });
       for (const job of overdue) {
-        if (states.get(job.job_id).state === 'generating') states.set(job.job_id, { state: 'generating', searched: true });
+        if (states.get(job.job_id).state !== 'generating') continue;
+        // Finished tiles newer than this job's submission that no prompt matched.
+        const baseline = new Set(job?.provider_submission?.baseline_result_keys || []);
+        const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
+        const unmatched = [...seen.values()].filter(result => result.type === type && result.ready &&
+          !taken.has(result.key) && !baseline.has(result.key)).length;
+        states.set(job.job_id, { state: 'generating', searched: true, unmatched_results: unmatched });
       }
       await this.resetGrid();
     }
@@ -1586,9 +1657,23 @@ class GoogleFlowAutomationAdapter {
     const type = job?.request?.type;
     if (!type) throw new Error('download_failure: media request is missing');
     const saved = job.provider_submission?.result_key;
-    if (saved) await this.revealResult(saved);
-    const result = await this.resultForJobDeep(job, { excludeKeys });
-    if (!result) throw new Error('download_failure: submitted result identity is unavailable');
+    let result = null;
+    let seen = null;
+    // The grid re-renders while other bulk jobs are matched or fingerprinted;
+    // a just-matched tile can be momentarily absent, so look again before failing.
+    for (let attempt = 0; attempt < 3 && !result; attempt += 1) {
+      if (attempt) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await this.resetGrid();
+      }
+      if (saved) await this.revealResult(saved);
+      result = await this.resultForJobDeep(job, { excludeKeys });
+      if (!result) {
+        const snapshot = await this.resultSnapshot().catch(() => []);
+        seen = { tiles: snapshot.length, saved_tile: snapshot.find(item => item.key === saved) || null };
+      }
+    }
+    if (!result) throw new Error('download_failure: submitted result identity is unavailable; page=' + JSON.stringify(seen).slice(0, 400));
     const choices = await this.openDownloadChoices(result.key);
     const quality = job.request.generation_settings?.download_quality ||
       (type === 'image' ? 'prefer_4x_then_2x' : type === 'video' ? '1080p' : 'source');
@@ -1628,4 +1713,4 @@ class GoogleFlowAutomationAdapter {
   }
 }
 
-module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId };
+module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId, normalizePrompt, loosePrompt };

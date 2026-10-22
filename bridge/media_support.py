@@ -88,11 +88,20 @@ def job_snapshot(root, job_id):
 
 # --- issue log -------------------------------------------------------------------------------
 
+AREAS = {"media", "worker", "chatgpt", "mcp", "desktop", "scheduler", "git", "other"}
+
+
 def log_issue(root, *, source, summary, category=None, job_ids=(), batch_id=None, project_path=None,
-              reporter=None, details=None, ticket_id=None, issue_id=None):
+              reporter=None, details=None, ticket_id=None, issue_id=None, area="media", severity=None, refs=None):
     now = time.time()
+    area = str(area or "media").strip().lower()
+    if area not in AREAS:
+        area = "other"
     issue = {
         "issue_id": issue_id or _new_id("ISS"),
+        "area": area,
+        "severity": severity if severity in {"low", "medium", "high", "blocker"} else None,
+        "refs": [_clip(item, 300) for item in (refs or [])][:20],
         "source": source,
         "created_at": now,
         "updated_at": now,
@@ -135,11 +144,13 @@ def log_job_failure(root, job):
         pass
 
 
-def list_issues(root, status=None, category=None, source=None, limit=50):
+def list_issues(root, status=None, category=None, source=None, limit=50, area=None):
     rows = []
     for path in _support_dir(root, "issues").glob("*.json"):
         issue = media_engine._read_json(path, None)
         if not isinstance(issue, dict):
+            continue
+        if area and issue.get("area", "media") != area:
             continue
         if status and issue.get("maintenance", {}).get("status") != status:
             continue
@@ -277,9 +288,11 @@ def update_ticket(root, ticket_id, *, status=None, note=None, by=None, summary=N
         ticket.setdefault("notes", []).append({"at": time.time(), "by": _clip(by, 120) or "helper", "text": _clip(note, 4000)})
     if summary:
         ticket["summary"] = _clip(summary, 6000)
-    if status in {"failed", "cancelled"}:
-        # Jobs the helper could not deliver become ordinary failures again.
-        media_engine.release_helper(root, ticket["job_ids"], ticket_id,
+    if status in FINAL_TICKET_STATES:
+        # Jobs the helper did not deliver become ordinary failures again, so
+        # their reporter is never left waiting on a closed ticket.
+        delivered = {item.get("original_job_id") for item in ticket.get("deliveries") or []}
+        media_engine.release_helper(root, [job for job in ticket["job_ids"] if job not in delivered], ticket_id,
                                     "TEAMYRA helper ticket " + status + ": " + _clip(summary or note, 400))
     return _save_ticket(root, ticket)
 
@@ -335,6 +348,42 @@ def ticket_status(root, ticket_id, helper_state=None):
     return result
 
 
+HELPER_TERMINAL = {"done", "failed", "cancelled", "timed_out"}
+STALE_TICKET_S = 12 * 3600
+UNDISPATCHED_TICKET_S = 30 * 60
+
+
+def sweep_tickets(root, helper_state):
+    """Close tickets whose helper ended without finishing, so no reporter's job
+    stays 'assisted' forever. helper_state(ticket) -> terminal-job view or None."""
+    closed = []
+    for path in _support_dir(root, "tickets").glob("HLP-*.json"):
+        ticket = media_engine._read_json(path, None)
+        if not isinstance(ticket, dict) or ticket.get("status") in FINAL_TICKET_STATES:
+            continue
+        age = time.time() - float(ticket.get("created_at") or 0)
+        state = helper_state(ticket) if (ticket.get("helper") or {}).get("job_id") else None
+        reason = None
+        if state and state.get("state") in HELPER_TERMINAL:
+            reason = (f"helper {state.get('worker')} ended ({state.get('state')}"
+                      + (f": {state.get('reason')}" if state.get("reason") else "") + ") without closing the ticket")
+        elif not state and age > UNDISPATCHED_TICKET_S:
+            reason = "no helper agent could be started"
+        elif age > STALE_TICKET_S:
+            reason = "ticket open for more than 12 hours"
+        if not reason:
+            continue
+        status = "partially_delivered" if ticket.get("deliveries") else "failed"
+        update_ticket(root, ticket["ticket_id"], status=status, note="Closed by TEAMYRA: " + reason, by="teamyra",
+                      summary=ticket.get("summary") or ("Closed: " + reason))
+        log_issue(root, source="automatic", category="helper_incomplete", area="media",
+                  summary=f"Helper ticket {ticket['ticket_id']} closed: {reason}",
+                  job_ids=ticket.get("job_ids") or [], ticket_id=ticket["ticket_id"],
+                  issue_id=f"AUTO-{ticket['ticket_id']}-helper_incomplete")
+        closed.append({"ticket_id": ticket["ticket_id"], "status": status, "reason": reason})
+    return closed
+
+
 def cli_command():
     """Shell fallback for helpers whose CLI has no TEAMYRA MCP connection."""
     bridge = Path(__file__).resolve().parent
@@ -367,8 +416,9 @@ def helper_task(ticket, worker=None):
         "2. Diagnose with media_status for every job id (error, recovery_plan, history). Never create a job for an item "
         "that is already completed.",
         "3. Do the work:",
-        "   - Download/selector/browser failures with a known submission: media_recover or media_resume_download "
-        "(re-downloads the existing result, no new credits).",
+        "   - Download/selector/browser/result-matching failures with a known submission: media_recover or "
+        f"media_resume_download with ticket_id=\"{tid}\" (you own these jobs; this re-downloads the existing result, "
+        "no new credits).",
         "   - 'policy_refusal' (Flow said the prompt might violate its policies) or 'provider_no_result': reword the "
         "prompt minimally (keep subject, style, framing, any spoken dialogue word for word; soften violent/graphic or "
         "sensitive descriptors) and queue a new media_generate with the same project_path, type, aspect_ratio, "

@@ -8,6 +8,8 @@ const { MediaJobConsumer } = require('./media-job-consumer');
 const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fflow.google.com%2F';
 const STATUS_CACHE_MS = 15000;
 const BROWSER_IDLE_MS = 45000;
+// A saved connection status older than this is re-probed at startup.
+const STALE_STATUS_MS = 10 * 60 * 1000;
 
 class GoogleMediaProfileRuntime {
   constructor({ window, profileId, ready = Promise.resolve() }) {
@@ -42,6 +44,7 @@ class GoogleMediaProfileRuntime {
     this.activityUntil = 0;
     this.wakingCount = 0;
     this.refreshPromise = null;
+    this.signInWatch = null;
     this.lastRefreshAt = 0;
     this.lastStatus = {
       profile_id: this.profileId,
@@ -223,6 +226,15 @@ class GoogleMediaProfileRuntime {
         music_detected_signed_in: musicStatus.signedIn === true,
         detail: connected ? 'Google Media account connected' : 'Google sign-in required'
       };
+      if (visualStatus.loaded || musicStatus.loaded) {
+        // Persist the live observation so a stale challenged/signed-out flag
+        // from an earlier day cannot outlive the real session state.
+        callCore('media.connection-update', { patch: {
+          connected, needs_user_auth: !connected || visualChallenged, challenged,
+          flow_ready: this.lastStatus.flow_ready, music_signed_in: musicConnected, music_ready: this.lastStatus.music_ready,
+          capabilities: this.lastStatus.capabilities, detail: this.lastStatus.detail
+        } }).catch(() => {});
+      }
       return this.snapshot();
     })();
 
@@ -275,6 +287,7 @@ class GoogleMediaProfileRuntime {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       this.visual.setVisible(true);
+      this.watchSignIn();
     })();
     return {
       profile_id: this.profileId,
@@ -284,6 +297,27 @@ class GoogleMediaProfileRuntime {
       visible: true,
       detail: 'Google sign-in is opening in TEAMYRA'
     };
+  }
+
+  // After Connect/login, re-probe until the account is signed in (an account
+  // that already is gets redirected to Flow at once), then resume blocked jobs.
+  watchSignIn(timeoutMs = 5 * 60 * 1000) {
+    if (this.signInWatch) return;
+    const deadline = Date.now() + timeoutMs;
+    this.signInWatch = (async () => {
+      try {
+        while (Date.now() < deadline && this.visual.view) {
+          await new Promise(resolve => setTimeout(resolve, 4000));
+          const status = await this.refreshConnection({ force: true, allowLoad: false }).catch(() => null);
+          if (status?.connected) {
+            await callCore('media.resume-auth', {}).catch(() => {});
+            return;
+          }
+        }
+      } finally {
+        this.signInWatch = null;
+      }
+    })();
   }
 
   async showMusic() {
@@ -303,25 +337,9 @@ class GoogleMediaProfileRuntime {
           authorized: false, started: false, needs_user_action: true
         }));
       }
-      const currentUrl = this.music.view?.webContents?.getURL?.() || musicStatus.url || '';
-      const signedInNow = (await this.music.status().catch(() => musicStatus)).signedIn === true;
-      this.lastStatus = {
-        ...this.lastStatus,
-        music_signed_in: signedInNow,
-        music_needs_user_auth: !signedInNow,
-        music_url: currentUrl
-      };
-      this.lastRefreshAt = Date.now();
-      callCore('media.connection-update', { patch: {
-        connected: this.lastStatus.connected === true,
-        needs_user_auth: this.lastStatus.connected !== true,
-        challenged: this.lastStatus.challenged === true,
-        flow_ready: this.lastStatus.flow_ready === true,
-        music_signed_in: signedInNow,
-        music_ready: this.lastStatus.music_ready === true,
-        capabilities: this.lastStatus.capabilities || {},
-        detail: this.lastStatus.connected ? 'Google Media account connected' : 'Google sign-in required'
-      }}).catch(() => {});
+      // Re-probe both surfaces; the refresh persists the live state (it used to
+      // push the visual status remembered from before, however old it was).
+      await this.refreshConnection({ force: true, allowLoad: false }).catch(() => null);
       void authorization;
     }).catch(() => {
       this.music.setVisible(false);
@@ -414,6 +432,11 @@ class GoogleMediaEngine {
       runtime.lastRefreshAt = Date.now();
       runtime.setConsumerState('visual', runtime.lastStatus.connected);
       runtime.setConsumerState('music', runtime.lastStatus.music_signed_in);
+      const savedAt = Number(saved.updated_at || 0) * 1000;
+      if (saved.challenged === true || saved.connected !== true || Date.now() - savedAt > STALE_STATUS_MS) {
+        runtime.lastRefreshAt = 0;
+        runtime.refreshConnection({ force: true, allowLoad: true }).catch(() => {});
+      }
     }).catch(() => {});
   }
 

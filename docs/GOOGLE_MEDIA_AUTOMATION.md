@@ -106,6 +106,47 @@ Real teaser batches (~150 jobs) exposed failures that are now handled:
   submission time. DNS/network errors (`ERR_NAME_NOT_RESOLVED`) are retried.
 - Faster turnaround: `download_quality: "source"` skips the upscale wait.
 
+### Result matching after Flow's UI change (2026-10-22)
+
+Flow's tile footer became `<button class="footer-left">` (no `role`), opening
+a CDK overlay whose `flow-info-panel .prompt-text .text-part` holds the full
+prompt. Result matching read nothing, so every job ended as a misleading
+"silent moderation" `provider_no_result` although Flow had generated it.
+
+- The info panel is read through the new footer; another tile's open panel is
+  closed first and the overlay is closed afterwards.
+- Prompts compare after Unicode/quote/whitespace normalization. Some Flow text
+  renders without lowercase "s"; such a lossy match is accepted only when it is
+  the single candidate, so near-identical bulk prompts never cross-match.
+- Copies of one prompt take the oldest unclaimed tile after their submission
+  (Flow lists newest first). Tiles owned by any job are read from core, so a
+  desktop restart cannot hand one tile to two jobs; an earlier copy-swap is
+  repaired with the remaining identical tile.
+- Finished tiles that match no job fail as `result_match_failed` ("do not
+  resubmit; credits were used"), never as moderation. Resumed jobs are searched
+  before any timeout, and a download re-looks for its tile before failing.
+- `media.diagnose` gains `result_info` and `match_job` read-only inspections;
+  `teamyra.media_status` trims baseline key arrays to counts for agents.
+- The connection status is re-probed after Connect, on startup when stale and
+  after Flow Music, so an old "challenged/sign in needed" flag cannot persist.
+
+Live acceptance in `D:\Emmanuel\Esme\Video 5 & 6`: 18 jobs previously reported
+as `provider_no_result` were completed from their existing Flow results without
+new credits; new jobs passed for an image without references (5504 × 3072), an
+image with `Projects/refs/esme_ref.png`, a 16:9 8 s video (720p → 1080p, audio)
+and a 3-video batch, each frame checked against its own prompt.
+
+## One TEAMYRA per PC
+
+`%USERPROFILE%\.teamyra\runtime.json` names the canonical checkout
+(`D:\AI-Orchestrator`). Any other copy — an installed or portable build, a
+worktree or another checkout — shows "Use the main TEAMYRA" and exits, so all
+agents share one runtime and one set of Google/ChatGPT sign-ins. Start menu and
+desktop shortcuts start `D:\AI-Orchestrator\apps\desktop`; a source launch
+rebuilds the renderer bundle when `app.mjs` changed. The MCP wake gateway starts
+at Windows sign-in (HKCU Run: `TEAMYRA MCP Gateway`), so agents can connect
+before the app is opened. Remove that value to disable it.
+
 ## Media helper agents and issue log
 
 An agent that is stuck on media work reports it instead of retrying:
@@ -131,6 +172,16 @@ is still preferred, its ticket waits in that worker's queue). The same order
 applies to automatic failover. Helper jobs get the TEAMYRA MCP connection in
 any Codex profile and run in plain (non-Git) project folders; without MCP a
 helper can call any tool through `teamyra tool <name> --json '{...}'`.
+
+Any agent can note any TEAMYRA error, not only media ones, with
+`teamyra.maintenance_report({summary, details, area, severity, refs})`
+(areas: media, worker, chatgpt, mcp, desktop, scheduler, git, other);
+`teamyra.maintenance_issues` lists them by area. A helper whose job ends
+without closing its ticket is detected: the ticket closes and undelivered jobs
+return to their reporter, so nothing waits in `assisted` forever. Long worker
+tasks travel as a file (Windows caps command lines at 32,767 characters), and a
+helper passes its `ticket_id` to `media_recover`/`media_resume_download` to work
+the jobs it owns.
 
 Every reported issue and every failed media job (automatically, once per job
 and category) is kept in `media/support/issues/` for maintenance:

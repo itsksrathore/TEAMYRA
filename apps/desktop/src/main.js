@@ -45,6 +45,44 @@ const RUNTIME_ROOT = path.resolve(resolveTeamyraRoot());
 process.env.TEAMYRA_ROOT = RUNTIME_ROOT;
 fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
 
+// One TEAMYRA per PC. When ~/.teamyra/runtime.json names the canonical
+// checkout, any other copy (installed/portable build, a worktree or another
+// branch checkout) refuses to start: each copy has its own runtime and Google
+// /ChatGPT sign-ins, so agents opening different copies saw different logins.
+function canonicalRuntimeRoot() {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(require('node:os').homedir(), '.teamyra', 'runtime.json'), 'utf8'));
+    const root = config?.root ? path.resolve(String(config.root)) : '';
+    return root && looksLikeTeamyraRoot(root) ? root : '';
+  } catch { return ''; }
+}
+
+const CANONICAL_ROOT = canonicalRuntimeRoot();
+const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+if (CANONICAL_ROOT && (app.isPackaged || !samePath(SOURCE_ROOT, CANONICAL_ROOT) || !samePath(RUNTIME_ROOT, CANONICAL_ROOT))) {
+  if (!process.argv.includes('--background')) {
+    dialog.showErrorBox('Use the main TEAMYRA',
+      'This copy of TEAMYRA is disabled so that every agent uses one app and one set of sign-ins.\n\n' +
+      'Open TEAMYRA from the Start menu (it runs from ' + CANONICAL_ROOT + ').');
+  }
+  app.exit(0);
+}
+
+// A source checkout rebuilds its renderer bundle when app.mjs changed, so a
+// shortcut launch never shows stale UI.
+if (!app.isPackaged) {
+  try {
+    const rendererDir = path.join(__dirname, '..', 'renderer');
+    const entry = path.join(rendererDir, 'app.mjs');
+    const bundle = path.join(rendererDir, 'bundle.js');
+    const stale = !fs.existsSync(bundle) || ['app.mjs', 'agent-icons.mjs'].some(name =>
+      fs.statSync(path.join(rendererDir, name)).mtimeMs > fs.statSync(bundle).mtimeMs);
+    if (stale) {
+      require('esbuild').buildSync({ entryPoints: [entry], bundle: true, platform: 'browser', format: 'iife', outfile: bundle, logLevel: 'silent' });
+    }
+  } catch { /* npm start builds it as well */ }
+}
+
 const DESKTOP_USER_DATA = path.join(RUNTIME_ROOT, '.teamyra-desktop');
 fs.mkdirSync(DESKTOP_USER_DATA, { recursive: true });
 app.setPath('userData', DESKTOP_USER_DATA);
@@ -1271,6 +1309,44 @@ async function dispatchDesktopControl(action, payload = {}) {
         return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
       }
       let diagnosticAction = null;
+      if (payload.surface !== 'music' && payload.match_job && typeof payload.match_job === 'object') {
+        // Read-only: how the matcher and the downloader see one job's result.
+        return surface.adapter.browser.withActivePage(async () => {
+          const job = payload.match_job;
+          const key = job.provider_submission?.result_key;
+          const snapshot = await surface.adapter.resultSnapshot();
+          const saved = snapshot.filter(item => item.key === key);
+          const direct = await surface.adapter.resultForJob(job).catch(error => ({ error: String(error?.message || error) }));
+          const deep = direct ? null : await surface.adapter.resultForJobDeep(job).catch(error => ({ error: String(error?.message || error) }));
+          return { url: surface.view.webContents.getURL(), tiles: snapshot.length, saved, direct, deep,
+            unmatched: surface.adapter.lastUnmatchedCandidates ?? null };
+        });
+      }
+      if (payload.surface !== 'music' && payload.result_info === true) {
+        // What the result matcher reads for the newest tiles (raw panel text + tile/panel DOM).
+        return surface.adapter.browser.withActivePage(async () => {
+          const results = await surface.adapter.resultSnapshot();
+          const out = [];
+          for (const result of results.slice(0, Number(payload.limit) || 4)) {
+            const info = await surface.adapter.readResultInfo(result.key).catch(error => ({ error: String(error?.message || error) }));
+            out.push({ key: result.key, type: result.type, ready: result.ready, actionable: result.actionable, info });
+          }
+          const dom = await surface.view.webContents.executeJavaScript(`(() => {
+            const tile = document.querySelector('flow-image-tile,flow-video-tile');
+            return (async () => {
+              tile?.querySelector('.footer-left')?.click();
+              await new Promise(resolve => setTimeout(resolve, 600));
+              const overlay = document.querySelector('.cdk-overlay-container');
+              const panel = [...document.querySelectorAll('flow-info-panel')][0];
+              const result = { overlay: String(overlay?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 5000),
+                panel: String(panel?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 3000) };
+              tile?.querySelector('.footer-left')?.click();
+              return result;
+            })();
+          })()`, true).catch(error => ({ error: String(error?.message || error) }));
+          return { url: surface.view.webContents.getURL(), results: out, dom };
+        });
+      }
       if (payload.surface !== 'music' && (payload.inspect_page === true || payload.probe_picker === true)) {
         if (payload.probe_picker === true && (runtime.visualConsumer.busy || runtime.musicConsumer.busy)) throw new Error('Media worker is busy; picker diagnostics must wait');
         if (payload.project_url && /^https:\/\/flow\.google\.com\/project\//i.test(String(payload.project_url))) {

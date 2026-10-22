@@ -390,6 +390,7 @@ def cooldown_left(worker):
 
 # --- commands -------------------------------------------------------------------------------
 TEAMYRA_MCP_URL = os.environ.get("TEAMYRA_MCP_URL", "http://127.0.0.1:8787/mcp")
+LONG_TASK_CHARS = 12000
 
 
 def codex_cmd(task, cwd, write, final_path, session_id=None, settings=None, extra_config=None, skip_git_check=False):
@@ -568,6 +569,11 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     jdir = JOBS / job_id
     jdir.mkdir()
     final_path = jdir / "final.txt"
+    full_task = task
+    if len(task) > LONG_TASK_CHARS:
+        # Windows caps a command line at 32,767 characters; long tasks travel as a file.
+        task = (f"Your complete task is in the file {jdir / 'task.txt'} ({len(full_task)} characters). "
+                "Read the whole file first, then carry out that task exactly.")
     if provider == "codex":
         extra = [f'mcp_servers.teamyra.url="{TEAMYRA_MCP_URL}"'] if teamyra_mcp else None
         cmd = codex_cmd(task, cwd, write, final_path, session_id, settings, extra, skip_git_check=teamyra_mcp)
@@ -602,7 +608,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
             "worker_order": list(worker_order or []), "teamyra_mcp": bool(teamyra_mcp)}
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
-    (jdir / "task.txt").write_text(task, encoding="utf-8")
+    (jdir / "task.txt").write_text(full_task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
                                                  "profile_id": worker_info.get("profile_id"), "write": write,
                                                  "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
@@ -1296,10 +1302,25 @@ TOOLS = [
          "issue_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(media_support.ISSUE_STATES)},
          "note": {"type": "string"}, "by": {"type": "string"}},
          "required": ["issue_id"], "additionalProperties": False}},
-    {"name": "media_resume_download", "description": "Resume a failed/auth-blocked/rate-limited media job with an identified provider submission. Reconciles and downloads its existing result without generating again.",
-     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
-    {"name": "media_recover", "description": "Safely recover a stopped media job using its durable checkpoints. Retries confirmed pre-submission failures or reconciles/downloads an existing submission; never blindly clicks Generate twice. Returns recovery_plan when login, credits, policy refusal or missing identity require attention. Use after inspecting media_status, then poll the same job_id.",
-     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
+    {"name": "media_resume_download", "description": "Resume a failed/auth-blocked/rate-limited media job with an identified provider submission. Reconciles and downloads its existing result without generating again. Helper agents pass their ticket_id to resume jobs assigned to them.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "ticket_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
+    {"name": "maintenance_report", "description": "Any agent: note an error or problem you hit in TEAMYRA or its workers (media, worker CLI, ChatGPT, MCP, desktop, scheduler, git) for the maintenance team. Logging does not stop your work; keep going after reporting.",
+     "inputSchema": {"type": "object", "properties": {
+         "summary": {"type": "string"}, "details": {"type": "string", "description": "Exact error text, what you were doing, ids."},
+         "area": {"type": "string", "enum": ["media", "worker", "chatgpt", "mcp", "desktop", "scheduler", "git", "other"]},
+         "severity": {"type": "string", "enum": ["low", "medium", "high", "blocker"]},
+         "category": {"type": "string"}, "reporter": {"type": "string"}, "project_path": {"type": "string"},
+         "refs": {"type": "array", "maxItems": 20, "items": {"type": "string"}, "description": "Related job/batch/ticket ids or file paths."}},
+         "required": ["summary"], "additionalProperties": False}},
+    {"name": "maintenance_issues", "description": "Maintenance view of every logged TEAMYRA issue (agent reports and automatic failure records), filterable by area/status and grouped by category.",
+     "inputSchema": {"type": "object", "properties": {
+         "area": {"type": "string", "enum": ["media", "worker", "chatgpt", "mcp", "desktop", "scheduler", "git", "other"]},
+         "status": {"type": "string", "enum": ["open", "acknowledged", "fixed", "wont_fix"]},
+         "category": {"type": "string"}, "source": {"type": "string", "enum": ["agent_report", "delegation", "automatic"]},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}},
+         "additionalProperties": False}},
+    {"name": "media_recover", "description": "Safely recover a stopped media job using its durable checkpoints. Retries confirmed pre-submission failures or reconciles/downloads an existing submission; never blindly clicks Generate twice. Returns recovery_plan when login, credits, policy refusal or missing identity require attention. Use after inspecting media_status, then poll the same job_id. Helper agents pass their ticket_id to recover jobs assigned to them.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "ticket_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
     {"name": "review_start", "description": "Start a detached bounded reviewer/fixer loop for a completed implementation job. Reviewer runs read-only and must return TEAMYRA_REVIEW: PASS or CHANGES.",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"},
@@ -1685,9 +1706,10 @@ def tool_call(name, a):
                                     "first_frame_alias": "Accepted as an image ingredient, without an exact opening-frame guarantee", "last_frame": "Rejected before generation"},
                 "runtime": "Desktop-dependent requests cold-start the app hidden; active jobs retain the browser, idle views unload after a grace period"}
     if name == "media_status":
-        return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30), a.get("batch_id"))
+        media_support.sweep_tickets(ROOT, media_helper_state)
+        return media_engine.job_status(ROOT, a.get("job_id"), a.get("limit", 30), a.get("batch_id"), compact=True)
     if name == "media_recover":
-        result = media_engine.recover_job(ROOT, a["job_id"])
+        result = media_engine.recover_job(ROOT, a["job_id"], helper_ticket=a.get("ticket_id"))
         if result["recovered"]:
             job = media_engine.load_job(ROOT, a["job_id"])
             result["runtime"] = wake_media_surface(job["request"]["surface"])
@@ -1736,6 +1758,7 @@ def tool_call(name, a):
                 "requests": len(ticket.get("requests") or []),
                 "next": "The helper agent generates and delivers these. Poll media_ticket_status; do not generate them yourself."}
     if name == "media_ticket_status":
+        media_support.sweep_tickets(ROOT, media_helper_state)
         ticket = media_support._load_ticket(ROOT, a["ticket_id"])
         return media_support.ticket_status(ROOT, a["ticket_id"], media_helper_state(ticket))
     if name == "media_ticket_update":
@@ -1747,11 +1770,22 @@ def tool_call(name, a):
                                        item=a.get("item"), note=a.get("note"), by=a.get("by"))
         return media_support.ticket_status(ROOT, ticket["ticket_id"], media_helper_state(ticket))
     if name == "media_issues":
-        return media_support.list_issues(ROOT, a.get("status"), a.get("category"), a.get("source"), a.get("limit", 50))
+        return media_support.list_issues(ROOT, a.get("status"), a.get("category"), a.get("source"), a.get("limit", 50),
+                                         area="media")
+    if name == "maintenance_report":
+        issue = media_support.log_issue(
+            ROOT, source="agent_report", area=a.get("area") or "other", summary=a["summary"],
+            details=a.get("details"), category=a.get("category") or "reported", reporter=a.get("reporter"),
+            severity=a.get("severity"), refs=a.get("refs") or [], project_path=a.get("project_path"))
+        return {"issue_id": issue["issue_id"], "logged": True,
+                "next": "Logged for the TEAMYRA maintenance team. Continue your work; this does not fix anything by itself."}
+    if name == "maintenance_issues":
+        return media_support.list_issues(ROOT, a.get("status"), a.get("category"), a.get("source"), a.get("limit", 50),
+                                         area=a.get("area"))
     if name == "media_issue_update":
         return media_support.update_issue(ROOT, a["issue_id"], status=a.get("status"), note=a.get("note"), by=a.get("by"))
     if name == "media_resume_download":
-        result = media_engine.resume_download_job(ROOT, a["job_id"])
+        result = media_engine.resume_download_job(ROOT, a["job_id"], helper_ticket=a.get("ticket_id"))
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
         result["runtime"] = wake_media_surface(surface)
         return result

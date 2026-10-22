@@ -96,7 +96,7 @@ def recovery_plan(job):
     text = str(job.get("error") or job.get("detail") or "").lower()
     category = failure.get("category") or next((name for name in (
         "human_verification", "login_required", "credits_exhausted", "policy_refusal",
-        "rate_limited", "selector_failure", "output_mismatch", "provider_no_result", "download_failure", "browser_probe_failed",
+        "rate_limited", "selector_failure", "output_mismatch", "result_match_failed", "provider_no_result", "download_failure", "browser_probe_failed",
     ) if name in text), "generation_failure")
     submission = job.get("provider_submission") or {}
     submitted = bool(submission.get("submitted_at"))
@@ -117,6 +117,11 @@ def recovery_plan(job):
         plan.update(action="wait", instruction="Poll teamyra.media_status for this job; do not create a replacement.")
     elif state == "needs_user_auth" or category in {"human_verification", "login_required"}:
         plan.update(action="restore_auth", instruction="Ask the user to sign in or finish verification, then call teamyra.media_resume_auth.")
+    elif category == "result_match_failed":
+        plan.update(action="report_issue", can_recover=submitted, automatic=False,
+                    instruction="Flow produced results but TEAMYRA could not attribute them to this job. Do not resubmit or "
+                                "reword: credits were already used. Call teamyra.media_report_issue (a helper/maintenance "
+                                "delivers it) or teamyra.media_recover to retry matching and download.")
     elif category == "provider_no_result":
         plan.update(action="revise_request", can_recover=submitted, automatic=False,
                     instruction="Flow accepted the generation but no result appeared and a full project search found none; this is usually a silent moderation refusal. Reword the prompt and queue a new job. teamyra.media_recover only waits for the same submission again.")
@@ -144,11 +149,26 @@ def recovery_plan(job):
     return plan
 
 
-def recover_job(root, job_id, *, automatic=False):
-    """Requeue a stopped job atomically, preserving submission/download identity."""
+def _helper_view(job, helper_ticket):
+    """The job as its own helper sees it: an ordinary stopped job."""
+    if helper_ticket and job.get("assisted_by") == helper_ticket:
+        view = dict(job)
+        view["assisted_by"] = None
+        if view.get("state") == "assisted":
+            view["state"] = "failed"
+        return view
+    return job
+
+
+def recover_job(root, job_id, *, automatic=False, helper_ticket=None):
+    """Requeue a stopped job atomically, preserving submission/download identity.
+
+    The helper owning an assisted job (helper_ticket) may recover it; the job
+    stays assisted for its reporter until it completes.
+    """
     with _state_lock(root):
         job = load_job(root, job_id)
-        plan = recovery_plan(job)
+        plan = recovery_plan(_helper_view(job, helper_ticket))
         if not plan["can_recover"] or (automatic and not plan["automatic"]):
             return {"job_id": job_id, "recovered": False, "recovery_plan": plan}
         recovery = dict(job.get("recovery") or {})
@@ -840,7 +860,7 @@ def public_job(job):
     return result
 
 
-def job_status(root, job_id=None, limit=30, batch_id=None):
+def job_status(root, job_id=None, limit=30, batch_id=None, compact=False):
     if batch_id and not job_id:
         return batch_status(root, batch_id)
     if job_id:
@@ -852,7 +872,14 @@ def job_status(root, job_id=None, limit=30, batch_id=None):
             except Exception:
                 pass
         result["history"] = list(job.get("history") or [])[-30:]
-        result["provider_submission"] = dict(job.get("provider_submission") or {})
+        submission = dict(job.get("provider_submission") or {})
+        if compact:
+            # For agents: baselines hold hundreds of tile keys; the count is enough.
+            # The desktop worker reads the full baseline (compact=False) to match results.
+            for key in ("baseline_result_keys", "baseline_result_labels"):
+                if isinstance(submission.get(key), list):
+                    submission[key + "_count"] = len(submission.pop(key))
+        result["provider_submission"] = submission
         return result
     rows = []
     for path in _jobs_dir(root).glob("media-*.json"):
@@ -914,6 +941,25 @@ def flow_project_for(root, project_path):
         return {"provider_url": None, "jobs": 0}
     url, (count, latest) = max(usage.items(), key=lambda item: item[1])
     return {"provider_url": url, "jobs": count, "submitted_at": latest or None}
+
+
+def claimed_result_keys(root, provider_url=None):
+    """Result tiles already owned by a job (key -> job id), optionally in one Flow
+    project. Durable across desktop restarts, unlike the worker's memory."""
+    project = (_FLOW_PROJECT_RE.match(str(provider_url or "")) or [None, None])[1] if provider_url else None
+    claimed = {}
+    for path in _jobs_dir(root).glob("media-*.json"):
+        job = _read_json(path, None)
+        if not isinstance(job, dict) or job.get("state") == "cancelled":
+            continue
+        submission = job.get("provider_submission") or {}
+        key = submission.get("result_key")
+        if not key:
+            continue
+        if project and not str(submission.get("provider_url") or "").startswith(project):
+            continue
+        claimed[str(key)] = job["job_id"]
+    return {"claimed": claimed}
 
 
 def release_job(root, job_id, *, delay=15.0, reason=None):
@@ -1384,12 +1430,12 @@ def resume_auth_jobs(root):
     return {"resumed": resumed, "reconcile_required": preserved}
 
 
-def resume_download_job(root, job_id):
+def resume_download_job(root, job_id, helper_ticket=None):
     """Retry reconciliation/download of an identified submission, never generation."""
     with _state_lock(root):
         job = load_job(root, job_id)
         submission = job.get("provider_submission") or {}
-        if job.get("state") not in {"failed", "needs_user_auth", "rate_limited"}:
+        if _helper_view(job, helper_ticket).get("state") not in {"failed", "needs_user_auth", "rate_limited"}:
             raise ValueError("only a stopped submitted job can resume its download")
         if not submission.get("submitted_at") or not submission.get("provider_url"):
             raise ValueError("provider submission identity is required; generation will not be retried")
