@@ -209,6 +209,25 @@ async function adapterTests() {
   await workspace.ensureWorkspace(1000, { preferredUrl: 'https://flow.google.com/project/main', allowNavigation: false });
   assert.equal(navigations.length, 1, 'no navigation while downloads are running');
 
+  // After a submit Flow keeps the ingredient chips but hides "Clear prompt"
+  // until the prompt has text: type a character, then clear.
+  let chips = 3;
+  let typedText = '';
+  const composer = new FlowReferenceController({
+    promptSelector: async () => '#prompt',
+    browser: { insertText: async (_selector, text) => { typedText += text; }, clearText: async () => {} }
+  });
+  composer.adapter.executePageScript = async () => false;
+  composer.attachments = async () => Array.from({ length: chips }, () => ({ source: '', busy: false }));
+  composer.clickButton = async label => {
+    if (label !== 'Clear prompt' || !typedText) return false;
+    chips = 0; typedText = '';
+    return true;
+  };
+  composer.waitFor = async read => { if (await read()) return true; throw new Error('not ready'); };
+  await composer.clearComposer();
+  assert.equal(chips, 0, 'leftover ingredient chips are cleared through the revealed Clear prompt');
+
   // A project file uploaded once is reused by its unique title, not uploaded again.
   const referenceFile = path.join(os.tmpdir(), 'teamyra-reference-reuse-test.png');
   fs.writeFileSync(referenceFile, 'png');
@@ -259,19 +278,16 @@ async function adapterTests() {
   assert.equal(info.title, 'Sunny backyard garden view');
   assert.equal(panelState.open, false, 'the info overlay is closed again');
 
-  // Lossy text (Flow surfaces that drop lowercase "s") matches only when unambiguous.
-  const lossy = new GoogleFlowAutomationAdapter({});
-  const tileInfo = { a: 'Puppy  itting with blue bandana', b: 'Puppy  itting with red bandana' };
-  lossy.resultInfo = async key => ({ prompt: tileInfo[key] });
-  const lossyJob = prompt => ({ request: { type: 'image', prompt }, provider_submission: { baseline_result_keys: [] } });
-  const lossyResults = [{ key: 'a', type: 'image', ready: true }, { key: 'b', type: 'image', ready: true }];
-  assert.equal((await lossy.resultForJob(lossyJob('Puppy sitting with blue bandana'), { results: lossyResults })).key, 'a');
-  tileInfo.b = 'Puppy  itting with blue bandana';
-  assert.equal(await lossy.resultForJob(lossyJob('Puppy sitting with blue bandana'), { results: lossyResults }), null,
-    'two tiles that only match loosely are ambiguous, never guessed');
-  tileInfo.a = 'Puppy sitting with blue bandana';
-  assert.equal((await lossy.resultForJob(lossyJob('Puppy sitting with blue bandana'), { results: lossyResults })).key, 'a',
-    'an exact prompt still wins');
+  // Matching is exact after normalization: a prompt that differs only by
+  // letters (the old "missing s" was our own diagnostic regex) never matches.
+  const strict = new GoogleFlowAutomationAdapter({});
+  const tileInfo = { a: 'Puppy  itting with blue bandana', b: 'Puppy sitting with blue bandana' };
+  strict.resultInfo = async key => ({ prompt: tileInfo[key] });
+  const strictJob = prompt => ({ request: { type: 'image', prompt }, provider_submission: { baseline_result_keys: [] } });
+  const strictResults = [{ key: 'b', type: 'image', ready: true }, { key: 'a', type: 'image', ready: true }];
+  assert.equal((await strict.resultForJob(strictJob('Puppy sitting with blue bandana'), { results: strictResults })).key, 'b');
+  assert.equal(await strict.resultForJob(strictJob('Puppy sitting with red bandana'), { results: strictResults }), null);
+  assert.equal((await strict.resultForJob(strictJob('Puppy sitting’s  blue'), { results: [{ key: 'q', type: 'image', ready: true }] }) ?? 'none'), 'none');
 
   // Single-job polling ignores refusal text that existed before submission.
   const single = new GoogleFlowAutomationAdapter({ getURL: () => 'https://flow.google.com/project/p' });

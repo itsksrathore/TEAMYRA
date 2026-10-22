@@ -41,12 +41,6 @@ function normalizePrompt(value) {
     .replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
 }
 
-// Some Flow surfaces render text without lowercase "s" in the DOM ("Puppy
-// itting"). Only used when exactly one candidate matches this way.
-function loosePrompt(value) {
-  return normalizePrompt(value).replace(/s/gi, '').replace(/\s+/g, ' ').trim();
-}
-
 function projectId(url) {
   return String(url || '').match(/^https:\/\/flow\.google\.com\/project\/([^/?#]+)/i)?.[1] || '';
 }
@@ -1008,8 +1002,6 @@ class GoogleFlowAutomationAdapter {
     // In a bulk run, tiles already matched to other jobs (including copies of
     // the same prompt) belong to them.
     const taken = excludeKeys instanceof Set ? excludeKeys : new Set(excludeKeys || []);
-    const loose = loosePrompt(raw);
-    const looseMatches = [];
     let candidates = 0;
     let swapped = false;
     // Flow lists newest first. Copies of one prompt take the oldest unclaimed
@@ -1025,11 +1017,7 @@ class GoogleFlowAutomationAdapter {
       }
       candidates += 1;
       if (normalizePrompt(info?.prompt) === prompt) return result;
-      if (info?.prompt && loosePrompt(info.prompt) === loose) looseMatches.push(result);
     }
-    // A lossy rendering may only decide when it is unambiguous: two near-identical
-    // prompts in one bulk run must never cross-match.
-    if (looseMatches.length === 1) return { ...looseMatches[0], matched: 'loose' };
     if (swapped && Array.isArray(submission.baseline_result_keys)) {
       // An identical copy took this job's tile earlier; its own older tile is
       // still unclaimed and is the same request's output.
@@ -1530,7 +1518,7 @@ class GoogleFlowAutomationAdapter {
   }
 
   // Read-only page report for diagnosing tile states and the ingredient picker.
-  async inspectPage({ probePicker = false } = {}) {
+  async inspectPage({ probePicker = false, probeIngredient = false } = {}) {
     const tiles = await this.executePageScript(`(() => [...document.querySelectorAll('flow-image-tile,flow-video-tile')].map((tile, index) => {
       const image = tile.querySelector('img[src]');
       let key = image?.getAttribute('data-media-id') || '';
@@ -1540,11 +1528,44 @@ class GoogleFlowAutomationAdapter {
         img: Boolean(image), loaded: Boolean(image?.complete && image.naturalWidth), loading: image?.getAttribute('loading') || '',
         menu: Boolean(tile.querySelector('button[aria-label="More options"]')),
         visible: rect.width > 0 && rect.height > 0, top: Math.round(rect.top),
-        text: String(tile.innerText || tile.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        text: String(tile.innerText || tile.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 160),
         aria: [...tile.querySelectorAll('[aria-label]')].map(el => el.getAttribute('aria-label')).slice(0, 8),
         cls: String(tile.className || '').slice(0, 120) };
     }))()`).catch(error => ({ error: String(error?.message || error) }));
     const report = { url: this.webContents.getURL(), tiles };
+    // Composer: attached ingredients and the controls around them.
+    report.composer = await this.executePageScript(`(() => {
+      const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const ingredients = [...document.querySelectorAll('button[aria-label="Ingredient"]')];
+      const box = ingredients[0]?.closest('[class*="composer" i], [class*="prompt" i], form') || ingredients[0]?.parentElement?.parentElement;
+      const label = el => (el.getAttribute('aria-label') || el.getAttribute('mattooltip') || el.innerText || '').trim().slice(0, 60);
+      return {
+        ingredients: ingredients.length,
+        ingredient_html: ingredients.slice(0, 2).map(el => String(el.outerHTML).replace(/\\s+/g, ' ').slice(0, 900)),
+        ingredient_parent_html: String(ingredients[0]?.parentElement?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 1500),
+        buttons: [...(box || document).querySelectorAll('button')].filter(visible).map(label).filter(Boolean).slice(0, 40),
+        clear_prompt: [...document.querySelectorAll('button')].filter(el => /clear/i.test(label(el))).map(label)
+      };
+    })()`).catch(error => ({ error: String(error?.message || error) }));
+    if (probeIngredient) {
+      report.ingredient_menu = await this.executePageScript(`(async () => {
+        const chip = document.querySelector('button[aria-label="Ingredient"]');
+        if (!chip) return { chip: false };
+        const label = el => (el.getAttribute('aria-label') || el.getAttribute('mattooltip') || el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+        chip.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 300));
+        const hover = [...chip.querySelectorAll('mat-icon')].map(el => el.textContent.trim());
+        chip.click();
+        await new Promise(resolve => setTimeout(resolve, 700));
+        const overlay = document.querySelector('.cdk-overlay-container');
+        const items = [...(overlay || document).querySelectorAll('button,[role="menuitem"],[role="button"]')]
+          .filter(el => el.getBoundingClientRect().width > 0).map(label).filter(Boolean).slice(0, 30);
+        const html = String(overlay?.innerHTML || '').replace(/\\s+/g, ' ').slice(0, 2500);
+        document.querySelectorAll('.cdk-overlay-backdrop').forEach(el => el.click());
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        return { chip: true, hover_icons: hover, items, html };
+      })()`).catch(error => ({ error: String(error?.message || error) }));
+    }
     if (!probePicker) return report;
     const controller = new FlowReferenceController(this);
     const state = () => this.executePageScript(`(() => {
@@ -1556,7 +1577,7 @@ class GoogleFlowAutomationAdapter {
         titles: list ? [...list.querySelectorAll('[role="option"] .asset-title')].map(el => el.textContent.trim()).slice(0, 20) : [],
         dialogs: [...document.querySelectorAll('[role="dialog"],[role="listbox"],.cdk-overlay-pane')]
           .map(el => (el.getAttribute('aria-label') || el.getAttribute('role') || el.className || '').toString().slice(0, 80) + ': ' +
-            String(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300)).slice(0, 10) };
+            String(el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 300)).slice(0, 10) };
     })()`).catch(error => ({ error: String(error?.message || error) }));
     report.picker_before = await state();
     const started = Date.now();
@@ -1713,4 +1734,4 @@ class GoogleFlowAutomationAdapter {
   }
 }
 
-module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId, normalizePrompt, loosePrompt };
+module.exports = { GoogleFlowAutomationAdapter, FLOW_HOME, failureSignalCount, capacitySignal, projectId, normalizePrompt };

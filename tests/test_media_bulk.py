@@ -135,6 +135,21 @@ class MediaBulkTests(unittest.TestCase):
         self.assertEqual(result['jobs'], 2)
         self.assertIsNone(media_engine.flow_project_for(self.root, str(self.root))['provider_url'])
 
+    def test_restart_recovery_leaves_a_live_workers_jobs_alone(self):
+        job_id = self.claimed()
+        media_engine.append_job_metadata(self.root, job_id, {'submission_phase': 'preparing'})
+        media_engine.update_job_state(self.root, job_id, 'submitting')
+        report = media_engine.recover_incomplete_jobs(self.root, worker_alive=True)
+        self.assertTrue(report['skipped_live_worker'])
+        self.assertEqual(media_engine.load_job(self.root, job_id)['state'], 'submitting',
+                         'a core restart must not requeue a job the running desktop is submitting')
+        media_engine.recover_incomplete_jobs(self.root)
+        self.assertEqual(media_engine.load_job(self.root, job_id)['state'], 'queued', "a dead worker's job is requeued")
+        import recovery
+        with patch('desktop_runtime.desktop_ready', return_value=True),                 patch.object(media_engine, 'recover_incomplete_jobs', wraps=media_engine.recover_incomplete_jobs) as spy:
+            recovery.recover_all(self.root, Path(media_engine.__file__).parent, sys.executable)
+        self.assertTrue(spy.call_args.kwargs['worker_alive'])
+
     def test_status_many(self):
         job = media_engine.create_job(self.root, self.request())
         media_engine.cancel_job(self.root, job['job_id'])

@@ -67,9 +67,28 @@ class FlowReferenceController {
     }
     if (await this.clickButton('Clear prompt')) {
       await this.waitFor(async () => (await this.attachments()).length === 0, 'cleared ingredient list', 5000);
-    } else if ((await this.attachments()).length) {
-      throw new Error('selector_failure: old reference ingredients cannot be cleared safely');
+      return;
     }
+    if (!(await this.attachments()).length) return;
+    // Flow only shows "Clear prompt" while the prompt has text; after a submit
+    // the text is gone but the previous job's ingredient chips stay. Type one
+    // character so the control appears, then clear everything with it.
+    const selector = await this.adapter.promptSelector().catch(() => '');
+    if (selector) {
+      await this.adapter.browser.insertText(selector, ' x').catch(() => null);
+      await new Promise(resolve => setTimeout(resolve, 400));
+      if (await this.clickButton('Clear prompt')) {
+        const cleared = await this.waitFor(async () => (await this.attachments()).length === 0, 'cleared ingredient list', 5000)
+          .catch(() => false);
+        if (cleared) return;
+      }
+      // Last resort: the chips live in the prompt editor; select all and delete.
+      await this.adapter.browser.clearText(selector).catch(() => null);
+      await new Promise(resolve => setTimeout(resolve, 400));
+      if (!(await this.attachments()).length) return;
+    }
+    throw new Error('selector_failure: old reference ingredients cannot be cleared safely; attached=' +
+      (await this.attachments()).length);
   }
   async pickerState() {
     return this.adapter.executePageScript(`(() => {
@@ -87,7 +106,7 @@ class FlowReferenceController {
         overlays: [...document.querySelectorAll('.cdk-overlay-pane,[role="dialog"],flow-info-panel')]
           .filter(el => el.getBoundingClientRect().width > 0)
           .map(el => String(el.getAttribute('aria-label') || el.tagName.toLowerCase()).slice(0, 60) + ': ' +
-            String(el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160)).slice(0, 8) };
+            String(el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160)).slice(0, 8) };
     })()`).catch(error => ({ error: String(error?.message || error).slice(0, 200) }));
   }
   // Leftover menus, info panels or a half-closed picker intercept the trigger

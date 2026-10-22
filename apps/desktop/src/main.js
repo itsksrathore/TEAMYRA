@@ -466,6 +466,7 @@ function scheduleDesktopIdleExit(delayMs = DESKTOP_IDLE_SECONDS * 1000) {
       return;
     }
     isQuitting = true;
+    startupLog('idle-exit', { idle_seconds: DESKTOP_IDLE_SECONDS });
     app.quit();
   }, Math.max(1000, Number(delayMs) || DESKTOP_IDLE_SECONDS * 1000));
   desktopIdleTimer.unref?.();
@@ -1302,6 +1303,13 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (mediaCmd === 'visible') return googleMediaEngine.setVisible(payload.visible === true);
     if (mediaCmd === 'bounds') return googleMediaEngine.setBounds(payload.bounds || {});
     if (mediaCmd === 'music') return googleMediaEngine.showMusic(payload.profile_id);
+    if (mediaCmd === 'diagnose' && payload.__locked !== true) {
+      // Diagnostics drive the same Flow page as the worker (open panels, scroll
+      // the grid): run them inside the worker's page lock, never mid-submission.
+      const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
+      const consumer = payload.surface === 'music' ? runtime.musicConsumer : runtime.visualConsumer;
+      return consumer.ui.run(() => dispatchDesktopControl(action, { ...payload, __locked: true }));
+    }
     if (mediaCmd === 'diagnose') {
       const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
       const surface = payload.surface === 'music' ? runtime.music : runtime.visual;
@@ -1353,7 +1361,8 @@ async function dispatchDesktopControl(action, payload = {}) {
           await surface.adapter.loadProjectUrl(String(payload.project_url));
           await new Promise(resolve => setTimeout(resolve, 4000));
         }
-        return surface.adapter.browser.withActivePage(() => surface.adapter.inspectPage({ probePicker: payload.probe_picker === true }));
+        return surface.adapter.browser.withActivePage(() => surface.adapter.inspectPage({
+          probePicker: payload.probe_picker === true, probeIngredient: payload.probe_ingredient === true }));
       }
       if (payload.prepare_workspace || (Array.isArray(payload.radio_patterns) && payload.radio_patterns.length)) {
         if (runtime.visualConsumer.busy || runtime.musicConsumer.busy) throw new Error('Media worker is busy; settings diagnostics must wait');
@@ -1402,8 +1411,8 @@ async function dispatchDesktopControl(action, payload = {}) {
           rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
           pointerEvents: style.pointerEvents,
           cursor: style.cursor,
-          html: String(el.outerHTML || '').replace(/\s+/g, ' ').slice(0, 2500),
-          parent: String(el.parentElement?.outerHTML || '').replace(/\s+/g, ' ').slice(0, 3500)
+          html: String(el.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 2500),
+          parent: String(el.parentElement?.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 3500)
         };
       })()`, true).catch(() => null);
       const settingsOptions = payload.surface === 'music'
@@ -1596,7 +1605,11 @@ if (!gotSingleInstanceLock) {
   });
 }
 
+// An orderly exit is logged; a process that vanishes without these lines was
+// terminated from outside (task kill), which recovery then handles.
+process.on('exit', code => { try { startupLog('process-exit', { code }); } catch {} });
 app.on('before-quit', () => {
+  startupLog('before-quit', { idle: !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() });
   isQuitting = true;
   if (gotSingleInstanceLock) { try { publishDesktopState(false); } catch {} }
   clearDesktopIdleExit();

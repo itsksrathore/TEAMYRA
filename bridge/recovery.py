@@ -387,7 +387,9 @@ def recover_all(root, bridge, python_exe):
             report["errors"].append({"kind": "dispatch", "id": "scheduler", "error": str(exc)})
 
     try:
-        media_report = media_engine.recover_incomplete_jobs(root)
+        import desktop_runtime
+        # A running desktop owns its in-flight media jobs; only a dead one's are recovered here.
+        media_report = media_engine.recover_incomplete_jobs(root, worker_alive=desktop_runtime.desktop_ready(root))
         for job_id in media_report.get("requeued", []):
             report["media"].append({"kind": "media", "id": job_id, "action": "requeued"})
         for job_id in media_report.get("reconcile_required", []):

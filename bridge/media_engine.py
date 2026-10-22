@@ -1356,39 +1356,53 @@ def write_connection_status(root, patch):
     return connection_status(root)
 
 
-def recover_incomplete_jobs(root):
-    report = {"requeued": [], "reconcile_required": [], "unchanged": [], "errors": []}
+def recover_incomplete_jobs(root, *, worker_alive=False):
+    """Requeue (or mark for reconciliation) jobs a dead desktop left mid-flight.
+
+    worker_alive: a desktop is running and owns its in-progress jobs; nothing is
+    touched (a core/MCP restart used to requeue jobs the live worker was
+    submitting, inviting a second claim and a second paid Generate).
+    """
+    report = {"requeued": [], "reconcile_required": [], "unchanged": [], "errors": [],
+              "skipped_live_worker": bool(worker_alive)}
+    if worker_alive:
+        return report
     for path in _jobs_dir(root).glob("media-*.json"):
         try:
-            job = _read_json(path, None)
-            if not isinstance(job, dict):
-                continue
-            state = job.get("state")
-            if state not in RUNTIME_IN_PROGRESS:
-                report["unchanged"].append(job.get("job_id") or path.stem)
-                continue
-            submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-            possible_submission = _possible_submission(job)
-            if state in {"preparing", "waiting_for_browser", "submitting"} and not possible_submission:
-                job["state"] = "queued"
-                job["claimed_by"] = None
-                job["claimed_at"] = None
-                job["reconcile_required"] = False
-                job.setdefault("history", []).append(_event("queued", "Recovered safely before provider submission"))
-                report["requeued"].append(job["job_id"])
-            else:
-                # Never blindly resubmit once submission may have occurred.
-                job["state"] = "waiting_for_browser"
-                job["reconcile_required"] = True
-                job.setdefault("history", []).append(_event(
-                    "waiting_for_browser",
-                    "Restart recovery requires provider reconciliation before any resubmission",
-                ))
-                report["reconcile_required"].append(job["job_id"])
-            _save_job(root, job)
+            with _state_lock(root):
+                _recover_one(root, path, report)
         except Exception as exc:
             report["errors"].append({"path": str(path), "error": str(exc)[:1000]})
     return report
+
+
+def _recover_one(root, path, report):
+    job = _read_json(path, None)
+    if not isinstance(job, dict):
+        return
+    state = job.get("state")
+    if state not in RUNTIME_IN_PROGRESS:
+        report["unchanged"].append(job.get("job_id") or path.stem)
+        return
+    submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+    possible_submission = _possible_submission(job)
+    if state in {"preparing", "waiting_for_browser", "submitting"} and not possible_submission:
+        job["state"] = "queued"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["reconcile_required"] = False
+        job.setdefault("history", []).append(_event("queued", "Recovered safely before provider submission"))
+        report["requeued"].append(job["job_id"])
+    else:
+        # Never blindly resubmit once submission may have occurred.
+        job["state"] = "waiting_for_browser"
+        job["reconcile_required"] = True
+        job.setdefault("history", []).append(_event(
+            "waiting_for_browser",
+            "Restart recovery requires provider reconciliation before any resubmission",
+        ))
+        report["reconcile_required"].append(job["job_id"])
+    _save_job(root, job)
 
 
 def mark_reconciled(root, job_id, *, provider_submission=None, resume_state="generating"):

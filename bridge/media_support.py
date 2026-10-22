@@ -408,7 +408,9 @@ def helper_task(ticket, worker=None):
         "media_generate, media_batch, media_recover, media_resume_download, media_cancel, media_assets, "
         "media_capabilities, media_ticket_status, media_ticket_update, media_ticket_deliver. If you have no TEAMYRA "
         "MCP tools, call the same tools from the shell: write the arguments to a JSON file and run "
-        f"`{cli} <tool_name> --file args.json` (or `--json '<json>'`). Never edit TEAMYRA source code.",
+        f"`{cli} <tool_name> --file args.json` (or `--json '<json>'`). Never edit TEAMYRA source code, never import "
+        "TEAMYRA modules or call desktop_control/media.diagnose yourself, and never stop or restart TEAMYRA/electron "
+        "processes: other agents' jobs run on the same browser page.",
         "",
         "WORKFLOW",
         f"1. Note the issue first: media_ticket_update(ticket_id=\"{tid}\", status=\"working\", note=<what you see "

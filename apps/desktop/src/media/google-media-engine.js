@@ -257,7 +257,13 @@ class GoogleMediaProfileRuntime {
       this.wakingCount = Math.max(0, this.wakingCount - 1);
       if (!this.visual.visible && !this.music.visible) this.scheduleUnload(BROWSER_IDLE_MS);
     });
-    return { ...this.snapshot(), waking: true, wake_surface: surface };
+    const snapshot = { ...this.snapshot(), waking: true, wake_surface: surface };
+    if (!this.lastRefreshAt) {
+      // Nothing has been checked yet in this process: unknown, not signed out.
+      snapshot.needs_user_auth = null;
+      snapshot.status_checked = false;
+    }
+    return snapshot;
   }
 
   async open() {
