@@ -984,7 +984,19 @@ class GoogleFlowAutomationAdapter {
     }))()`);
   }
 
-  async resultForJob(job, { results = null, excludeKeys = null } = {}) {
+  // Flow lists results newest first. The baseline's first key was the newest
+  // tile at submission, so only tiles above it can be this job's output. The
+  // baseline itself only holds the tiles rendered then, so "not in baseline"
+  // alone would count every older tile further down the grid.
+  newerThanSubmission(job, results, { pastTop = false } = {}) {
+    const top = (job?.provider_submission?.baseline_result_keys || [])[0];
+    if (!top) return results;
+    const index = results.findIndex(result => result.key === top);
+    if (index >= 0) return results.slice(0, index);
+    return pastTop ? [] : results;
+  }
+
+  async resultForJob(job, { results = null, excludeKeys = null, pastTop = false } = {}) {
     results = results || await this.resultSnapshot();
     const submission = job?.provider_submission || {};
     const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
@@ -1006,7 +1018,8 @@ class GoogleFlowAutomationAdapter {
     let swapped = false;
     // Flow lists newest first. Copies of one prompt take the oldest unclaimed
     // tile after their submission, so an earlier copy never takes a later one's.
-    const fresh = results.filter(result => result.type === type && result.ready &&
+    const scope = submission.result_key ? results : this.newerThanSubmission(job, results, { pastTop });
+    const fresh = scope.filter(result => result.type === type && result.ready &&
       (submission.result_key || !Array.isArray(submission.baseline_result_keys) || !baseline.has(result.key))).reverse();
     for (const result of fresh) {
       const info = await this.resultInfo(result.key);
@@ -1422,11 +1435,14 @@ class GoogleFlowAutomationAdapter {
       states.get(job.job_id)?.reason !== 'other_project');
     if (overdue.length) {
       const seen = new Map();
+      const pastTop = new Set();
       await this.scanGrid(async snapshot => {
         for (const result of snapshot) if (result.key) seen.set(result.key, result);
         for (const job of overdue) {
           if (states.get(job.job_id).state !== 'generating') continue;
-          const result = await this.resultForJob(job, { results: snapshot, excludeKeys: taken });
+          const result = await this.resultForJob(job, { results: snapshot, excludeKeys: taken, pastTop: pastTop.has(job.job_id) });
+          const top = (job?.provider_submission?.baseline_result_keys || [])[0];
+          if (top && snapshot.some(item => item.key === top)) pastTop.add(job.job_id);
           if (result) {
             taken.add(result.key);
             states.set(job.job_id, { state: 'ready_to_download', result_key: result.key, found_by: 'grid_scan' });
@@ -1439,8 +1455,8 @@ class GoogleFlowAutomationAdapter {
         // Finished tiles newer than this job's submission that no prompt matched.
         const baseline = new Set(job?.provider_submission?.baseline_result_keys || []);
         const type = job?.request?.type === 'sound_effect' ? 'video' : job?.request?.type;
-        const unmatched = [...seen.values()].filter(result => result.type === type && result.ready &&
-          !taken.has(result.key) && !baseline.has(result.key)).length;
+        const unmatched = this.newerThanSubmission(job, [...seen.values()]).filter(result => result.type === type &&
+          result.ready && !taken.has(result.key) && !baseline.has(result.key)).length;
         states.set(job.job_id, { state: 'generating', searched: true, unmatched_results: unmatched });
       }
       await this.resetGrid();

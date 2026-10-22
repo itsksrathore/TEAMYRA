@@ -135,10 +135,11 @@ async function main() {
   assert.equal(activations.at(-1), '360p Original size');
 
   const identity = new GoogleFlowAutomationAdapter({});
+  // Flow lists results newest first; 'old' predates the submission.
   identity.resultSnapshot = async () => [
-    { key: 'old', type: 'image', ready: true },
+    { key: 'fresh', type: 'video', ready: true },
     { key: 'pending', type: 'video', ready: false },
-    { key: 'fresh', type: 'video', ready: true }
+    { key: 'old', type: 'image', ready: true }
   ];
   identity.resultInfo = async () => ({ prompt: 'own prompt' });
   assert.equal((await identity.resultForJob({ request: { type: 'video', prompt: 'own prompt' }, provider_submission: { baseline_result_keys: ['old'] } })).key, 'fresh');

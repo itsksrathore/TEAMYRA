@@ -153,6 +153,18 @@ async function adapterTests() {
     submitted_at: 6, provider_url: 'https://flow.google.com/project/p', baseline_result_keys: ['k1', 'old'] } }], { claimedKeys: [] });
   assert.equal(noSwap.states.get('j6').result_key, 'k2', 'without a swap the baseline stays excluded');
 
+  // Only tiles above the newest tile at submission are new: older tiles that
+  // were simply not rendered into the baseline never count or match.
+  const scoped = new GoogleFlowAutomationAdapter({});
+  scoped.readResultInfo = async key => ({ prompt: key === 'mine' || key === 'ancient' ? 'scene x' : 'other' });
+  const scopedJob = { request: { type: 'video', prompt: 'scene x' }, provider_submission: { baseline_result_keys: ['top', 'below'] } };
+  const grid = [{ key: 'mine', type: 'video', ready: true }, { key: 'top', type: 'video', ready: true },
+    { key: 'below', type: 'video', ready: true }, { key: 'ancient', type: 'video', ready: true }];
+  assert.equal((await scoped.resultForJob(scopedJob, { results: grid })).key, 'mine');
+  assert.equal(await scoped.resultForJob(scopedJob, { results: grid.filter(item => item.key !== 'mine') }), null,
+    'an older identical prompt below the submission point is not this job output');
+  assert.equal(scoped.newerThanSubmission(scopedJob, [{ key: 'ancient' }], { pastTop: true }).length, 0);
+
   // Flow's image aspect radios (DOM order). "Portrait" is 3:4, not 9:16.
   const radios = ['crop_16_9 16:9', 'crop_landscape 4:3', 'crop_square 1:1', 'crop_portrait 3:4', 'crop_9_16 9:16'].map(text => {
     const attributes = { 'aria-checked': text.includes('9:16') ? 'true' : 'false' };
@@ -509,6 +521,17 @@ async function pipelineTests(temp) {
   assert.match(matchFailures[0], /result_match_failed/);
   assert.doesNotMatch(matchFailures[0], /moderation/);
   assert.equal(matchLoaded.classifyError(new Error(matchFailures[0])).category, 'result_match_failed');
+
+  // At decision time a Failed tile newer than the submission means a refusal.
+  const refusedConsumer = new matchLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,
+    generationStates: async list => ({ page: { state: 'ok', failure_signals: 3 },
+      states: new Map(list.map(job => [job.job_id, { state: 'generating', searched: true, unmatched_results: 0 }])) }) } } });
+  const refusals = [];
+  refusedConsumer.handleFailure = async (jobId, error) => { refusals.push(String(error.message)); };
+  refusedConsumer.inFlight.set('match-0', { jobId: 'match-0', phase: 'generating', submittedAt: Date.now() - 7 * 60 * 1000,
+    watchStartedAt: Date.now() - 60000, baselineFailures: 2, submission: {}, job: { job_id: 'match-0', request: { type: 'video', prompt: 'x' } } });
+  await refusedConsumer.pollOnce();
+  assert.match(refusals[0], /policy_refusal/);
 
   // A resumed job is searched before it can time out or be given up.
   const resumed = new matchLoaded.MediaJobConsumer({ surface: 'visual', downloadManager, provider: { ...provider, adapter: { ...adapter,

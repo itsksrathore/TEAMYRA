@@ -676,6 +676,14 @@ class MediaJobConsumer {
       if (!state?.searched || age < noResultMs) continue;
       // A resumed job gets at least one full search before it is given up.
       if (Date.now() - (ctx.watchStartedAt || ctx.submittedAt) < 20000) continue;
+      const freshFailures = Number(page.failure_signals) - Number(ctx.baselineFailures);
+      if (Number.isFinite(freshFailures) && freshFailures > 0) {
+        // A Failed tile appeared after this submission and no result did: the
+        // deferred attribution never got to decide while other jobs ran.
+        await this.failJob(ctx, new Error('policy_refusal: Google Flow marked a generation submitted with this job Failed ' +
+          '(the prompt might violate its policies) and no result appeared; reword the prompt and queue a new job'));
+        continue;
+      }
       if (state.unmatched_results > 0) {
         // Flow did produce results; only the attribution failed. Rewording and
         // resubmitting would pay for the same output again.
