@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 WINDOWS_LAUNCH_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
@@ -206,3 +207,62 @@ def claude_launch_info(env=None, home=None, windows=None):
 def claude_launch(env=None, home=None):
     path, _ = find_claude(env, home)
     return [path] if path else []
+
+
+# Codex's elevated Windows sandbox runs as machine-wide users
+# (CodexSandboxOffline/Online), but every CODEX_HOME keeps its own setup marker
+# and the users' passwords. With two accounts in different homes each run of
+# the other account finds the users "incompatible with marker version",
+# provisions them again (a UAC prompt) and so breaks the other home's copy.
+CODEX_SANDBOX_STATE = (".sandbox", ".sandbox-secrets", ".sandbox-bin")
+
+
+def _is_link(path):
+    try:
+        return path.is_symlink() or os.path.isjunction(path)
+    except (OSError, AttributeError):
+        return False
+
+
+def _junction(target, link):
+    try:
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    except (ImportError, AttributeError):
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True,
+                       capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def share_codex_sandbox(home, primary=None):
+    """Let an extra Codex account home use the main home's sandbox setup, so the
+    one-time elevated setup holds for every account. Returns the shared names."""
+    if os.name != "nt" or not home:
+        return []
+    home = Path(home)
+    primary = Path(primary) if primary else Path.home() / ".codex"
+    try:
+        if home.resolve() == primary.resolve():
+            return []
+    except OSError:
+        return []
+    if not (primary / ".sandbox" / "setup_marker.json").is_file() or not home.is_dir():
+        return []
+    shared = []
+    for name in CODEX_SANDBOX_STATE:
+        target, link = primary / name, home / name
+        if not target.is_dir() or _is_link(link):
+            continue
+        backup = None
+        if link.exists():
+            backup = home / f"{name}.local-{time.strftime('%Y%m%d-%H%M%S')}"
+            try:
+                link.rename(backup)
+            except OSError:
+                continue  # in use by a running Codex; try again next launch
+        try:
+            _junction(target, link)
+            shared.append(name)
+        except (OSError, subprocess.CalledProcessError):
+            if backup is not None and not link.exists():
+                backup.rename(link)
+    return shared

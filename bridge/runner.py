@@ -15,6 +15,7 @@ stop the job.
 import json, os, subprocess, sys, threading, time
 from pathlib import Path
 from expected_outputs import missing_outputs
+from runtime_paths import share_codex_sandbox
 
 LIMIT_MARKERS = ["rate limit", "usage limit", "quota", "too many requests",
                  "resource exhausted", "limit reached", "insufficient quota"]
@@ -233,6 +234,11 @@ class Job:
     def run_once(self, cmd, env, deadline):
         """Runs one worker process to its end; returns (rc, stderr, timed_out, cancelled)."""
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if (env or {}).get("CODEX_HOME"):
+            try:  # one sandbox setup for every Codex account: no repeated UAC prompts
+                share_codex_sandbox(env["CODEX_HOME"])
+            except Exception:
+                pass
         proc = subprocess.Popen(cmd, cwd=self.spec["cwd"], env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=flags)
