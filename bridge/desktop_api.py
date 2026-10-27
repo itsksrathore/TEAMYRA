@@ -99,7 +99,8 @@ def handle(action, payload):
     if action == "media.claim":
         return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"),
                                            lane=payload.get("lane", 0), lanes=payload.get("lanes", 1),
-                                           refs_key=payload.get("refs_key"))
+                                           refs_key=payload.get("refs_key"), profile_id=payload.get("profile_id"),
+                                           main=payload.get("main"))
     if action == "media.status":
         return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30),
                                        payload.get("batch_id"))
@@ -108,12 +109,15 @@ def handle(action, payload):
     if action == "media.claimed-keys":
         return media_engine.claimed_result_keys(ROOT, payload.get("provider_url"))
     if action == "media.flow-project":
-        return media_engine.flow_project_for(ROOT, payload.get("project_path"), lane=payload.get("lane", 0))
+        return media_engine.flow_project_for(ROOT, payload.get("project_path"), lane=payload.get("lane", 0),
+                                             profile_id=payload.get("profile_id"))
     if action == "media.status-many":
         return media_engine.status_many(ROOT, payload.get("job_ids") or [])
     if action == "media.release":
         return media_engine.release_job(ROOT, payload["job_id"], delay=payload.get("delay", 15),
                                         reason=payload.get("reason"))
+    if action == "media.handoff":
+        return media_engine.handoff_job(ROOT, payload["job_id"], reason=payload.get("reason"))
     if action == "media.batch":
         return media_engine.create_batch(ROOT, payload.get("requests") or [],
                                          max_parallel=payload.get("max_parallel"))
@@ -148,7 +152,7 @@ def handle(action, payload):
     if action == "media.connection-status":
         return media_engine.connection_status(ROOT)
     if action == "media.connection-update":
-        return media_engine.write_connection_status(ROOT, payload.get("patch") or {})
+        return media_engine.write_connection_status(ROOT, payload.get("patch") or {}, payload.get("profile_id"))
     if action == "media.reconcile":
         return media_engine.mark_reconciled(
             ROOT,

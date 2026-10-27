@@ -751,7 +751,10 @@ ipcMain.handle('teamyra:media-batch', async (_event, options = {}) => {
   const result = await callCore('media.batch', { requests, max_parallel: Number(options.maxParallel) || undefined }, { timeout: 60000 });
   let runtime = null;
   try {
-    runtime = googleMediaEngine ? googleMediaEngine.wake('visual', options.profileId || googleMediaEngine.activeProfileId || 'google') : null;
+    // Bulk work runs in every signed-in Google account unless one is named.
+    runtime = googleMediaEngine ? (options.profileId
+      ? googleMediaEngine.wake('visual', options.profileId)
+      : googleMediaEngine.wakeAll('visual')) : null;
   } catch (error) {
     runtime = { error: String(error?.message || error) };
   }
@@ -1295,7 +1298,9 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (mediaCmd === 'status') return payload.profile_id
       ? googleMediaEngine.profileStatus(payload.profile_id)
       : googleMediaEngine.status();
-    if (mediaCmd === 'wake') return googleMediaEngine.wake(payload.surface || 'visual', payload.profile_id || 'google');
+    if (mediaCmd === 'wake') return payload.profile_id
+      ? googleMediaEngine.wake(payload.surface || 'visual', payload.profile_id)
+      : googleMediaEngine.wakeAll(payload.surface || 'visual');
     if (mediaCmd === 'open') return googleMediaEngine.open(payload.profile_id || 'google');
     if (mediaCmd === 'login') return googleMediaEngine.login(payload.profile_id || 'google');
     if (mediaCmd === 'close') return googleMediaEngine.close();

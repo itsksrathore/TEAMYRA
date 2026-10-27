@@ -4,7 +4,7 @@ const { GoogleFlowMusicAutomationAdapter, FLOW_MUSIC_HOME } = require('../src/me
 const { classifyError } = require('../src/media/media-job-consumer');
 const { resolveFfmpeg } = require('../src/media/media-audio-processor');
 const { partitionForProfile } = require('../src/media/google-media-session-manager');
-const { GOOGLE_LOGIN_URL, observedStatus, flowLaneCount } = require('../src/media/google-media-engine');
+const { GOOGLE_LOGIN_URL, observedStatus, flowLaneCount, mediaProfiles, GoogleMediaEngine, GoogleMediaProfileRuntime } = require('../src/media/google-media-engine');
 
 // Bulk runs in 3 Flow tabs unless TEAMYRA_FLOW_LANES says otherwise (1-4).
 assert.equal(flowLaneCount(undefined), 3);
@@ -23,6 +23,90 @@ assert.equal(flowLaneCount('nope'), 3);
   assert.equal(observedStatus(failed, { music_signed_in: true }, 'music').signedIn, true);
   const seen = { loaded: true, probe_ok: true, signedIn: false };
   assert.equal(observedStatus(seen, { connected: true }, 'visual'), seen);
+}
+
+// Every enabled Google account takes bulk Flow work.
+{
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-media-profiles-'));
+  const write = (id, meta) => {
+    fs.mkdirSync(path.join(root, id));
+    if (meta) fs.writeFileSync(path.join(root, id, 'teamyra-profile.json'), JSON.stringify(meta));
+  };
+  write('acct-b', { enabled: true, priority: 100 });
+  write('acct-a', { enabled: true, priority: 100 });
+  write('acct-off', { enabled: false });
+  write('acct-bare');
+  const listed = mediaProfiles(root);
+  fs.rmSync(root, { recursive: true, force: true });
+  assert.deepEqual(listed.map(item => item.id).sort(), ['acct-a', 'acct-b', 'acct-bare', 'acct-off', 'google']);
+  assert.equal(listed.find(item => item.id === 'acct-off').enabled, false);
+
+  const engine = new GoogleMediaEngine({ window: null, listProfiles: () => listed });
+  assert.deepEqual(engine.enabledProfiles(), ['google', 'acct-a', 'acct-b', 'acct-bare'], 'built-in first, then by priority and name');
+  const wakes = [];
+  const fake = (id, connected) => ({
+    profileId: id,
+    lastStatus: { connected, challenged: false },
+    working() { return this.lastStatus.connected === true; },
+    wake(surface, options) { wakes.push({ id, surface, requireConnected: options?.requireConnected }); return { connected, needs_user_auth: connected ? false : null }; }
+  });
+  for (const [id, connected] of [['google', true], ['acct-a', false], ['acct-b', true], ['acct-bare', false]]) engine.profiles.set(id, fake(id, connected));
+  const woken = engine.wakeAll('visual');
+  assert.deepEqual(wakes.map(item => item.id), ['google', 'acct-a', 'acct-b', 'acct-bare'], 'every enabled account is woken, the disabled one is not');
+  assert.ok(wakes.every(item => item.requireConnected === true), 'an account starts claiming only once verified signed in');
+  assert.equal(woken.accounts.length, 4);
+  assert.equal(woken.tabs_per_account, flowLaneCount());
+  assert.equal(woken.needs_user_auth, false);
+
+  wakes.length = 0;
+  engine.wakeAll('music');
+  assert.deepEqual(wakes, [{ id: 'google', surface: 'music', requireConnected: undefined }], 'Flow Music stays on the active account');
+
+  // Nobody known to work: the active account starts as before so jobs can report sign-in.
+  for (const runtime of engine.profiles.values()) runtime.lastStatus.connected = false;
+  wakes.length = 0;
+  engine.wakeAll('visual');
+  assert.deepEqual(wakes.filter(item => item.requireConnected === false).map(item => item.id), ['google']);
+
+  // Single jobs go to the active account while it works, else the first working one.
+  engine.profiles.get('acct-b').lastStatus.connected = true;
+  assert.equal(engine.mainProfileId(), 'acct-b');
+  engine.profiles.get('google').lastStatus.connected = true;
+  assert.equal(engine.mainProfileId(), 'google');
+  assert.equal(engine.otherWorking('google'), true);
+  assert.equal(engine.otherWorking('acct-b'), true);
+  engine.profiles.get('acct-b').lastStatus.connected = false;
+  assert.equal(engine.otherWorking('google'), false);
+
+  // An account that stops working is parked only when another one works.
+  const consumer = () => ({ pausedUntil: 0, pauseReason: '' });
+  const runtime = {
+    profileId: 'acct-a', engine, parkedUntil: 0, parkReason: '', consumers: [consumer(), consumer()],
+    lastStatus: { connected: true, challenged: false }, stopped: false,
+    visualConsumers() { return this.consumers; },
+    setConsumerState(kind, enabled) { if (kind === 'visual' && !enabled) this.stopped = true; }
+  };
+  const problem = GoogleMediaProfileRuntime.prototype.accountProblem;
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(problem.call(runtime, 'credits', 'out of credits'), true, 'google still works, so acct-a parks');
+    assert.ok(runtime.parkedUntil > Date.now() + 20 * 60 * 1000);
+    assert.ok(runtime.consumers.every(item => item.pausedUntil === runtime.parkedUntil), 'every tab of the account stops claiming');
+    assert.equal(runtime.stopped, false, 'out of credits keeps watching accepted generations');
+    assert.equal(problem.call(runtime, 'signed_out', 'Google Media sign-in is required'), true);
+    assert.equal(runtime.stopped, true);
+    assert.equal(runtime.lastStatus.connected, false);
+    engine.profiles.get('google').lastStatus.connected = false;
+    const alone = { ...runtime, profileId: 'google', stopped: false, lastStatus: { connected: true } };
+    assert.equal(problem.call(alone, 'signed_out', 'x'), false, 'the only account keeps the old behaviour');
+    assert.equal(alone.stopped, false);
+  } finally {
+    console.warn = warn;
+  }
 }
 
 assert.equal(FLOW_HOME, 'https://flow.google.com/');

@@ -1106,7 +1106,12 @@ def desktop_control(action, payload=None, timeout_seconds=20):
 def wake_media_surface(surface):
     try:
         response = desktop_control("media.wake", {"surface": surface}, 5)
-        return {"state": "waking", "surface": surface, "needs_user_auth": response.get("needs_user_auth") is True}
+        result = {"state": "waking", "surface": surface, "needs_user_auth": response.get("needs_user_auth") is True}
+        if isinstance(response.get("accounts"), list):
+            # Visual work wakes every enabled Google account; each claims from the queue.
+            result["accounts"] = [item.get("profile_id") for item in response["accounts"] if isinstance(item, dict)]
+            result["tabs_per_account"] = response.get("tabs_per_account")
+        return result
     except Exception as exc:
         # Queue creation is durable. Tell callers why it hasn't started rather
         # than returning an apparently healthy queued job indefinitely.

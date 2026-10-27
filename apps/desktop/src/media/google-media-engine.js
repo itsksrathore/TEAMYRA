@@ -1,4 +1,7 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const { callCore } = require('../core-api');
+const { profileRoot } = require('../provider-registry');
 const { GoogleMediaSessionManager, safeProfileId } = require('./google-media-session-manager');
 const { MediaDownloadManager } = require('./media-download-manager');
 const { GoogleFlowProvider } = require('./google-flow-provider');
@@ -39,11 +42,37 @@ const STATUS_CACHE_MS = 15000;
 const BROWSER_IDLE_MS = 45000;
 // A saved connection status older than this is re-probed at startup.
 const STALE_STATUS_MS = 10 * 60 * 1000;
+// An account that ran out of Flow credits takes no new work for this long
+// while other accounts can (its accepted generations still finish).
+const CREDITS_PARK_MS = 30 * 60 * 1000;
+
+// Every Google Media account: the built-in one and those added in Settings,
+// with the enabled flag and priority kept in their teamyra-profile.json.
+function mediaProfiles(root = profileRoot('google-media')) {
+  const profiles = [{ id: 'google', enabled: true, priority: 250 }];
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch {}
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === 'google' || safeProfileId(entry.name) !== entry.name) continue;
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(path.join(root, entry.name, 'teamyra-profile.json'), 'utf8')) || {}; } catch {}
+    const priority = Number(meta.priority);
+    profiles.push({ id: entry.name, enabled: meta.enabled !== false, priority: Number.isFinite(priority) ? priority : 100 });
+  }
+  return profiles;
+}
 
 class GoogleMediaProfileRuntime {
-  constructor({ window, profileId, ready = Promise.resolve() }) {
+  constructor({ window, profileId, ready = Promise.resolve(), engine = null }) {
     this.window = window;
+    this.engine = engine;
     this.profileId = safeProfileId(profileId);
+    this.parkedUntil = 0;
+    this.parkReason = '';
+    const accountHooks = {
+      isMain: () => !this.engine || this.engine.mainProfileId() === this.profileId,
+      onAccountProblem: (kind, reason) => this.accountProblem(kind, reason)
+    };
     this.sessionManager = new GoogleMediaSessionManager(this.profileId);
     this.downloadManager = new MediaDownloadManager(this.sessionManager);
     this.visual = new GoogleFlowProvider({ window, sessionManager: this.sessionManager });
@@ -58,7 +87,8 @@ class GoogleMediaProfileRuntime {
       ready,
       onActivity: () => this.touch(),
       lane: 0,
-      lanes
+      lanes,
+      ...accountHooks
     });
     // Extra tabs are never shown; the download manager tells their downloads
     // apart by the tab that started them.
@@ -76,7 +106,8 @@ class GoogleMediaProfileRuntime {
           ready,
           onActivity: () => this.touch(),
           lane,
-          lanes
+          lanes,
+          ...accountHooks
         })
       });
     }
@@ -178,11 +209,39 @@ class GoogleMediaProfileRuntime {
     this.unloadTimer.unref?.();
   }
 
+  // Can this account take new Flow work now?
+  working() {
+    return this.visualConsumerStarted && this.lastStatus.connected === true &&
+      this.lastStatus.challenged !== true && Date.now() >= this.parkedUntil;
+  }
+
+  // A consumer found this account unable to take new work. Park it only when
+  // another account is working, so its unsubmitted jobs move there; alone, it
+  // keeps the old behaviour (jobs wait in needs_user_auth for the user).
+  accountProblem(kind, reason = '') {
+    if (!this.engine?.otherWorking(this.profileId)) return false;
+    console.warn('[google-media] account ' + this.profileId + ' parked: ' + kind + ' (' + reason + ')');
+    this.parkReason = String(reason || kind);
+    if (kind === 'credits') {
+      this.parkedUntil = Date.now() + CREDITS_PARK_MS;
+      for (const consumer of this.visualConsumers()) {
+        consumer.pausedUntil = Math.max(consumer.pausedUntil, this.parkedUntil);
+        consumer.pauseReason = this.parkReason;
+      }
+      return true;
+    }
+    this.lastStatus = { ...this.lastStatus, connected: false, signed_in: false, needs_user_auth: true,
+      challenged: kind === 'challenged', detail: this.parkReason };
+    this.setConsumerState('visual', false);
+    return true;
+  }
+
   pipelineSnapshot() {
     const lanes = this.visualConsumers().map(consumer => consumer.pipelineStatus());
     const sum = key => lanes.reduce((total, lane) => total + (Number(lane[key]) || 0), 0);
     return {
       ...lanes[0],
+      profile_id: this.profileId,
       in_flight: sum('in_flight'),
       downloads_active: sum('downloads_active'),
       downloads_waiting: sum('downloads_waiting'),
@@ -200,6 +259,9 @@ class GoogleMediaProfileRuntime {
       visual_busy: visualBusy,
       music_busy: this.musicConsumer.busy,
       visual_pipeline: this.pipelineSnapshot(),
+      working: this.working(),
+      parked_until: this.parkedUntil > Date.now() ? this.parkedUntil / 1000 : null,
+      park_reason: this.parkedUntil > Date.now() || !this.lastStatus.connected ? this.parkReason : '',
       visual_audio_muted: this.visual.view?.webContents?.isAudioMuted?.() ?? null,
       music_audio_muted: this.music.view?.webContents?.isAudioMuted?.() ?? null,
       current_url: this.visual.view?.webContents?.getURL?.()
@@ -303,7 +365,7 @@ class GoogleMediaProfileRuntime {
       if (visualStatus.loaded || musicStatus.loaded) {
         // Persist the live observation so a stale challenged/signed-out flag
         // from an earlier day cannot outlive the real session state.
-        callCore('media.connection-update', { patch: {
+        callCore('media.connection-update', { profile_id: this.profileId, patch: {
           connected, needs_user_auth: !connected || visualChallenged, challenged,
           flow_ready: this.lastStatus.flow_ready, music_signed_in: musicConnected, music_ready: this.lastStatus.music_ready,
           capabilities: this.lastStatus.capabilities, detail: this.lastStatus.detail
@@ -319,14 +381,18 @@ class GoogleMediaProfileRuntime {
     }
   }
 
-  wake(surface = 'visual') {
+  // requireConnected: start taking jobs only once this account is verified
+  // signed in (used when several accounts are woken; a signed-out one would
+  // otherwise claim jobs only to park them in needs_user_auth).
+  wake(surface = 'visual', { requireConnected = false } = {}) {
     this.touch();
     this.wakingCount++;
     const target = surface === 'music' ? this.music : this.visual;
     target.ensureView();
     void target.ensureLoaded().then(async () => {
       await this.refreshConnection({ force: true, allowLoad: false }).catch(() => {});
-      this.setConsumerState(surface === 'music' ? 'music' : 'visual', true);
+      const connected = surface === 'music' ? this.lastStatus.music_signed_in : this.lastStatus.connected && !this.lastStatus.challenged;
+      if (!requireConnected || connected) this.setConsumerState(surface === 'music' ? 'music' : 'visual', true);
     }).catch(() => {}).finally(() => {
       this.wakingCount = Math.max(0, this.wakingCount - 1);
       if (!this.visual.visible && !this.music.visible) this.scheduleUnload(BROWSER_IDLE_MS);
@@ -479,8 +545,9 @@ class GoogleMediaProfileRuntime {
 }
 
 class GoogleMediaEngine {
-  constructor({ window }) {
+  constructor({ window, listProfiles = mediaProfiles }) {
     this.window = window;
+    this.listProfiles = () => { try { return listProfiles(); } catch { return [{ id: 'google', enabled: true, priority: 250 }]; } };
     this.profiles = new Map();
     this.activeProfileId = 'google';
     this.started = false;
@@ -493,45 +560,82 @@ class GoogleMediaEngine {
     const id = safeProfileId(profileId);
     let runtime = this.profiles.get(id);
     if (!runtime) {
-      runtime = new GoogleMediaProfileRuntime({ window: this.window, profileId: id, ready: this.ready });
+      runtime = new GoogleMediaProfileRuntime({ window: this.window, profileId: id, ready: this.ready, engine: this });
       runtime.initialize();
       this.profiles.set(id, runtime);
     }
     return runtime;
   }
 
+  // Enabled Google Media accounts, by priority (the built-in one first on ties).
+  enabledProfiles() {
+    return this.listProfiles().filter(item => item.enabled)
+      .sort((a, b) => (b.priority - a.priority) || (a.id === 'google' ? -1 : b.id === 'google' ? 1 : a.id.localeCompare(b.id)))
+      .map(item => item.id);
+  }
+
+  // The account that takes single jobs (they stay in the folder's main Flow
+  // project): the active account while it works, else the first working one.
+  mainProfileId() {
+    const active = this.profiles.get(this.activeProfileId);
+    if (active?.working()) return this.activeProfileId;
+    return this.enabledProfiles().find(id => this.profiles.get(id)?.working()) || this.activeProfileId;
+  }
+
+  otherWorking(profileId) {
+    return [...this.profiles.values()].some(runtime => runtime.profileId !== profileId && runtime.working());
+  }
+
   initialize() {
     if (this.started) return;
     this.started = true;
-    const runtime = this.ensureProfile('google');
+    const ids = this.enabledProfiles();
+    if (!ids.includes('google')) ids.unshift('google');
+    for (const id of ids) this.ensureProfile(id);
     // Jobs the previous desktop process left mid-flight are requeued (or marked
     // for reconciliation if Generate may have run) before any worker claims.
+    // A submitted job keeps its account and tab, and only they resume it.
     callCore('media.recover-incomplete', {}, { timeout: 30000 }).catch(() => null)
       .finally(() => this.recoveryDone())
       .then(() => callCore('media.connection-status', {})).then(saved => {
       if (!saved || saved.provider !== 'google-media') return;
-      runtime.lastStatus = {
-        ...runtime.lastStatus,
-        connected: saved.connected === true,
-        signed_in: saved.connected === true,
-        needs_user_auth: saved.connected !== true,
-        challenged: saved.challenged === true,
-        flow_ready: saved.flow_ready === true,
-        music_signed_in: saved.music_signed_in === true,
-        music_needs_user_auth: saved.music_signed_in !== true,
-        music_ready: saved.music_ready === true,
-        capabilities: saved.capabilities || runtime.lastStatus.capabilities,
-        detail: saved.detail || runtime.lastStatus.detail
-      };
-      runtime.lastRefreshAt = Date.now();
-      runtime.setConsumerState('visual', runtime.lastStatus.connected);
-      runtime.setConsumerState('music', runtime.lastStatus.music_signed_in);
-      const savedAt = Number(saved.updated_at || 0) * 1000;
-      if (saved.challenged === true || saved.connected !== true || Date.now() - savedAt > STALE_STATUS_MS) {
-        runtime.lastRefreshAt = 0;
-        runtime.refreshConnection({ force: true, allowLoad: true }).catch(() => {});
-      }
+      for (const id of ids) this.restoreProfile(this.profiles.get(id), saved);
     }).catch(() => {});
+  }
+
+  // Every account resumes from its last saved state; one never checked, signed
+  // out, challenged or stale is probed again.
+  restoreProfile(runtime, saved) {
+    if (!runtime) return;
+    const own = saved.profiles?.[runtime.profileId];
+    if (!own && runtime.profileId !== 'google') {
+      runtime.refreshConnection({ force: true, allowLoad: true }).catch(() => {});
+      return;
+    }
+    // The built-in account's state was kept at the top level before accounts
+    // had their own records.
+    saved = own ? { ...own, capabilities: saved.capabilities } : saved;
+    runtime.lastStatus = {
+      ...runtime.lastStatus,
+      connected: saved.connected === true,
+      signed_in: saved.connected === true,
+      needs_user_auth: saved.connected !== true,
+      challenged: saved.challenged === true,
+      flow_ready: saved.flow_ready === true,
+      music_signed_in: saved.music_signed_in === true,
+      music_needs_user_auth: saved.music_signed_in !== true,
+      music_ready: saved.music_ready === true,
+      capabilities: saved.capabilities || runtime.lastStatus.capabilities,
+      detail: saved.detail || runtime.lastStatus.detail
+    };
+    runtime.lastRefreshAt = Date.now();
+    runtime.setConsumerState('visual', runtime.lastStatus.connected);
+    runtime.setConsumerState('music', runtime.lastStatus.music_signed_in);
+    const savedAt = Number(saved.updated_at || 0) * 1000;
+    if (saved.challenged === true || saved.connected !== true || Date.now() - savedAt > STALE_STATUS_MS) {
+      runtime.lastRefreshAt = 0;
+      runtime.refreshConnection({ force: true, allowLoad: true }).catch(() => {});
+    }
   }
 
   async refreshProfile(profileId = 'google', options = {}) {
@@ -582,6 +686,29 @@ class GoogleMediaEngine {
     const id = safeProfileId(profileId || 'google');
     this.activeProfileId = id;
     return this.ensureProfile(id).wake(surface === 'music' ? 'music' : 'visual');
+  }
+
+  // Bulk Flow work runs in every enabled Google account at once, each with its
+  // own tabs and Flow projects; all claim from one queue. Flow Music stays on
+  // the active account. An account not verified signed in starts taking jobs
+  // only once a probe confirms it, unless no account is known to work (then
+  // the active one starts as before, so jobs report that sign-in is needed).
+  wakeAll(surface = 'visual') {
+    if (surface === 'music') return this.wake('music', this.activeProfileId);
+    const ids = this.enabledProfiles();
+    const anyWorking = ids.some(id => this.profiles.get(id)?.lastStatus.connected === true);
+    const accounts = ids.map(id => {
+      const fallback = !anyWorking && id === this.activeProfileId;
+      const snapshot = this.ensureProfile(id).wake('visual', { requireConnected: !fallback });
+      return { profile_id: id, connected: snapshot.connected === true, challenged: snapshot.challenged === true,
+        needs_user_auth: snapshot.needs_user_auth, status_checked: snapshot.status_checked !== false };
+    });
+    return {
+      provider: 'google-media', waking: true, wake_surface: 'visual',
+      accounts, tabs_per_account: flowLaneCount(),
+      connected: accounts.some(item => item.connected),
+      needs_user_auth: accounts.every(item => item.needs_user_auth === true)
+    };
   }
 
   async open(profileId = 'google') {
@@ -637,4 +764,4 @@ class GoogleMediaEngine {
   }
 }
 
-module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount };
+module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount, mediaProfiles };

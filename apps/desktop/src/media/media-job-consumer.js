@@ -96,7 +96,7 @@ class Mutex {
 }
 
 class MediaJobConsumer {
-  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null, lane = 0, lanes = 1 }) {
+  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null, lane = 0, lanes = 1, isMain = () => true, onAccountProblem = null }) {
     this.surface = surface;
     this.workerName = workerName;
     // Several Flow tabs (lanes) may work one queue; each has its own page and
@@ -108,6 +108,11 @@ class MediaJobConsumer {
     this.provider = provider;
     this.downloadManager = downloadManager;
     this.profileId = String(profileId || 'google');
+    // Several Google accounts may work the same queue. The main account takes
+    // single jobs; an account that stops working hands its unsubmitted jobs on
+    // (onAccountProblem returns true when another account can take them).
+    this.isMain = isMain;
+    this.onAccountProblem = onAccountProblem;
     this.pollMs = pollMs;
     this.running = false;
     this.busy = false;
@@ -196,7 +201,8 @@ class MediaJobConsumer {
       return;
     }
     const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName,
-      lane: this.lane, lanes: this.lanes, refs_key: this.lastRefsKey }, { timeout: 10000 });
+      lane: this.lane, lanes: this.lanes, refs_key: this.lastRefsKey,
+      profile_id: this.profileId, main: this.isMain() !== false }, { timeout: 10000 });
     if (!job) {
       this.schedule(this.pollMs);
       return;
@@ -221,7 +227,8 @@ class MediaJobConsumer {
       this.schedule(this.pollMs);
       return;
     }
-    const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName }, { timeout: 10000 });
+    const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName,
+      profile_id: this.profileId, main: this.isMain() !== false }, { timeout: 10000 });
     if (!job) {
       this.schedule(this.pollMs);
       return;
@@ -240,6 +247,18 @@ class MediaJobConsumer {
 
   async update(jobId, state, detail, extra) {
     return callCore('media.update-state', { job_id: jobId, state, detail, extra }, { timeout: 15000 });
+  }
+
+  // This account cannot take new work (signed out, challenged, out of
+  // credits). With another account working, the unsubmitted job goes back to
+  // the queue for it instead of failing or waiting for this one.
+  async handOff(job, kind, reason) {
+    if (job.provider_submission?.submitted_at || job.reconcile_required) return false;
+    if (!this.onAccountProblem || this.onAccountProblem(kind, reason) !== true) return false;
+    try {
+      await callCore('media.handoff', { job_id: job.job_id, reason: this.profileId + ': ' + reason }, { timeout: 15000 });
+      return true;
+    } catch { return false; }
   }
 
   async stableProbe(adapter, timeoutMs = 15000) {
@@ -287,12 +306,14 @@ class MediaJobConsumer {
     });
     const classified = adapter.classifyProbe(probe);
     if (classified.challenged) {
-      await callCore('media.connection-update', { patch: { connected: false, challenged: true, needs_user_auth: true, detail: 'Google requires human verification' } });
+      await callCore('media.connection-update', { profile_id: this.profileId, patch: { connected: false, challenged: true, needs_user_auth: true, detail: 'Google requires human verification' } });
+      if (await this.handOff(job, 'challenged', 'Google requires human verification')) return null;
       await this.update(jobId, 'needs_user_auth', 'human_verification');
       return null;
     }
     if (!classified.signedIn) {
-      await callCore('media.connection-update', { patch: { connected: false, needs_user_auth: true, detail: 'Google Media sign-in is required' } });
+      await callCore('media.connection-update', { profile_id: this.profileId, patch: { connected: false, needs_user_auth: true, detail: 'Google Media sign-in is required' } });
+      if (await this.handOff(job, 'signed_out', 'Google Media sign-in is required')) return null;
       await this.update(jobId, 'needs_user_auth', 'login_required');
       return null;
     }
@@ -300,6 +321,7 @@ class MediaJobConsumer {
       throw new Error('rate_limited_before_submission');
     }
     if (classified.creditsExhausted) {
+      if (await this.handOff(job, 'credits', 'Flow credits are exhausted')) return null;
       await this.update(jobId, 'failed', 'credits_exhausted_before_submission');
       return null;
     }
@@ -337,7 +359,8 @@ class MediaJobConsumer {
         ? 'Submitting generation request (' + (this.inFlight.size + 1) + ' running in parallel)'
         : 'Submitting generation request');
       const folder = String(job.request?.project_path || '');
-      const preferred = await callCore('media.flow-project', { project_path: job.request?.project_path, lane: this.lane }, { timeout: 15000 })
+      const preferred = await callCore('media.flow-project', { project_path: job.request?.project_path, lane: this.lane,
+        profile_id: this.profileId }, { timeout: 15000 })
         .catch(() => null);
       const preferredUrl = preferred?.provider_url || (this.lane ? this.laneProjects.get(folder) : null) || null;
       const submitJob = { ...job, preferred_project_url: preferredUrl,
@@ -346,7 +369,7 @@ class MediaJobConsumer {
         allow_navigation: !this.activeDownloads.size };
       try {
         submission = await this.ui.run(() => adapter.submit(submitJob, async pendingSubmission => {
-          submission = { ...pendingSubmission, lane: this.lane };
+          submission = { ...pendingSubmission, lane: this.lane, profile_id: this.profileId };
           ctx.checkpointed = true;
           await callCore('media.patch', { job_id: jobId, patch: {
             provider_submission: submission, reconcile_required: true, submission_phase: 'may_have_submitted'
@@ -358,7 +381,7 @@ class MediaJobConsumer {
         const project = String(this.provider.view?.webContents?.getURL?.() || '').match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1];
         if (this.lane && project) this.laneProjects.set(folder, project);
       }
-      submission = { ...submission, lane: this.lane };
+      submission = { ...submission, lane: this.lane, profile_id: this.profileId };
       await callCore('media.patch', { job_id: jobId, patch: {
         provider: this.surface === 'music' ? 'google-flow-music' : 'google-flow',
         provider_submission: submission, reconcile_required: false, submission_phase: 'submitted'
@@ -674,8 +697,10 @@ class MediaJobConsumer {
       live.map(ctx => ({ ...ctx.job, provider_submission: ctx.submission, request: ctx.job.request })),
       { claimedKeys, allowNavigation: !this.activeDownloads.size, deepJobIds }));
     if (page.state === 'needs_user_auth') {
-      await callCore('media.connection-update', { patch: { connected: false, needs_user_auth: true,
+      await callCore('media.connection-update', { profile_id: this.profileId, patch: { connected: false, needs_user_auth: true,
         challenged: page.reason === 'human_verification', detail: 'Google Media sign-in is required' } }).catch(() => {});
+      // Submitted jobs wait for this account; new work goes to the others.
+      this.onAccountProblem?.(page.reason === 'human_verification' ? 'challenged' : 'signed_out', 'Google Media sign-in is required');
       for (const ctx of live) {
         this.finish(ctx);
         await this.update(ctx.jobId, 'needs_user_auth', page.reason).catch(() => {});
@@ -685,7 +710,10 @@ class MediaJobConsumer {
     if (page.state !== 'ok') return;
     if (page.rate_limited) this.backoff('Flow reported a rate limit', 60000);
     // Credits ran out for new work; accepted generations may still finish.
-    if (page.credits_exhausted) this.backoff('Flow reported exhausted credits', 5 * 60 * 1000);
+    if (page.credits_exhausted) {
+      this.backoff('Flow reported exhausted credits', 5 * 60 * 1000);
+      this.onAccountProblem?.('credits', 'Flow reported exhausted credits');
+    }
 
     for (const ctx of live) {
       const state = states.get(ctx.jobId);

@@ -687,6 +687,8 @@ def create_job(root, request, *, operation=None, source_asset=None, batch_id=Non
         "claimed_at": None,
         "reconcile_required": False,
         "operation": operation,
+        # An edit runs in the Google account whose Flow project holds its source.
+        "source_profile_id": ((source_asset or {}).get("metadata") or {}).get("google_profile_id") if operation else None,
         "request": normalized,
         "resolved_references": refs,
         "parent_asset_ids": parent_ids,
@@ -836,6 +838,8 @@ def public_job(job):
         "prompt_preview": str(job.get("request", {}).get("prompt") or "")[:160],
         "max_parallel": job.get("request", {}).get("max_parallel"),
         "lane": (job.get("provider_submission") or {}).get("lane"),
+        "profile_id": _handler(job)[0],
+        "handled_by": _handled_by(job),
         "operation": job.get("operation"),
         "project_path": job.get("request", {}).get("project_path"),
         "provider_surface": job.get("provider_surface"),
@@ -916,6 +920,14 @@ def status_many(root, job_ids):
 _FLOW_PROJECT_RE = re.compile(r"^(https://flow\.google\.com/project/[A-Za-z0-9-]+)")
 
 
+DEFAULT_PROFILE = "google"
+
+
+def _profile_id(value):
+    value = str(value or "").strip()
+    return value if re.fullmatch(r"[A-Za-z0-9._-]{1,80}", value) else DEFAULT_PROFILE
+
+
 def _job_lane(job):
     """Flow tab (lane) a job was submitted from; jobs from before lanes are lane 0."""
     try:
@@ -924,31 +936,59 @@ def _job_lane(job):
         return 0
 
 
+def _job_profile(job):
+    """Google account a job was submitted from. Its Flow project, results and
+    downloads exist only in that account. Jobs from before several accounts ran
+    were all submitted by the default account."""
+    return _profile_id((job.get("provider_submission") or {}).get("profile_id"))
+
+
+def _handler(job):
+    """(profile, lane) working on a job: its submitter, else its current claimant."""
+    submission = job.get("provider_submission") or {}
+    if submission.get("submitted_at") or submission.get("provider_url"):
+        return _job_profile(job), _job_lane(job)
+    if job.get("claimed_profile") and job.get("state") not in {"queued", "cancelled"}:
+        try:
+            lane = max(0, int(job.get("claimed_lane") or 0))
+        except (TypeError, ValueError):
+            lane = 0
+        return _profile_id(job["claimed_profile"]), lane
+    return None, None
+
+
+def _handled_by(job):
+    profile, lane = _handler(job)
+    return f"{profile} tab {lane + 1}" if profile else None
+
+
 def _refs_key(job):
     refs = job.get("resolved_references") or []
     return "|".join(sorted(str(item.get("asset_id") or item.get("path") or "")
                            for item in refs if isinstance(item, dict)))
 
 
-def flow_project_for(root, project_path, lane=0):
+def flow_project_for(root, project_path, lane=0, profile_id=None):
     """Most recent Flow project used by jobs of this local project folder.
 
     Keeping one folder in one Flow project keeps its uploads and results
     together, so reference pickers see them and no empty projects are created.
-    Each extra Flow tab (lane) keeps its own project for the folder.
+    Each Google account and each of its Flow tabs (lanes) keeps its own project
+    for the folder: another account's project URL only opens a 404.
     """
     try:
         lane = max(0, int(lane or 0))
     except (TypeError, ValueError):
         lane = 0
+    profile = _profile_id(profile_id)
     wanted = ""
     if project_path:
         try:
             wanted = str(Path(project_path).expanduser().resolve()).lower()
         except (OSError, ValueError, TypeError):
-            return {"provider_url": None, "lane": lane}
+            return {"provider_url": None, "lane": lane, "profile_id": profile}
     elif lane == 0:
-        return {"provider_url": None, "lane": lane}
+        return {"provider_url": None, "lane": lane, "profile_id": profile}
     # The project holding most of the folder's results wins; recency breaks ties.
     usage = {}
     for path in _jobs_dir(root).glob("media-*.json"):
@@ -957,7 +997,7 @@ def flow_project_for(root, project_path, lane=0):
             continue
         if str((job.get("request") or {}).get("project_path") or "").lower() != wanted:
             continue
-        if _job_lane(job) != lane:
+        if _job_lane(job) != lane or _job_profile(job) != profile:
             continue
         submission = job.get("provider_submission") or {}
         match = _FLOW_PROJECT_RE.match(str(submission.get("provider_url") or ""))
@@ -966,9 +1006,9 @@ def flow_project_for(root, project_path, lane=0):
         count, latest = usage.get(match.group(1), (0, 0.0))
         usage[match.group(1)] = (count + 1, max(latest, float(submission.get("submitted_at") or 0)))
     if not usage:
-        return {"provider_url": None, "jobs": 0, "lane": lane}
+        return {"provider_url": None, "jobs": 0, "lane": lane, "profile_id": profile}
     url, (count, latest) = max(usage.items(), key=lambda item: item[1])
-    return {"provider_url": url, "jobs": count, "submitted_at": latest or None, "lane": lane}
+    return {"provider_url": url, "jobs": count, "submitted_at": latest or None, "lane": lane, "profile_id": profile}
 
 
 def claimed_result_keys(root, provider_url=None):
@@ -1020,6 +1060,33 @@ def release_job(root, job_id, *, delay=15.0, reason=None):
         job["retry_after"] = time.time() + max(0.0, min(float(delay or 0), 600.0))
         job.setdefault("history", []).append(_event(
             "queued", "Provider is busy; waiting for a free generation slot" + (": " + str(reason)[:300] if reason else "")))
+        _save_job(root, job)
+        return public_job(job)
+
+
+def handoff_job(root, job_id, reason=None):
+    """Return a claimed, never-submitted job to the queue for another account.
+
+    Used when the claiming account is signed out, challenged or out of credits
+    while other accounts can work. Unlike release_job it spends no retry budget:
+    the job itself did nothing wrong."""
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        if job.get("state") not in {"preparing", "waiting_for_browser", "submitting"}:
+            raise ValueError(f"media job cannot be handed off from state {job.get('state')}")
+        if _possible_submission(job) or job.get("submission_phase") not in {None, "preparing"}:
+            raise ValueError("media job may have been submitted; only its own account can finish it")
+        job["state"] = "queued"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["claimed_profile"] = None
+        job["claimed_lane"] = None
+        job["attempt"] = max(0, int(job.get("attempt") or 0) - 1)
+        if job.get("submission_phase") is None and any(
+                e.get("state") == "submitting" for e in job.get("history", [])):
+            job["submission_phase"] = "preparing"
+        job.setdefault("history", []).append(_event(
+            "queued", "Handed to another Google account" + (": " + str(reason)[:300] if reason else "")))
         _save_job(root, job)
         return public_job(job)
 
@@ -1134,14 +1201,20 @@ def append_job_metadata(root, job_id, patch):
 _BATCH_ACTIVE_STATES = {"preparing", "submitting", "generating", "downloading", "extracting_audio", "organizing"}
 
 
-def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None):
-    """Claim the next job for one Flow tab (lane).
+def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profile_id=None, main=None):
+    """Claim the next job for one Flow tab (lane) of one Google account (profile).
 
-    Several tabs claim from one queue: a batch's max_parallel caps its running
-    jobs across all tabs, a job already submitted is resumed only by the tab
-    whose project holds it, and a tab prefers the batch's jobs that use the
-    reference images it has attached already (swapping them is the slow part).
+    Every tab of every signed-in account claims from one queue. A batch's
+    max_parallel caps its running jobs per account (each account has its own
+    Flow concurrency and credits). A job already submitted is resumed only by
+    the account and tab whose project holds it. Single jobs run in the main
+    account's first tab and edits in the account that made their source; extra
+    tabs and accounts take batch work. A tab prefers the batch's jobs that use
+    the reference images it has attached already (swapping them is slow).
     """
+    profile = _profile_id(profile_id)
+    if main is None:
+        main = profile == DEFAULT_PROFILE
     surface = str(surface or "").strip().lower()
     if surface not in {"visual", "music"}:
         raise ValueError("surface must be visual or music")
@@ -1161,7 +1234,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None):
                 continue
             jobs.append(job)
             if job.get("batch_id") and job.get("state") in _BATCH_ACTIVE_STATES:
-                active[job["batch_id"]] = active.get(job["batch_id"], 0) + 1
+                key = (job["batch_id"], _handler(job)[0] or DEFAULT_PROFILE)
+                active[key] = active.get(key, 0) + 1
         for job in jobs:
             state = job.get("state")
             if state == "queued":
@@ -1182,17 +1256,24 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None):
             if job.get("request", {}).get("surface") != surface:
                 continue
             submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-            # Extra tabs take batch work only: a single job or an edit of an
-            # existing result stays in the folder's main Flow project.
-            if lane > 0 and not submitted and (not job.get("batch_id") or job.get("operation")):
-                continue
             if submitted:
+                # Only the submitting account can see, match and download it.
+                if _job_profile(job) != profile:
+                    continue
                 owner = _job_lane(job)
                 if owner != lane and owner < lanes:
                     continue
+            elif job.get("operation"):
+                # An edit needs its source result, which lives in one account.
+                if lane > 0 or _profile_id(job.get("source_profile_id")) != profile:
+                    continue
+            elif not job.get("batch_id"):
+                # A single job stays in the folder's main Flow project.
+                if lane > 0 or not main:
+                    continue
             else:
                 limit = (job.get("request") or {}).get("max_parallel")
-                if job.get("batch_id") and limit and active.get(job["batch_id"], 0) >= int(limit):
+                if limit and active.get((job["batch_id"], profile), 0) >= int(limit):
                     continue
             candidates.append(job)
         if not candidates:
@@ -1206,6 +1287,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None):
         job["state"] = "preparing"
         job["claimed_by"] = str(worker or surface)[:120]
         job["claimed_at"] = time.time()
+        job["claimed_profile"] = profile
+        job["claimed_lane"] = lane
         job["attempt"] = int(job.get("attempt") or 0) + 1
         job.setdefault("history", []).append(_event("preparing", f"Claimed by {job['claimed_by']}"))
         _save_job(root, job)
@@ -1391,7 +1474,9 @@ def connection_status(root):
     data = _read_json(_connection_file(root), {})
     if not isinstance(data, dict):
         data = {}
+    profiles = data.get("profiles") if isinstance(data.get("profiles"), dict) else {}
     return {
+        "profiles": {str(key): dict(value) for key, value in profiles.items() if isinstance(value, dict)},
         "provider": "google-media",
         "connected": data.get("connected") is True,
         "needs_user_auth": data.get("needs_user_auth") is True,
@@ -1405,7 +1490,12 @@ def connection_status(root):
     }
 
 
-def write_connection_status(root, patch):
+def write_connection_status(root, patch, profile_id=None):
+    """Record a Google Media connection observation.
+
+    With profile_id it is one account's state (kept under profiles); the top
+    level then says whether any account can work, so one signed-out account
+    does not report Flow as disconnected while others run."""
     current = _read_json(_connection_file(root), {})
     if not isinstance(current, dict):
         current = {}
@@ -1413,6 +1503,23 @@ def write_connection_status(root, patch):
         "connected", "needs_user_auth", "challenged", "flow_ready", "music_ready", "music_signed_in",
         "capabilities", "detail", "flow_url", "music_url",
     }
+    if profile_id:
+        profiles = current.get("profiles") if isinstance(current.get("profiles"), dict) else {}
+        record = dict(profiles.get(_profile_id(profile_id)) or {})
+        for key, value in (patch or {}).items():
+            if key in allowed and key != "capabilities":
+                record[key] = value
+        record["updated_at"] = time.time()
+        profiles[_profile_id(profile_id)] = record
+        current["profiles"] = profiles
+        working = [item for item in profiles.values() if item.get("connected") is True and item.get("challenged") is not True]
+        patch = {**{key: value for key, value in (patch or {}).items() if key == "capabilities"},
+                 "connected": bool(working), "needs_user_auth": not working,
+                 "challenged": any(item.get("challenged") is True for item in profiles.values()),
+                 "flow_ready": any(item.get("flow_ready") is True for item in working),
+                 "music_signed_in": any(item.get("music_signed_in") is True for item in profiles.values()),
+                 "music_ready": any(item.get("music_ready") is True for item in profiles.values()),
+                 "detail": f"{len(working)} Google Media account(s) connected" if working else record.get("detail")}
     for key, value in (patch or {}).items():
         if key in allowed:
             current[key] = value

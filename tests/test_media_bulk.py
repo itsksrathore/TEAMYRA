@@ -199,6 +199,113 @@ class MediaBulkTests(unittest.TestCase):
                          'https://flow.google.com/project/tab2')
         self.assertIsNone(media_engine.flow_project_for(self.root, str(self.project), lane=2)['provider_url'])
 
+    # --- several Google accounts ------------------------------------------------
+
+    def submit(self, job_id, profile=None, lane=0, url="https://flow.google.com/project/p", state="waiting_for_browser"):
+        submission = {"submitted_at": 1.0, "lane": lane, "provider_url": url}
+        if profile:
+            submission["profile_id"] = profile
+        self.edit(job_id, state=state, reconcile_required=True, provider_submission=submission)
+
+    def test_each_account_keeps_its_own_flow_project(self):
+        first, second = (job["job_id"] for job in media_engine.create_batch(self.root, [self.request("a"), self.request("b")])["jobs"])
+        self.submit(first, None, 0, "https://flow.google.com/project/main-google", state="completed")
+        self.submit(second, "acct2", 0, "https://flow.google.com/project/main-acct2", state="completed")
+        folder = str(self.project)
+        self.assertEqual(media_engine.flow_project_for(self.root, folder)["provider_url"],
+                         "https://flow.google.com/project/main-google", "jobs from before accounts are the built-in account's")
+        self.assertEqual(media_engine.flow_project_for(self.root, folder, 0, "acct2")["provider_url"],
+                         "https://flow.google.com/project/main-acct2")
+        self.assertIsNone(media_engine.flow_project_for(self.root, folder, 0, "acct3")["provider_url"],
+                          "an account never opens another account's project (it would 404)")
+        self.assertIsNone(media_engine.flow_project_for(self.root, folder, 1, "acct2")["provider_url"])
+
+    def test_submitted_job_resumes_only_in_its_own_account_and_tab(self):
+        old, new = (job["job_id"] for job in media_engine.create_batch(self.root, [self.request("a"), self.request("b")])["jobs"])
+        self.submit(old, None, 1)
+        self.submit(new, "acct2", 1)
+        claim = lambda profile, lane, lanes=3: media_engine.claim_next_job(
+            self.root, "visual", f"{profile}-{lane}", lane=lane, lanes=lanes, profile_id=profile)
+        self.assertIsNone(claim("acct2", 0))
+        self.assertIsNone(claim("acct3", 1), "the same tab number in another account cannot see the result")
+        self.assertEqual(claim("google", 1)["job_id"], old)
+        self.assertEqual(claim("acct2", 1)["job_id"], new)
+
+    def test_submitted_job_of_a_removed_tab_stays_in_its_account(self):
+        job_id = media_engine.create_batch(self.root, [self.request("a")])["jobs"][0]["job_id"]
+        self.submit(job_id, "acct2", 2)
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "g", lane=0, lanes=1, profile_id="google"))
+        self.assertEqual(media_engine.claim_next_job(self.root, "visual", "a", lane=0, lanes=1, profile_id="acct2")["job_id"], job_id)
+
+    def test_batch_limit_applies_per_account(self):
+        media_engine.create_batch(self.root, [self.request(str(i)) for i in range(4)], max_parallel=1)
+        claim = lambda profile, lane=0: media_engine.claim_next_job(
+            self.root, "visual", f"{profile}-{lane}", lane=lane, lanes=3, profile_id=profile)
+        first = claim("google")
+        self.assertIsNotNone(first)
+        self.assertIsNone(claim("google", 1), "one account stays within max_parallel")
+        second, third = claim("acct2"), claim("acct3")
+        self.assertIsNotNone(second, "another account has its own allowance")
+        self.assertIsNotNone(third)
+        self.assertEqual(len({first["job_id"], second["job_id"], third["job_id"]}), 3)
+
+    def test_single_jobs_go_to_the_main_account_and_edits_to_their_source(self):
+        media_engine.create_job(self.root, self.request("single"))
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "a", profile_id="acct2", main=False))
+        self.assertIsNotNone(media_engine.claim_next_job(self.root, "visual", "a", profile_id="acct2", main=True),
+                             "when the built-in account is down another becomes main")
+        edit = media_engine.create_job(self.root, self.request("edit"), operation="video_extend",
+                                       source_asset={"asset_id": "TYR-VID-000001", "metadata": {"google_profile_id": "acct3"}})
+        self.assertEqual(edit and media_engine.load_job(self.root, edit["job_id"])["source_profile_id"], "acct3")
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "g", profile_id="google", main=True))
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "c", lane=1, lanes=3, profile_id="acct3"))
+        self.assertEqual(media_engine.claim_next_job(self.root, "visual", "c", profile_id="acct3")["job_id"], edit["job_id"])
+
+    def test_handoff_moves_unsubmitted_work_to_another_account(self):
+        media_engine.create_batch(self.root, [self.request("a")])
+        job = media_engine.claim_next_job(self.root, "visual", "acct2-0", profile_id="acct2")
+        self.assertEqual(media_engine.public_job(media_engine.load_job(self.root, job["job_id"]))["handled_by"], "acct2 tab 1")
+        handed = media_engine.handoff_job(self.root, job["job_id"], "signed out")
+        self.assertEqual(handed["status"], "queued")
+        self.assertIsNone(handed["handled_by"])
+        stored = media_engine.load_job(self.root, job["job_id"])
+        self.assertEqual(stored["attempt"], 0, "a hand-off spends no retry budget")
+        self.assertNotIn("backpressure_releases", stored.get("recovery") or {})
+        again = media_engine.claim_next_job(self.root, "visual", "google-1", lane=1, lanes=3, profile_id="google")
+        self.assertEqual(again["job_id"], job["job_id"])
+        self.edit(job["job_id"], submission_phase="may_have_submitted")
+        with self.assertRaises(ValueError):
+            media_engine.handoff_job(self.root, job["job_id"])
+
+    def test_status_shows_the_account_and_tab_of_each_job(self):
+        job_id = media_engine.create_batch(self.root, [self.request("a")])["jobs"][0]["job_id"]
+        self.submit(job_id, "acct2", 2, state="generating")
+        row = media_engine.job_status(self.root, job_id, compact=True)
+        self.assertEqual((row["profile_id"], row["lane"], row["handled_by"]), ("acct2", 2, "acct2 tab 3"))
+        batch = media_engine.batch_status(self.root, row["batch_id"])
+        self.assertEqual(batch["jobs"][0]["handled_by"], "acct2 tab 3")
+
+    def test_restart_keeps_each_submission_with_its_account(self):
+        first, second = (job["job_id"] for job in media_engine.create_batch(self.root, [self.request("a"), self.request("b")])["jobs"])
+        self.submit(first, "acct2", 1, state="generating")
+        self.edit(second, state="submitting", claimed_profile="acct3", claimed_lane=0)
+        report = media_engine.recover_incomplete_jobs(self.root)
+        self.assertEqual(report["reconcile_required"], [first])
+        self.assertEqual(report["requeued"], [second])
+        other = media_engine.claim_next_job(self.root, "visual", "g", lane=1, lanes=3, profile_id="google")
+        self.assertEqual(other["job_id"], second, "the same tab of another account takes only the unsubmitted job")
+        resumed = media_engine.claim_next_job(self.root, "visual", "a", lane=1, lanes=3, profile_id="acct2")
+        self.assertEqual(resumed["job_id"], first, "a submitted job resumes before new work, in its own account")
+
+    def test_connection_is_kept_per_account(self):
+        media_engine.write_connection_status(self.root, {"connected": True, "flow_ready": True}, "google")
+        media_engine.write_connection_status(self.root, {"connected": False, "needs_user_auth": True}, "acct2")
+        status = media_engine.connection_status(self.root)
+        self.assertTrue(status["connected"], "one signed-out account does not disconnect Flow")
+        self.assertFalse(status["profiles"]["acct2"]["connected"])
+        media_engine.write_connection_status(self.root, {"connected": True, "challenged": True}, "google")
+        self.assertFalse(media_engine.connection_status(self.root)["connected"])
+
     def test_restart_recovery_leaves_a_live_workers_jobs_alone(self):
         job_id = self.claimed()
         media_engine.append_job_metadata(self.root, job_id, {'submission_phase': 'preparing'})

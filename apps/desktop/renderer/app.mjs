@@ -1133,7 +1133,7 @@ function renderBulkProgress(status) {
     return `<li title="${escapeHtml(title)}">
       <span class="bulk-index">${index + 1}</span>
       <span class="bulk-prompt">${escapeHtml(job.prompt_preview || job.job_id)}</span>
-      <span class="bulk-lane">${Number.isInteger(job.lane) && state !== 'queued' ? 'Tab ' + (job.lane + 1) : ''}</span>
+      <span class="bulk-lane" title="${escapeHtml(job.handled_by || '')}">${job.handled_by && state !== 'queued' ? escapeHtml(job.handled_by.replace(' tab ', ' · tab ')) : ''}</span>
       <span class="bulk-chip ${tone}">${escapeHtml(job.asset?.asset_id || BULK_STATE_LABELS[state] || state)}</span>
     </li>`;
   }).join('');

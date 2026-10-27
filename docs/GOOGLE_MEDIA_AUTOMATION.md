@@ -119,6 +119,55 @@ Quick fixes in the same change:
   place (240 s second wait).
 - Each submission records per-step timings (`provider_submission.stage_ms`).
 
+### Every Google account at once (2026-10-27)
+
+Bulk Flow work runs in every enabled, signed-in Google Media account at the
+same time (Settings → Google Media; `enabled` in each account's
+`teamyra-profile.json`). Each account has its own Flow tabs, so capacity is
+accounts × tabs (`media_guide` → `capacity.flow_accounts`, `flow_tabs`).
+
+- **Wake.** `media_generate`, `media_batch`, recovery calls and the Bulk dialog
+  wake every enabled account (`media.wake` without `profile_id`). An account
+  starts claiming only after a probe confirms it is signed in and unchallenged.
+  If no account is known to work, the active one starts as before, so jobs
+  report that sign-in is needed. Flow Music stays on the active account. At
+  desktop start every enabled account resumes from its saved state.
+- **Ownership is (account, tab).** A Flow project, its results and its
+  downloads exist only in the account that made them; another account opening
+  that URL gets Flow's 404 page. Submissions record `provider_submission.
+  profile_id` next to `lane`; the folder's Flow project is looked up per
+  account and tab; and a submitted job (after a restart, a recovery or a
+  sign-in) is reconciled and downloaded only by the account and tab that
+  submitted it. Jobs from before this change belong to the built-in account
+  `google`.
+- **Who takes what.** All accounts claim from one queue. A batch's
+  `max_parallel` caps its running jobs per account (each account has its own
+  Flow concurrency and credits). Single jobs go to the main account's first tab
+  (the active account while it works, else the first working one); edits go to
+  the account that made the source asset (`asset.metadata.google_profile_id`).
+- **An account that stops working.** If an account is found signed out,
+  challenged or out of credits while another account works, it is parked: its
+  claimed, never-submitted job goes straight back to the queue
+  (`media.handoff`, no retry budget spent) and other accounts take it.
+  Signed-out/challenged accounts stop claiming until a later wake or sign-in
+  probe finds them working; an account out of credits pauses new claims for 30
+  minutes. Jobs it already submitted wait for it (no other account can download
+  them) and resume when it is back (`media_resume_auth`). With one account,
+  behaviour is unchanged.
+- **Connection status** is kept per account (`media/connection.json` →
+  `profiles`); the top level says whether any account works, so one signed-out
+  account no longer reports Flow as disconnected.
+- **Reporting.** `media_status` and batch rows show `profile_id`, `lane` and
+  `handled_by` (e.g. `google-media-2-479f tab 2`); the Bulk dialog shows the
+  same. The desktop status lists each account's tabs, `working` flag and park
+  reason.
+
+Before this change the added accounts already started their consumers when
+they signed in, but looked up Flow projects by tab number only. They opened the
+built-in account's project URLs, got Flow's 404, and failed jobs at
+`workspace_ready` ("Flow composer unavailable") before any Generate click (no
+credits spent, but retry budgets used up).
+
 ### Reliability under heavy bulk use (2026-10-18)
 
 Real teaser batches (~150 jobs) exposed failures that are now handled:

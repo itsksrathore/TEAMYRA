@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bridge"))
@@ -19,6 +20,26 @@ class MediaGuideTests(unittest.TestCase):
         answer = server.tool_call("media_guide", {})
         self.assertIn("codex_image_batch", answer["guide"])
         self.assertIn("flow_tabs", answer["capacity"])
+
+    def test_capacity_counts_accounts_times_tabs(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, enabled in (("acct-a", True), ("acct-b", True), ("acct-off", False)):
+                (root / "profiles" / "google-media" / name).mkdir(parents=True)
+                (root / "profiles" / "google-media" / name / "teamyra-profile.json").write_text(
+                    json.dumps({"name": name, "enabled": enabled}), encoding="utf-8")
+            (root / "media").mkdir()
+            (root / "media" / "connection.json").write_text(json.dumps({"connected": True, "profiles": {
+                "acct-a": {"connected": True}, "acct-b": {"connected": True, "challenged": True},
+                "acct-off": {"connected": True}}}), encoding="utf-8")
+            with patch.dict("os.environ", {"TEAMYRA_FLOW_LANES": "3"}):
+                result = media_guide.capacity(root)
+        self.assertEqual([item["profile_id"] for item in result["flow_accounts"]], ["google", "acct-a", "acct-b", "acct-off"])
+        self.assertEqual(result["flow_accounts_working"], 2, "built-in (top-level state) and acct-a; challenged and disabled do not count")
+        self.assertEqual(result["flow_tabs_per_account"], 3)
+        self.assertEqual(result["flow_tabs"], 6)
 
     def test_worker_image_jobs_get_a_hint(self):
         task = "Follow 00_bible/CHARSHEET_TASK.md. Use your BUILT-IN IMAGE GENERATION TOOL (gpt-image / imagegen) only."

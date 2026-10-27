@@ -350,6 +350,10 @@ function fakeCore(temp, jobs) {
       case 'media.patch': Object.assign(record, args.patch); return record;
       case 'media.prepare-output': return { path: path.join(temp, args.job_id + '.mp4'), format: 'mp4' };
       case 'media.register-asset': record.state = 'completed'; record.asset_id = 'TYR-VID-' + String(++assets).padStart(6, '0'); return { asset_id: record.asset_id };
+      case 'media.handoff':
+        record.state = 'queued';
+        record.handed_off = (record.handed_off || 0) + 1;
+        return record;
       case 'media.release':
         record.state = 'queued';
         record.released = (record.released || 0) + 1;
@@ -673,6 +677,83 @@ async function laneTests(temp) {
   assert.equal(retryCore.records.get('retry-0').state, 'completed');
 }
 
+// Several Google accounts work one queue: each claims, finds its Flow project
+// and records its submissions as itself, and hands unsubmitted work on when it
+// cannot take it.
+async function accountTests(temp) {
+  const jobs = Array.from({ length: 4 }, (_, index) => ({
+    job_id: 'acct-' + index, created_at: index, batch_id: 'batch-acct',
+    request: { type: 'video', prompt: 'account scene ' + index, project_path: 'D:/folder', generation_settings: { download_quality: 'source' } }
+  }));
+  const { core: base, records } = fakeCore(temp, jobs);
+  const claims = [];
+  const lookups = [];
+  const core = async (name, args = {}) => {
+    if (name === 'media.claim') claims.push({ profile: args.profile_id, main: args.main });
+    if (name === 'media.flow-project') {
+      lookups.push(args.profile_id);
+      return { provider_url: 'https://flow.google.com/project/' + args.profile_id };
+    }
+    return base(name, args);
+  };
+  const { MediaJobConsumer } = loadConsumer(core);
+  const adapter = profile => ({
+    probe: async () => ({ buttonLabels: [] }),
+    classifyProbe: () => ({ signedIn: true }),
+    capabilities: async () => ({ video: true }),
+    submit: async (job, checkpoint) => {
+      assert.equal(job.preferred_project_url, 'https://flow.google.com/project/' + profile, 'each account opens its own Flow project');
+      const submission = { submitted_at: Date.now() / 1000, provider_url: job.preferred_project_url, baseline_failure_signals: 0 };
+      await checkpoint(submission);
+      return submission;
+    },
+    generationStates: async list => ({ page: { state: 'ok', failure_signals: 0 }, states: new Map(list.map(job => [job.job_id, { state: 'generating' }])) })
+  });
+  const downloadManager = { expect: () => new Promise(() => {}), cancelJob() {} };
+  const consumers = ['google', 'acct2'].map(profileId => new MediaJobConsumer({ surface: 'visual', downloadManager, pollMs: 15, monitorMs: 15,
+    profileId, isMain: () => profileId === 'google',
+    provider: { adapter: adapter(profileId), ensureLoaded: async () => {}, destroy() {},
+      view: { webContents: { id: 40, getURL: () => 'https://flow.google.com/project/' + profileId } } } }));
+  consumers.forEach(consumer => consumer.start());
+  await until(() => [...records.values()].every(item => item.state === 'generating'), 'both accounts to submit the batch');
+  consumers.forEach(consumer => consumer.stop());
+  assert.deepEqual([...new Set(claims.map(item => item.profile))].sort(), ['acct2', 'google'], 'each account claims as itself');
+  assert.ok(claims.every(item => item.main === (item.profile === 'google')), 'only the main account asks for single jobs');
+  assert.deepEqual([...new Set(lookups)].sort(), ['acct2', 'google']);
+  for (const record of records.values()) {
+    const submission = record.provider_submission;
+    assert.equal(submission.provider_url, 'https://flow.google.com/project/' + submission.profile_id,
+      'a submission records the account whose project holds it');
+  }
+  for (const record of records.values()) record.state = 'completed';
+  await until(() => consumers.every(consumer => !consumer.inFlight.size), 'account monitors to drain');
+
+  // A signed-out (or out of credits) account hands its unsubmitted job on
+  // while another works; alone, the job waits for sign-in as before.
+  const probes = [
+    ['signed_out', { signedIn: false }, 'needs_user_auth'],
+    ['challenged', { signedIn: false, challenged: true }, 'needs_user_auth'],
+    ['credits', { signedIn: true, creditsExhausted: true }, 'failed']
+  ];
+  for (const [kind, classified, aloneState] of probes) {
+    for (const others of [true, false]) {
+      const parked = fakeCore(temp, [{ job_id: 'park-' + kind, created_at: 0, batch_id: 'b', request: { type: 'video', prompt: 'p' } }]);
+      const reported = [];
+      const loaded = loadConsumer(parked.core);
+      const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager, profileId: 'acct3',
+        onAccountProblem: (problem, reason) => { reported.push(problem); return others; },
+        provider: { ensureLoaded: async () => {}, destroy() {},
+          adapter: { probe: async () => ({ buttonLabels: [], url: 'https://accounts.google.com/v3/signin' }), classifyProbe: () => classified } } });
+      const job = { ...parked.records.get('park-' + kind), state: 'preparing' };
+      assert.equal(await consumer.prepareAndSubmit(job), null);
+      assert.deepEqual(reported, [kind]);
+      const record = parked.records.get('park-' + kind);
+      assert.equal(record.state, others ? 'queued' : aloneState, kind + (others ? ' hands the job on' : ' alone keeps the old behaviour'));
+      assert.equal(Boolean(record.handed_off), others);
+    }
+  }
+}
+
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-media-bulk-'));
   try {
@@ -680,6 +761,7 @@ async function main() {
     await adapterTests();
     await pipelineTests(temp);
     await laneTests(temp);
+    await accountTests(temp);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
