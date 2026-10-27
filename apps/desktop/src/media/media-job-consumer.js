@@ -21,6 +21,11 @@ const OVERDUE_MIN_MS = 150 * 1000;
 const NO_RESULT_MIN_MS = 6 * 60 * 1000;
 const DEEP_SEARCH_EVERY_MS = 60 * 1000;
 const MONITOR_MS = 2500;
+// Upscaled downloads land within ~2 minutes (p97 105 s, max ~210 s). One that
+// has not arrived by then is usually lost on Flow's side; clicking Download
+// again is faster than waiting out a long timeout and full recovery.
+const DOWNLOAD_WAIT_MS = 150 * 1000;
+const DOWNLOAD_RETRY_WAIT_MS = 240 * 1000;
 const MONITOR_MAX_ERRORS = 12;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
@@ -91,9 +96,15 @@ class Mutex {
 }
 
 class MediaJobConsumer {
-  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null }) {
+  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null, lane = 0, lanes = 1 }) {
     this.surface = surface;
     this.workerName = workerName;
+    // Several Flow tabs (lanes) may work one queue; each has its own page and
+    // its own Flow project per folder.
+    this.lane = Math.max(0, Number(lane) || 0);
+    this.lanes = Math.max(1, Number(lanes) || 1);
+    this.lastRefsKey = '';
+    this.laneProjects = new Map();
     this.provider = provider;
     this.downloadManager = downloadManager;
     this.profileId = String(profileId || 'google');
@@ -134,6 +145,9 @@ class MediaJobConsumer {
     const phases = {};
     for (const ctx of this.inFlight.values()) phases[ctx.phase] = (phases[ctx.phase] || 0) + 1;
     return {
+      lane: this.lane,
+      url: this.provider.view?.webContents?.getURL?.() || '',
+      submitting: this.submitting,
       pipelined: this.pipeline,
       in_flight: this.inFlight.size,
       phases,
@@ -181,11 +195,13 @@ class MediaJobConsumer {
       this.schedule(Date.now() < this.pausedUntil ? Math.min(this.pollMs, this.pausedUntil - Date.now() + 50) : this.pollMs);
       return;
     }
-    const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName }, { timeout: 10000 });
+    const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName,
+      lane: this.lane, lanes: this.lanes, refs_key: this.lastRefsKey }, { timeout: 10000 });
     if (!job) {
       this.schedule(this.pollMs);
       return;
     }
+    if (typeof job.refs_key === 'string') this.lastRefsKey = job.refs_key;
     this.requestedParallel = clampParallel(job.request?.max_parallel, this.defaultParallel);
     this.submitting = true;
     this.refreshBusy();
@@ -320,17 +336,29 @@ class MediaJobConsumer {
       await this.update(jobId, 'submitting', this.inFlight.size
         ? 'Submitting generation request (' + (this.inFlight.size + 1) + ' running in parallel)'
         : 'Submitting generation request');
-      const preferred = await callCore('media.flow-project', { project_path: job.request?.project_path }, { timeout: 15000 })
+      const folder = String(job.request?.project_path || '');
+      const preferred = await callCore('media.flow-project', { project_path: job.request?.project_path, lane: this.lane }, { timeout: 15000 })
         .catch(() => null);
-      const submitJob = { ...job, preferred_project_url: preferred?.provider_url || null,
+      const preferredUrl = preferred?.provider_url || (this.lane ? this.laneProjects.get(folder) : null) || null;
+      const submitJob = { ...job, preferred_project_url: preferredUrl,
+        // An extra tab starts its own project only when core confirmed it has none.
+        create_new_project: this.lane > 0 && !preferredUrl && Boolean(preferred),
         allow_navigation: !this.activeDownloads.size };
-      submission = await this.ui.run(() => adapter.submit(submitJob, async pendingSubmission => {
-        submission = pendingSubmission;
-        ctx.checkpointed = true;
-        await callCore('media.patch', { job_id: jobId, patch: {
-          provider_submission: pendingSubmission, reconcile_required: true, submission_phase: 'may_have_submitted'
-        }});
-      }));
+      try {
+        submission = await this.ui.run(() => adapter.submit(submitJob, async pendingSubmission => {
+          submission = { ...pendingSubmission, lane: this.lane };
+          ctx.checkpointed = true;
+          await callCore('media.patch', { job_id: jobId, patch: {
+            provider_submission: submission, reconcile_required: true, submission_phase: 'may_have_submitted'
+          }});
+        }));
+      } finally {
+        // Remember the tab's project even if this submission failed, so the
+        // next job does not create yet another one.
+        const project = String(this.provider.view?.webContents?.getURL?.() || '').match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1];
+        if (this.lane && project) this.laneProjects.set(folder, project);
+      }
+      submission = { ...submission, lane: this.lane };
       await callCore('media.patch', { job_id: jobId, patch: {
         provider: this.surface === 'music' ? 'google-flow-music' : 'google-flow',
         provider_submission: submission, reconcile_required: false, submission_phase: 'submitted'
@@ -419,7 +447,7 @@ class MediaJobConsumer {
           destination: downloadPath,
           // Upscaled downloads usually land within 1-2 minutes; a stuck one is
           // re-downloaded by automatic recovery instead of blocking for 10.
-          timeoutMs: waitsForUpscale ? 360000 : 180000,
+          timeoutMs: waitsForUpscale ? (targetJob.downloadRetry ? DOWNLOAD_RETRY_WAIT_MS : DOWNLOAD_WAIT_MS) : 180000,
           fingerprint: ctx.fingerprint || null,
           signature: requestSignature(job)
         });
@@ -438,11 +466,17 @@ class MediaJobConsumer {
       catch (error) {
         if ((await callCore('media.status', { job_id: jobId })).cancel_requested) return this.update(jobId, 'cancelled', 'Cancelled during download');
         const preferFour = (request.generation_settings?.download_quality || 'prefer_4x_then_2x') === 'prefer_4x_then_2x';
-        if (!isImage || !preferFour || downloadAction?.quality !== '4x' || classifyError(error).category !== 'download_failure') throw error;
-        await this.update(jobId, 'downloading', '4x download failed; trying 2x upscale of the same result');
-        downloaded = await attemptDownload({ ...downloadJob, request: { ...request,
-          generation_settings: { ...request.generation_settings, download_quality: '2x' }
-        } });
+        if (isImage && preferFour && downloadAction?.quality === '4x' && classifyError(error).category === 'download_failure') {
+          await this.update(jobId, 'downloading', '4x download failed; trying 2x upscale of the same result');
+          downloaded = await attemptDownload({ ...downloadJob, request: { ...request,
+            generation_settings: { ...request.generation_settings, download_quality: '2x' }
+          } });
+        } else if (waitsForUpscale && /timed out waiting for google media download/i.test(String(error?.message || error))) {
+          await this.update(jobId, 'downloading', 'Download did not arrive; requesting it again');
+          downloaded = await attemptDownload({ ...downloadJob, downloadRetry: true });
+        } else {
+          throw error;
+        }
       }
       await callCore('media.patch', { job_id: jobId, patch: {
         download: { ...downloaded, action: downloadAction, completed: true }

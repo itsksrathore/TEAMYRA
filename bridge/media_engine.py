@@ -835,6 +835,7 @@ def public_job(job):
         "type": job.get("request", {}).get("type"),
         "prompt_preview": str(job.get("request", {}).get("prompt") or "")[:160],
         "max_parallel": job.get("request", {}).get("max_parallel"),
+        "lane": (job.get("provider_submission") or {}).get("lane"),
         "operation": job.get("operation"),
         "project_path": job.get("request", {}).get("project_path"),
         "provider_surface": job.get("provider_surface"),
@@ -915,16 +916,39 @@ def status_many(root, job_ids):
 _FLOW_PROJECT_RE = re.compile(r"^(https://flow\.google\.com/project/[A-Za-z0-9-]+)")
 
 
-def flow_project_for(root, project_path):
+def _job_lane(job):
+    """Flow tab (lane) a job was submitted from; jobs from before lanes are lane 0."""
+    try:
+        return max(0, int((job.get("provider_submission") or {}).get("lane") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _refs_key(job):
+    refs = job.get("resolved_references") or []
+    return "|".join(sorted(str(item.get("asset_id") or item.get("path") or "")
+                           for item in refs if isinstance(item, dict)))
+
+
+def flow_project_for(root, project_path, lane=0):
     """Most recent Flow project used by jobs of this local project folder.
 
     Keeping one folder in one Flow project keeps its uploads and results
     together, so reference pickers see them and no empty projects are created.
+    Each extra Flow tab (lane) keeps its own project for the folder.
     """
     try:
-        wanted = str(Path(project_path).expanduser().resolve()).lower()
-    except (OSError, ValueError, TypeError):
-        return {"provider_url": None}
+        lane = max(0, int(lane or 0))
+    except (TypeError, ValueError):
+        lane = 0
+    wanted = ""
+    if project_path:
+        try:
+            wanted = str(Path(project_path).expanduser().resolve()).lower()
+        except (OSError, ValueError, TypeError):
+            return {"provider_url": None, "lane": lane}
+    elif lane == 0:
+        return {"provider_url": None, "lane": lane}
     # The project holding most of the folder's results wins; recency breaks ties.
     usage = {}
     for path in _jobs_dir(root).glob("media-*.json"):
@@ -933,6 +957,8 @@ def flow_project_for(root, project_path):
             continue
         if str((job.get("request") or {}).get("project_path") or "").lower() != wanted:
             continue
+        if _job_lane(job) != lane:
+            continue
         submission = job.get("provider_submission") or {}
         match = _FLOW_PROJECT_RE.match(str(submission.get("provider_url") or ""))
         if not match:
@@ -940,9 +966,9 @@ def flow_project_for(root, project_path):
         count, latest = usage.get(match.group(1), (0, 0.0))
         usage[match.group(1)] = (count + 1, max(latest, float(submission.get("submitted_at") or 0)))
     if not usage:
-        return {"provider_url": None, "jobs": 0}
+        return {"provider_url": None, "jobs": 0, "lane": lane}
     url, (count, latest) = max(usage.items(), key=lambda item: item[1])
-    return {"provider_url": url, "jobs": count, "submitted_at": latest or None}
+    return {"provider_url": url, "jobs": count, "submitted_at": latest or None, "lane": lane}
 
 
 def claimed_result_keys(root, provider_url=None):
@@ -1105,17 +1131,38 @@ def append_job_metadata(root, job_id, patch):
         return _save_job(root, job)
 
 
-def claim_next_job(root, surface, worker):
+_BATCH_ACTIVE_STATES = {"preparing", "submitting", "generating", "downloading", "extracting_audio", "organizing"}
+
+
+def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None):
+    """Claim the next job for one Flow tab (lane).
+
+    Several tabs claim from one queue: a batch's max_parallel caps its running
+    jobs across all tabs, a job already submitted is resumed only by the tab
+    whose project holds it, and a tab prefers the batch's jobs that use the
+    reference images it has attached already (swapping them is the slow part).
+    """
     surface = str(surface or "").strip().lower()
     if surface not in {"visual", "music"}:
         raise ValueError("surface must be visual or music")
+    try:
+        lane = max(0, int(lane or 0))
+        lanes = max(1, int(lanes or 1))
+    except (TypeError, ValueError):
+        lane, lanes = 0, 1
     with _state_lock(root):
         candidates = []
+        active = {}
         now = time.time()
+        jobs = []
         for path in _jobs_dir(root).glob("media-*.json"):
             job = _read_json(path, None)
             if not isinstance(job, dict):
                 continue
+            jobs.append(job)
+            if job.get("batch_id") and job.get("state") in _BATCH_ACTIVE_STATES:
+                active[job["batch_id"]] = active.get(job["batch_id"], 0) + 1
+        for job in jobs:
             state = job.get("state")
             if state == "queued":
                 eligible = float(job.get("retry_after") or 0) <= now
@@ -1134,18 +1181,35 @@ def claim_next_job(root, surface, worker):
                 continue
             if job.get("request", {}).get("surface") != surface:
                 continue
+            submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+            # Extra tabs take batch work only: a single job or an edit of an
+            # existing result stays in the folder's main Flow project.
+            if lane > 0 and not submitted and (not job.get("batch_id") or job.get("operation")):
+                continue
+            if submitted:
+                owner = _job_lane(job)
+                if owner != lane and owner < lanes:
+                    continue
+            else:
+                limit = (job.get("request") or {}).get("max_parallel")
+                if job.get("batch_id") and limit and active.get(job["batch_id"], 0) >= int(limit):
+                    continue
             candidates.append(job)
-        candidates.sort(key=lambda item: float(item.get("created_at") or 0))
         if not candidates:
             return None
-        job = candidates[0]
+        candidates.sort(key=lambda item: float(item.get("created_at") or 0))
+        resumable = [item for item in candidates if (item.get("provider_submission") or {}).get("submitted_at")]
+        job = resumable[0] if resumable else candidates[0]
+        if not resumable and refs_key:
+            same_batch = [item for item in candidates if item.get("batch_id") and item.get("batch_id") == job.get("batch_id")]
+            job = next((item for item in same_batch if _refs_key(item) == refs_key), job)
         job["state"] = "preparing"
         job["claimed_by"] = str(worker or surface)[:120]
         job["claimed_at"] = time.time()
         job["attempt"] = int(job.get("attempt") or 0) + 1
         job.setdefault("history", []).append(_event("preparing", f"Claimed by {job['claimed_by']}"))
         _save_job(root, job)
-        return job
+        return {**job, "refs_key": _refs_key(job)}
 
 
 def cancel_job(root, job_id):

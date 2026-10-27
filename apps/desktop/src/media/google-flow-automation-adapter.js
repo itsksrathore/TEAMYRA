@@ -114,10 +114,13 @@ class GoogleFlowAutomationAdapter {
   async stage(name, fn) {
     // Each operation bounds its own waits. Do not race a live DOM mutation:
     // ownership must remain with this job until the operation has quiesced.
+    const started = Date.now();
     try { return await fn(); }
     catch (error) {
       const message = String(error?.message || error || '').slice(0, 1400);
       throw new Error(name + ': ' + message);
+    } finally {
+      if (this.stageTimes) this.stageTimes[name] = Date.now() - started;
     }
   }
 
@@ -644,13 +647,16 @@ class GoogleFlowAutomationAdapter {
     return current;
   }
 
-  async ensureWorkspace(timeoutMs = 30000, { preferredUrl = '', allowNavigation = true } = {}) {
+  async ensureWorkspace(timeoutMs = 30000, { preferredUrl = '', allowNavigation = true, createNew = false } = {}) {
     // A local folder keeps using the Flow project its earlier jobs used.
     const preferred = String(preferredUrl || '').match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1] || '';
     if (preferred && allowNavigation && projectId(preferred) !== projectId(this.webContents.getURL())) {
       await this.loadProjectUrl(preferred);
       return { ready: true, existing: true, project_url: preferred, preferred: true };
     }
+    // An extra Flow tab gets a project of its own for the folder, not the
+    // most recent project (which another tab is working in).
+    if (createNew && !preferred) return this.createProject(timeoutMs);
     const currentPrompt = await this.promptSelector();
     if (currentPrompt) return { ready: true, existing: true };
 
@@ -693,7 +699,26 @@ class GoogleFlowAutomationAdapter {
       }
     }
 
-    const before = new Set(await this.projectUrls());
+    return this.createProject(timeoutMs);
+  }
+
+  async createProject(timeoutMs = 30000) {
+    if (projectId(this.webContents.getURL())) await this.webContents.loadURL(FLOW_HOME).catch(() => {});
+    const hasNewProject = () => this.executePageScript(`[...document.querySelectorAll('button,[role="button"]')].some(el =>
+      /new project/i.test((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')) && el.getBoundingClientRect().width > 0)`).catch(() => false);
+    const homeDeadline = Date.now() + 15000;
+    while (Date.now() < homeDeadline && !await hasNewProject()) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+    // The home list renders late; a project drawn after this snapshot would
+    // look new and be taken for the created one.
+    let listed = await this.projectUrls();
+    const listDeadline = Date.now() + 8000;
+    while (!listed.length && Date.now() < listDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      listed = await this.projectUrls();
+    }
+    const before = new Set(listed);
     const clicked = await this.semanticClick(['new project']);
     if (!clicked) throw new Error('selector_failure: Google Flow project could not be opened or created');
 
@@ -1260,8 +1285,12 @@ class GoogleFlowAutomationAdapter {
 
   async submitToWorkspace(job, beforeSubmit) {
     const request = job.request;
+    this.stageTimes = {};
+    const attachedBefore = this.attachedRefs;
+    this.attachedRefs = null;
     await this.stage('workspace', () => this.ensureWorkspace(30000, {
-      preferredUrl: job.preferred_project_url, allowNavigation: job.allow_navigation !== false }));
+      preferredUrl: job.preferred_project_url, allowNavigation: job.allow_navigation !== false,
+      createNew: job.create_new_project === true }));
     await this.stage('workspace_ready', async () => {
       const deadline = Date.now() + 20000;
       while (await this.executePageScript(`Boolean(document.querySelector('flow-loading-page'))`)) {
@@ -1270,9 +1299,18 @@ class GoogleFlowAutomationAdapter {
       }
       if (!await this.waitForSettingsTrigger()) throw new Error('selector_failure: Flow composer unavailable');
     });
-    await new FlowReferenceController(this).clearComposer();
+    // Flow keeps the previous job's ingredient chips after a submit. When this
+    // job uses the same images in the same project, keep them: re-attaching is
+    // the slowest step of a submission. Identities are re-verified before Generate.
+    const refsKey = (job.resolved_references || []).map(item => item.asset_id || item.path || '').join('|');
+    const reuse = Boolean(refsKey && attachedBefore?.key === refsKey &&
+      attachedBefore.project === projectId(this.webContents.getURL()) &&
+      await new FlowReferenceController(this).matches(attachedBefore.items).catch(() => false));
+    if (!reuse) await new FlowReferenceController(this).clearComposer();
     const intent = await this.stage('intent', () => this.selectIntent(request, job.operation));
-    const references = await this.stage('references', () => this.uploadReferences(job.resolved_references || []), null);
+    const references = reuse
+      ? { ok: true, mode: 'ingredients', count: attachedBefore.items.length, items: attachedBefore.items, reused_attachments: true }
+      : await this.stage('references', () => this.uploadReferences(job.resolved_references || []), null);
     const selector = await this.stage('prompt_find', () => this.waitForPrompt());
     await this.browser.clickSelector(selector).catch(() => false);
     await this.stage('prompt_clear', () => this.browser.clearText(selector));
@@ -1308,7 +1346,12 @@ class GoogleFlowAutomationAdapter {
         acknowledgement_pending: true
       });
     }, { nativeActivation: request.type === 'image' }), 60000);
+    if (refsKey && references?.items?.length) {
+      this.attachedRefs = { key: refsKey, project: projectId(this.webContents.getURL()), items: references.items };
+    }
     return {
+      stage_ms: { ...this.stageTimes },
+      reused_attachments: reuse,
       submitted_at: Date.now() / 1000,
       provider_url: this.webContents.getURL(),
       baseline_media_count: Number(generation?.before?.mediaCount || 0),

@@ -442,7 +442,7 @@ function hasActiveDesktopWork() {
   } catch {}
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
-  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumer?.busy === true || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
+  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumers?.().some(consumer => consumer.busy === true) || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
   return false;
 }
 

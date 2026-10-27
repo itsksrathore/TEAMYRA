@@ -588,12 +588,98 @@ async function pipelineTests(temp) {
   assert.equal(attribution.inFlight.has('p3'), true, 'a job submitted after the refusal is unaffected');
 }
 
+// Several Flow tabs (lanes) work one queue: each claims as its lane, runs in
+// its own project and marks its submissions so restarts resume them there.
+async function laneTests(temp) {
+  const jobs = Array.from({ length: 4 }, (_, index) => ({
+    job_id: 'lane-' + index, created_at: index, batch_id: 'batch-x',
+    request: { type: 'video', prompt: 'lane scene ' + index, project_path: 'D:/folder', generation_settings: { download_quality: 'source' } }
+  }));
+  const { core: base, records } = fakeCore(temp, jobs);
+  const claims = [];
+  const projectLookups = [];
+  const core = async (name, args = {}) => {
+    if (name === 'media.claim') {
+      claims.push({ lane: args.lane, lanes: args.lanes, refs_key: args.refs_key });
+      const job = await base(name, args);
+      return job ? { ...job, refs_key: 'TYR-IMG-1' } : job;
+    }
+    if (name === 'media.flow-project') {
+      projectLookups.push(args.lane);
+      return { provider_url: args.lane === 0 ? 'https://flow.google.com/project/main' : null };
+    }
+    return base(name, args);
+  };
+  const { MediaJobConsumer } = loadConsumer(core);
+  const submitted = [];
+  const makeAdapter = lane => ({
+    probe: async () => ({ buttonLabels: [] }),
+    classifyProbe: () => ({ signedIn: true }),
+    capabilities: async () => ({ video: true }),
+    submit: async (job, checkpoint) => {
+      submitted.push({ lane, preferred: job.preferred_project_url, createNew: job.create_new_project });
+      const submission = { submitted_at: Date.now() / 1000, provider_url: job.preferred_project_url || 'https://flow.google.com/project/tab' + lane, baseline_failure_signals: 0 };
+      await checkpoint(submission);
+      return submission;
+    },
+    generationStates: async list => ({ page: { state: 'ok', failure_signals: 0 }, states: new Map(list.map(job => [job.job_id, { state: 'generating' }])) })
+  });
+  const downloadManager = { expect: () => new Promise(() => {}), cancelJob() {} };
+  const consumers = [0, 1].map(lane => new MediaJobConsumer({ surface: 'visual', downloadManager, pollMs: 15, monitorMs: 15, lane, lanes: 2,
+    provider: { adapter: makeAdapter(lane), ensureLoaded: async () => {}, destroy() {},
+      view: { webContents: { id: 20 + lane, getURL: () => lane ? 'https://flow.google.com/project/tab1' : 'https://flow.google.com/project/main' } } } }));
+  consumers.forEach(consumer => consumer.start());
+  await until(() => [...records.values()].every(item => item.state === 'generating'), 'both tabs to submit the batch');
+  consumers.forEach(consumer => consumer.stop());
+  assert.deepEqual([...new Set(claims.map(item => item.lane))].sort(), [0, 1], 'each tab claims as its own lane');
+  assert.ok(claims.every(item => item.lanes === 2));
+  assert.ok(claims.some(item => item.refs_key === 'TYR-IMG-1'), 'a tab asks for jobs using its attached references');
+  const laneOf = new Set([...records.values()].map(item => item.provider_submission.lane));
+  assert.deepEqual([...laneOf].sort(), [0, 1], 'submissions record their tab');
+  const tabSubmits = submitted.filter(item => item.lane === 1);
+  assert.ok(tabSubmits.length, 'the extra tab took part of the batch');
+  assert.equal(tabSubmits[0].createNew, true, 'a tab without a project creates its own');
+  assert.ok(tabSubmits.slice(1).every(item => item.preferred === 'https://flow.google.com/project/tab1' && !item.createNew),
+    'later jobs of the tab reuse that project');
+  assert.ok(submitted.filter(item => item.lane === 0).every(item => item.preferred === 'https://flow.google.com/project/main' && !item.createNew));
+  assert.ok(projectLookups.includes(1));
+  // Let the monitors see the jobs end so no watcher keeps running.
+  for (const record of records.values()) record.state = 'completed';
+  await until(() => consumers.every(consumer => !consumer.inFlight.size), 'tab monitors to drain');
+
+  // A download that never arrives is requested again in place, not after 6 minutes.
+  const retryJobs = [{ job_id: 'retry-0', created_at: 0, request: { type: 'video', prompt: 'retry', generation_settings: { download_quality: 'source' } } }];
+  const retryCore = fakeCore(temp, retryJobs);
+  const loaded = loadConsumer(retryCore.core);
+  const waits = [];
+  let clicks = 0;
+  const retryDownloads = {
+    expect: ({ destination, timeoutMs }) => {
+      waits.push(timeoutMs);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      if (waits.length === 1) return Promise.reject(new Error('download_failure: Timed out waiting for Google media download completion'));
+      fs.writeFileSync(destination, 'video');
+      return Promise.resolve({ path: destination, bytes: 5, attribution: 'single' });
+    },
+    cancelJob() {}
+  };
+  const retryConsumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager: retryDownloads,
+    provider: { view: { webContents: { id: 30 } }, adapter: { startDownload: async () => { clicks += 1; return { quality: 'source' }; } } } });
+  retryCore.records.get('retry-0').state = 'generating';
+  await retryConsumer.downloadAndRegister({ job: retryCore.records.get('retry-0'), jobId: 'retry-0', resultKey: 'k',
+    planned: { path: path.join(temp, 'retry.mp4'), format: 'mp4' } });
+  assert.equal(clicks, 2, 'Download is clicked again');
+  assert.ok(waits[0] <= 150000 && waits[1] > waits[0], 'a short first wait, a longer second one');
+  assert.equal(retryCore.records.get('retry-0').state, 'completed');
+}
+
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-media-bulk-'));
   try {
     await downloadManagerTests(temp);
     await adapterTests();
     await pipelineTests(temp);
+    await laneTests(temp);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

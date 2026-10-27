@@ -285,14 +285,21 @@ class FlowReferenceController {
     if (!identity && !uploaded) throw new Error('selector_failure: reference image identity is unavailable');
     if (!await this.clickButton('Add to prompt')) throw new Error('selector_failure: Add to prompt is unavailable');
     const beforeIds = before.map(item => mediaId(item.source));
+    let seen = null;
+    // Flow processes a fresh upload before its chip settles; with several Flow
+    // tabs uploading at once that can take well over 20 s.
     const attached = await this.waitFor(async () => {
       const attached = await this.attachments();
       const ids = attached.map(item => mediaId(item.source));
       const addedIds = ids.filter(id => !beforeIds.includes(id));
+      seen = { chips: attached.length, expected_chips: before.length + 1, busy: attached.filter(item => item.busy).length,
+        added: addedIds, expected_id: identity || null };
       return attached.length === before.length + 1 && attached.every(item => !item.busy) &&
         ids.every(Boolean) && beforeIds.every(id => ids.includes(id)) && addedIds.length === 1 &&
         (!identity || addedIds[0] === identity) ? attached : null;
-    }, 'verified prompt image ingredient');
+    }, 'verified prompt image ingredient', uploaded ? 60000 : 30000).catch(error => {
+      throw new Error(error.message + '; seen=' + JSON.stringify(seen).slice(0, 500));
+    });
     if (!identity) identity = attached.map(item => mediaId(item.source)).find(id => !beforeIds.includes(id));
     if (!identity) throw new Error('selector_failure: uploaded ingredient lacks a stable image ID');
     if (uploaded && cacheKey) {

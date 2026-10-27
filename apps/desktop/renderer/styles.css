@@ -1011,7 +1011,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 }
 .bulk-jobs li {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) auto;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   padding: 5px 8px;
@@ -1036,6 +1036,7 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 .bulk-chip.working { color: var(--amber); background: rgba(170,116,23,.12); }
 .bulk-chip.done { color: var(--green); background: rgba(46,125,79,.12); }
 .bulk-chip.failed { color: var(--red); background: rgba(239,100,97,.12); }
+.bulk-jobs .bulk-lane { color: var(--muted-2); font-family: var(--mono); font-size: 8px; white-space: nowrap; }
 @media (max-width: 640px) {
   .bulk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

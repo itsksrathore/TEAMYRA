@@ -6,6 +6,17 @@ const { GoogleFlowMusicProvider } = require('./google-flow-music-provider');
 const { MediaJobConsumer } = require('./media-job-consumer');
 
 const HUNG_RELOAD_GAP_MS = 3 * 60 * 1000;
+// Bulk work runs in several hidden Flow tabs ("lanes"), each with its own
+// page and its own Flow project per folder, so submissions, result watching
+// and downloads in one tab do not wait for another. TEAMYRA_FLOW_LANES=1
+// turns this off.
+const DEFAULT_FLOW_LANES = 3;
+const MAX_FLOW_LANES = 4;
+
+function flowLaneCount(value = globalThis.process?.env?.TEAMYRA_FLOW_LANES) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number >= 1 ? Math.min(MAX_FLOW_LANES, number) : DEFAULT_FLOW_LANES;
+}
 
 // A probe that failed (page busy, navigating or hung) says nothing about the
 // Google session. Keep the last known sign-in state instead of reporting a
@@ -37,6 +48,7 @@ class GoogleMediaProfileRuntime {
     this.downloadManager = new MediaDownloadManager(this.sessionManager);
     this.visual = new GoogleFlowProvider({ window, sessionManager: this.sessionManager });
     this.music = new GoogleFlowMusicProvider({ window, sessionManager: this.sessionManager });
+    const lanes = flowLaneCount();
     this.visualConsumer = new MediaJobConsumer({
       surface: 'visual',
       workerName: 'google-media-' + this.profileId + '-visual',
@@ -44,8 +56,30 @@ class GoogleMediaProfileRuntime {
       downloadManager: this.downloadManager,
       profileId: this.profileId,
       ready,
-      onActivity: () => this.touch()
+      onActivity: () => this.touch(),
+      lane: 0,
+      lanes
     });
+    // Extra tabs are never shown; the download manager tells their downloads
+    // apart by the tab that started them.
+    this.extraLanes = [];
+    for (let lane = 1; lane < lanes; lane += 1) {
+      const provider = new GoogleFlowProvider({ window, sessionManager: this.sessionManager });
+      this.extraLanes.push({
+        provider,
+        consumer: new MediaJobConsumer({
+          surface: 'visual',
+          workerName: 'google-media-' + this.profileId + '-visual-tab' + (lane + 1),
+          provider,
+          downloadManager: this.downloadManager,
+          profileId: this.profileId,
+          ready,
+          onActivity: () => this.touch(),
+          lane,
+          lanes
+        })
+      });
+    }
     this.musicConsumer = new MediaJobConsumer({
       surface: 'music',
       workerName: 'google-media-' + this.profileId + '-music',
@@ -87,13 +121,17 @@ class GoogleMediaProfileRuntime {
     this.sessionManager.initialize();
   }
 
+  visualConsumers() {
+    return [this.visualConsumer, ...this.extraLanes.map(lane => lane.consumer)];
+  }
+
   setConsumerState(kind, enabled) {
     if (kind === 'visual') {
       if (enabled && !this.visualConsumerStarted) {
-        this.visualConsumer.start();
+        for (const consumer of this.visualConsumers()) consumer.start();
         this.visualConsumerStarted = true;
       } else if (!enabled && this.visualConsumerStarted) {
-        this.visualConsumer.stop();
+        for (const consumer of this.visualConsumers()) consumer.stop();
         this.visualConsumerStarted = false;
       }
       return;
@@ -127,7 +165,9 @@ class GoogleMediaProfileRuntime {
     this.cancelUnload();
     this.unloadTimer = setTimeout(() => {
       this.unloadTimer = null;
-      if (this.visualConsumer.busy || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
+      // An idle extra tab is released even while other tabs keep working.
+      for (const lane of this.extraLanes) if (!lane.consumer.busy) lane.provider.destroy();
+      if (this.visualConsumers().some(consumer => consumer.busy) || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
         this.scheduleUnload(BROWSER_IDLE_MS);
         return;
       }
@@ -138,14 +178,28 @@ class GoogleMediaProfileRuntime {
     this.unloadTimer.unref?.();
   }
 
+  pipelineSnapshot() {
+    const lanes = this.visualConsumers().map(consumer => consumer.pipelineStatus());
+    const sum = key => lanes.reduce((total, lane) => total + (Number(lane[key]) || 0), 0);
+    return {
+      ...lanes[0],
+      in_flight: sum('in_flight'),
+      downloads_active: sum('downloads_active'),
+      downloads_waiting: sum('downloads_waiting'),
+      tabs: lanes.length,
+      lanes
+    };
+  }
+
   snapshot() {
+    const visualBusy = this.visualConsumers().some(consumer => consumer.busy);
     return {
       ...this.lastStatus,
       visible: this.visual.visible || this.music.visible,
-      busy: this.visualConsumer.busy || this.musicConsumer.busy,
-      visual_busy: this.visualConsumer.busy,
+      busy: visualBusy || this.musicConsumer.busy,
+      visual_busy: visualBusy,
       music_busy: this.musicConsumer.busy,
-      visual_pipeline: this.visualConsumer.pipelineStatus?.() || null,
+      visual_pipeline: this.pipelineSnapshot(),
       visual_audio_muted: this.visual.view?.webContents?.isAudioMuted?.() ?? null,
       music_audio_muted: this.music.view?.webContents?.isAudioMuted?.() ?? null,
       current_url: this.visual.view?.webContents?.getURL?.()
@@ -418,6 +472,7 @@ class GoogleMediaProfileRuntime {
     this.cancelUnload();
     this.stopConsumers();
     this.visual.destroy();
+    for (const lane of this.extraLanes) lane.provider.destroy();
     this.music.destroy();
     this.started = false;
   }
@@ -582,4 +637,4 @@ class GoogleMediaEngine {
   }
 }
 
-module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus };
+module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount };

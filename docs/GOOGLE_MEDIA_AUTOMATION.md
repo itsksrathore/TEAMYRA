@@ -72,6 +72,53 @@ snapshot. Music stays one song at a time.
 - **Files.** Output paths are reserved across unfinished jobs, so concurrent
   outputs never share an index or a filename.
 
+### Several Flow tabs (2026-10-27)
+
+One Flow page did everything: each submission, every result poll and every
+download click waited for the others. In a 12-video batch Flow itself needed
+about a minute per video, but jobs waited a median 7.5 minutes before being
+claimed and at most 4 were ever generating together.
+
+Bulk work now runs in several hidden Flow tabs ("lanes", default 3, set with
+the `TEAMYRA_FLOW_LANES` environment variable, 1–4). They share the Google
+login (one browser session) but each has its own page and page lock.
+
+- **Own project per tab.** Tab 1 keeps the folder's usual Flow project. Tabs 2+
+  create one project of their own per folder the first time and reuse it
+  afterwards (`media.flow-project` is looked up per lane). Reference images are
+  uploaded into a tab's project the first time it needs them.
+- **One queue.** All tabs claim from the same queue. A batch's `max_parallel`
+  caps its running jobs across all tabs. Extra tabs take batch jobs only;
+  single jobs and edits of existing results stay in tab 1 and the main project.
+- **Restarts.** Each submission records its tab (`provider_submission.lane`),
+  and a submitted job is resumed only by that tab, whose project holds the
+  result. A job from a tab that no longer exists (fewer lanes) resumes anywhere.
+- **Downloads.** Each tab's downloads are attributed within that tab (by the
+  page that started them), so tabs never confuse each other's files.
+- **Memory.** An idle extra tab is closed after 45 s and reopened on demand.
+- The Bulk dialog shows which tab each item runs in.
+
+Live test (12 × 8 s 16:9 videos, 1080p, 8 with reference images, 3 tabs):
+12/12 delivered in 6.8 minutes, against 12.0 minutes for a comparable batch in
+one tab; one lost download was re-requested in place.
+
+Quick fixes in the same change:
+
+- **Reference images per tab.** Uploading an image into a Flow project is the
+  slow submit step (about 35 s, once per image per project); attaching one that
+  is already uploaded takes under a second. A tab prefers the batch's next job
+  that uses the images it already has, so each tab uploads fewer of them. If
+  Flow still shows the previous job's chips with the same images, they are kept
+  (identities are verified before Generate either way).
+- **Slow ingredient chips.** A freshly uploaded image may take a while to
+  settle when several tabs upload at once; the wait is 60 s for a fresh upload
+  (30 s otherwise) instead of 20 s, and a timeout reports what the chips showed.
+- **Lost downloads are re-requested.** Successful upscaled downloads land within
+  about 2 minutes (p97 105 s), but 37 had waited out a 6-minute timeout and full
+  recovery. A download that has not arrived after 150 s is clicked again in
+  place (240 s second wait).
+- Each submission records per-step timings (`provider_submission.stage_ms`).
+
 ### Reliability under heavy bulk use (2026-10-18)
 
 Real teaser batches (~150 jobs) exposed failures that are now handled:

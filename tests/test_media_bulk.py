@@ -135,6 +135,70 @@ class MediaBulkTests(unittest.TestCase):
         self.assertEqual(result['jobs'], 2)
         self.assertIsNone(media_engine.flow_project_for(self.root, str(self.root))['provider_url'])
 
+    def edit(self, job_id, **fields):
+        job = media_engine.load_job(self.root, job_id)
+        job.update(fields)
+        media_engine._save_job(self.root, job)
+
+    def test_lanes_share_a_batch_limit(self):
+        batch = media_engine.create_batch(self.root, [self.request(str(i)) for i in range(4)], max_parallel=2)
+        first = media_engine.claim_next_job(self.root, 'visual', 'tab1', lane=0, lanes=3)
+        second = media_engine.claim_next_job(self.root, 'visual', 'tab2', lane=1, lanes=3)
+        self.assertEqual({first['batch_id'], second['batch_id']}, {batch['batch_id']})
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'tab3', lane=2, lanes=3),
+                          'max_parallel counts running jobs across every tab')
+        media_engine.update_job_state(self.root, first['job_id'], 'completed')
+        self.assertIsNotNone(media_engine.claim_next_job(self.root, 'visual', 'tab3', lane=2, lanes=3))
+
+    def test_extra_tabs_take_batch_work_only(self):
+        media_engine.create_job(self.root, self.request('single'))
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'tab2', lane=1, lanes=3),
+                          'a single job stays in the main tab and project')
+        self.assertIsNotNone(media_engine.claim_next_job(self.root, 'visual', 'tab1', lane=0, lanes=3))
+
+    def test_submitted_job_resumes_in_its_own_tab(self):
+        batch = media_engine.create_batch(self.root, [self.request('a')])
+        job_id = batch['jobs'][0]['job_id']
+        self.edit(job_id, state='waiting_for_browser', reconcile_required=True,
+                  provider_submission={'submitted_at': 1.0, 'lane': 2, 'provider_url': 'https://flow.google.com/project/lane3'})
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'tab1', lane=0, lanes=3))
+        self.assertEqual(media_engine.claim_next_job(self.root, 'visual', 'tab3', lane=2, lanes=3)['job_id'], job_id)
+
+    def test_submitted_job_of_a_removed_tab_resumes_anywhere(self):
+        batch = media_engine.create_batch(self.root, [self.request('a')])
+        job_id = batch['jobs'][0]['job_id']
+        self.edit(job_id, state='waiting_for_browser', reconcile_required=True,
+                  provider_submission={'submitted_at': 1.0, 'lane': 2, 'provider_url': 'https://flow.google.com/project/lane3'})
+        self.assertEqual(media_engine.claim_next_job(self.root, 'visual', 'tab1', lane=0, lanes=1)['job_id'], job_id)
+
+    def test_tab_prefers_jobs_with_its_attached_references(self):
+        batch = media_engine.create_batch(self.root, [self.request(str(i)) for i in range(3)])
+        ids = [job['job_id'] for job in batch['jobs']]
+        refs = [[{'asset_id': 'TYR-IMG-1'}], [{'asset_id': 'TYR-IMG-2'}], [{'asset_id': 'TYR-IMG-1'}]]
+        for job_id, items in zip(ids, refs):
+            self.edit(job_id, resolved_references=items)
+        first = media_engine.claim_next_job(self.root, 'visual', 'tab1')
+        self.assertEqual(first['job_id'], ids[0])
+        self.assertEqual(first['refs_key'], 'TYR-IMG-1')
+        second = media_engine.claim_next_job(self.root, 'visual', 'tab1', refs_key=first['refs_key'])
+        self.assertEqual(second['job_id'], ids[2], 'same images skip a slow re-attach')
+        self.assertEqual(media_engine.claim_next_job(self.root, 'visual', 'tab1', refs_key='TYR-IMG-1')['job_id'], ids[1])
+
+    def test_each_tab_keeps_its_own_flow_project(self):
+        def submitted(url, lane):
+            job = media_engine.create_job(self.root, self.request())
+            submission = {'submitted_at': 1.0, 'provider_url': url}
+            if lane is not None:
+                submission['lane'] = lane
+            media_engine.append_job_metadata(self.root, job['job_id'], {'provider_submission': submission})
+        submitted('https://flow.google.com/project/main', None)
+        submitted('https://flow.google.com/project/tab2', 1)
+        self.assertEqual(media_engine.flow_project_for(self.root, str(self.project))['provider_url'],
+                         'https://flow.google.com/project/main', 'tab projects never become the main one')
+        self.assertEqual(media_engine.flow_project_for(self.root, str(self.project), lane=1)['provider_url'],
+                         'https://flow.google.com/project/tab2')
+        self.assertIsNone(media_engine.flow_project_for(self.root, str(self.project), lane=2)['provider_url'])
+
     def test_restart_recovery_leaves_a_live_workers_jobs_alone(self):
         job_id = self.claimed()
         media_engine.append_job_metadata(self.root, job_id, {'submission_phase': 'preparing'})

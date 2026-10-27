@@ -97,7 +97,9 @@ def handle(action, payload):
             payload.get("kinds"),
         )
     if action == "media.claim":
-        return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"))
+        return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"),
+                                           lane=payload.get("lane", 0), lanes=payload.get("lanes", 1),
+                                           refs_key=payload.get("refs_key"))
     if action == "media.status":
         return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30),
                                        payload.get("batch_id"))
@@ -106,7 +108,7 @@ def handle(action, payload):
     if action == "media.claimed-keys":
         return media_engine.claimed_result_keys(ROOT, payload.get("provider_url"))
     if action == "media.flow-project":
-        return media_engine.flow_project_for(ROOT, payload.get("project_path"))
+        return media_engine.flow_project_for(ROOT, payload.get("project_path"), lane=payload.get("lane", 0))
     if action == "media.status-many":
         return media_engine.status_many(ROOT, payload.get("job_ids") or [])
     if action == "media.release":

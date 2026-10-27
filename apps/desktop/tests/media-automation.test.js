@@ -4,7 +4,13 @@ const { GoogleFlowMusicAutomationAdapter, FLOW_MUSIC_HOME } = require('../src/me
 const { classifyError } = require('../src/media/media-job-consumer');
 const { resolveFfmpeg } = require('../src/media/media-audio-processor');
 const { partitionForProfile } = require('../src/media/google-media-session-manager');
-const { GOOGLE_LOGIN_URL, observedStatus } = require('../src/media/google-media-engine');
+const { GOOGLE_LOGIN_URL, observedStatus, flowLaneCount } = require('../src/media/google-media-engine');
+
+// Bulk runs in 3 Flow tabs unless TEAMYRA_FLOW_LANES says otherwise (1-4).
+assert.equal(flowLaneCount(undefined), 3);
+assert.equal(flowLaneCount('1'), 1);
+assert.equal(flowLaneCount('9'), 4);
+assert.equal(flowLaneCount('nope'), 3);
 
 // A probe that timed out is not a logout: the last known state stands.
 {
