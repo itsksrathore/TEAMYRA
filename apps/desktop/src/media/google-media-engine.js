@@ -45,6 +45,9 @@ const STALE_STATUS_MS = 10 * 60 * 1000;
 // An account that ran out of Flow credits takes no new work for this long
 // while other accounts can (its accepted generations still finish).
 const CREDITS_PARK_MS = 30 * 60 * 1000;
+// One whose Flow upload terms are not accepted is tried again after this, or
+// as soon as the user opens it in TEAMYRA (where they can accept them).
+const TERMS_PARK_MS = 20 * 60 * 1000;
 
 // Every Google Media account: the built-in one and those added in Settings,
 // with the enabled flag and priority kept in their teamyra-profile.json.
@@ -222,8 +225,8 @@ class GoogleMediaProfileRuntime {
     if (!this.engine?.otherWorking(this.profileId)) return false;
     console.warn('[google-media] account ' + this.profileId + ' parked: ' + kind + ' (' + reason + ')');
     this.parkReason = String(reason || kind);
-    if (kind === 'credits') {
-      this.parkedUntil = Date.now() + CREDITS_PARK_MS;
+    if (kind === 'credits' || kind === 'upload_terms') {
+      this.parkedUntil = Date.now() + (kind === 'credits' ? CREDITS_PARK_MS : TERMS_PARK_MS);
       for (const consumer of this.visualConsumers()) {
         consumer.pausedUntil = Math.max(consumer.pausedUntil, this.parkedUntil);
         consumer.pauseReason = this.parkReason;
@@ -234,6 +237,12 @@ class GoogleMediaProfileRuntime {
       challenged: kind === 'challenged', detail: this.parkReason };
     this.setConsumerState('visual', false);
     return true;
+  }
+
+  unpark() {
+    if (!this.parkedUntil) return;
+    this.parkedUntil = 0;
+    for (const consumer of this.visualConsumers()) consumer.pausedUntil = 0;
   }
 
   pipelineSnapshot() {
@@ -408,6 +417,7 @@ class GoogleMediaProfileRuntime {
 
   async open() {
     this.cancelUnload();
+    this.unpark();
     this.music.setVisible(false);
     this.visual.ensureView();
     this.visual.setVisible(false);
@@ -423,6 +433,7 @@ class GoogleMediaProfileRuntime {
 
   async login() {
     this.cancelUnload();
+    this.unpark();
     this.music.setVisible(false);
     const view = this.visual.ensureView();
     this.visual.setVisible(false);

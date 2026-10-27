@@ -34,6 +34,7 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function classifyError(error) {
   const text = String(error?.message || error || '').toLowerCase();
   if (text.includes('human_verification') || text.includes('captcha')) return { state: 'needs_user_auth', category: 'human_verification' };
+  if (text.includes('upload_terms_required')) return { state: 'needs_user_auth', category: 'upload_terms_required' };
   if (text.includes('login_required') || text.includes('sign-in') || text.includes('sign in')) return { state: 'needs_user_auth', category: 'login_required' };
   if (text.includes('rate_limited') || text.includes('rate limit') || text.includes('capacity_limited')) return { state: 'rate_limited', category: 'rate_limited' };
   // Explicit categories first: their messages mention credits/policy in passing.
@@ -259,6 +260,14 @@ class MediaJobConsumer {
       await callCore('media.handoff', { job_id: job.job_id, reason: this.profileId + ': ' + reason }, { timeout: 15000 });
       return true;
     } catch { return false; }
+  }
+
+  // An account-level refusal found before Generate (upload terms not accepted)
+  // is not the job's fault: another account takes the job.
+  async handOffAfterError(job, ctx, error) {
+    const text = String(error?.message || error || '');
+    if (ctx.checkpointed || !/upload_terms_required/.test(text)) return false;
+    return this.handOff(job, 'upload_terms', 'Flow upload terms are not accepted in this account');
   }
 
   async stableProbe(adapter, timeoutMs = 15000) {
@@ -558,6 +567,7 @@ class MediaJobConsumer {
       if (!await this.awaitResult(ctx)) return null;
       return await this.downloadAndRegister(ctx);
     } catch (error) {
+      if (await this.handOffAfterError(job, ctx, error)) return null;
       return this.handleFailure(job.job_id, error);
     }
   }
@@ -572,6 +582,7 @@ class MediaJobConsumer {
       this.refreshBusy();
       this.ensureMonitor();
     } catch (error) {
+      if (await this.handOffAfterError(job, ctx, error)) return;
       if (await this.tryRelease(job, ctx, error)) return;
       await this.handleFailure(job.job_id, error);
     }

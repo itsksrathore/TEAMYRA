@@ -752,6 +752,23 @@ async function accountTests(temp) {
       assert.equal(Boolean(record.handed_off), others);
     }
   }
+
+  // Flow's upload terms not accepted in this account: found during the
+  // reference upload, before Generate. Another account takes the job.
+  for (const others of [true, false]) {
+    const terms = fakeCore(temp, [{ job_id: 'terms', created_at: 0, batch_id: 'b', request: { type: 'video', prompt: 'p' } }]);
+    const reported = [];
+    const loaded = loadConsumer(terms.core);
+    const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager, profileId: 'acct4',
+      onAccountProblem: problem => { reported.push(problem); return others; },
+      provider: { ensureLoaded: async () => {}, destroy() {}, view: { webContents: { getURL: () => '' } },
+        adapter: { probe: async () => ({ buttonLabels: [] }), classifyProbe: () => ({ signedIn: true }), capabilities: async () => ({}),
+          submit: async () => { throw new Error('references: upload_terms_required: Google Flow asks this account to accept its upload terms'); } } } });
+    await consumer.admit({ ...terms.records.get('terms'), state: 'preparing' });
+    const record = terms.records.get('terms');
+    assert.deepEqual(reported, ['upload_terms']);
+    assert.equal(record.state, others ? 'queued' : 'needs_user_auth', others ? 'another account takes it' : 'alone, it waits for the user');
+  }
 }
 
 async function main() {

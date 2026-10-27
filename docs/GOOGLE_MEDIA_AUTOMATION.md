@@ -154,6 +154,13 @@ accounts × tabs (`media_guide` → `capacity.flow_accounts`, `flow_tabs`).
   minutes. Jobs it already submitted wait for it (no other account can download
   them) and resume when it is back (`media_resume_auth`). With one account,
   behaviour is unchanged.
+- **Upload terms.** A newly added account may show Flow's "I agree" dialog for
+  its upload terms on the first reference upload; until someone accepts it no
+  uploaded image appears. The worker notices the dialog within ~2 s
+  (`upload_terms_required`), parks the account for 20 minutes (or until it is
+  opened in TEAMYRA) and hands the job to another account; alone, the job waits
+  in `needs_user_auth`. TEAMYRA never accepts terms itself: open the account in
+  Settings → Google Media and click "I agree" once.
 - **Connection status** is kept per account (`media/connection.json` →
   `profiles`); the top level says whether any account works, so one signed-out
   account no longer reports Flow as disconnected.

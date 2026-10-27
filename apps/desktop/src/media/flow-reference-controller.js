@@ -40,6 +40,12 @@ class FlowReferenceController {
     }
     throw new Error('selector_failure: ' + label + ' did not become ready');
   }
+  // Flow asks an account to accept its upload terms ("I agree") before its
+  // first upload; until someone does, no uploaded image ever appears.
+  async uploadTermsShown() {
+    return this.adapter.executePageScript(`[...document.querySelectorAll('button')].some(el =>
+      /^\\s*i agree\\s*$/i.test(el.innerText || el.textContent || '') && el.getBoundingClientRect().width > 0)`).catch(() => false);
+  }
   async clickButton(label) {
     return this.adapter.executePageScript(`(() => {
       const label = ${JSON.stringify(label.toLowerCase())};
@@ -238,7 +244,15 @@ class FlowReferenceController {
         return this.clickButton('Upload media');
       }, [file]);
       let selectedTitle = '';
+      let termsCheckedAt = 0;
       const selected = await this.waitFor(async () => {
+        if (Date.now() - termsCheckedAt > 2000) {
+          termsCheckedAt = Date.now();
+          if (await this.uploadTermsShown() === true) {
+            throw new Error('upload_terms_required: Google Flow asks this account to accept its upload terms ("I agree") ' +
+              'before images can be uploaded; open the account in TEAMYRA and accept them');
+          }
+        }
         const rows = await this.candidates();
         const row = rows.find(row => [uniqueName.toLowerCase(), path.basename(file).toLowerCase()].includes(row.title.toLowerCase()));
         if (!row) return null;

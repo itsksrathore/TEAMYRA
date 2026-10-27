@@ -41,11 +41,17 @@ async function main() {
     assert.notEqual(uploadPath,original);
   }}});
   uploader.clickButton=async()=>true;
+  uploader.uploadTermsShown=async()=>false;
   uploader.candidates=async()=>[
     {marker:'old',title:'car',source:'wrong'},
     {marker:'new',title:uploadTitle,source:'https://flow.google.com/asb/upload'}
   ];
   uploader.preview=async()=>({title:uploadTitle,source:'https://flow.google.com/asb/upload'});
+  // An account that has not accepted Flow's upload terms says so at once.
+  const blocked = new FlowReferenceController({executePageScript:async()=>true,browser:{uploadFiles:async()=>({ok:true})}});
+  blocked.clickButton=async()=>true;
+  blocked.candidates=async()=>[];
+  await assert.rejects(blocked.uploadFile({path:original}), /upload_terms_required/);
   const uploaded=await uploader.uploadFile({path:original});
   assert.match(uploaded.uploaded_name,/^teamyra-[0-9a-f-]+$/);
   assert.equal(fs.existsSync(uploadPath),false,'only the temporary copy is cleaned');
