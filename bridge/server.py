@@ -23,6 +23,7 @@ import recovery
 import scheduler
 import media_engine
 import media_support
+import codex_images
 import desktop_runtime
 from expected_outputs import validate_expect_files
 
@@ -1215,6 +1216,22 @@ TOOLS = [
          "max_parallel": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10,
                           "description": "Concurrent Flow generations for this batch; adapts downward automatically when Flow is busy."}},
          "required": ["requests"], "additionalProperties": False}},
+    {"name": "codex_image_batch", "description": "Generate up to 50 images with Codex's built-in image tool (gpt-image) in parallel and save each to its own file. Each image is its own short Codex run with the reference images attached directly, the usual model and reasoning effort and full image quality (Codex checks the result once and retries once if it clearly misses); several run at once across the signed-in Codex accounts (codex1, codex2), about 1-2 minutes per image instead of a long worker job. Use this instead of a worker job that generates images one by one. Returns a batch_id at once; poll codex_image_status.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string", "description": "Project folder; outputs and relative paths are inside it."},
+         "requests": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object", "properties": {
+             "prompt": {"type": "string", "description": "Full image prompt. Refer to references as Image 1, Image 2... in the order given."},
+             "output": {"type": "string", "description": "Output file (.png, .jpg or .webp), relative to project_path or absolute inside it."},
+             "references": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "Reference image files (relative to project_path or absolute)."},
+             "size": {"type": "string", "enum": ["1536x1024", "1024x1536", "1024x1024", "auto"], "default": "1536x1024"}},
+             "required": ["prompt", "output"], "additionalProperties": False}},
+         "max_parallel": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Images generating at once (default 2 per signed-in Codex account)."},
+         "accounts": {"type": "array", "items": {"type": "string"}, "description": "Limit to these Codex workers, e.g. [\"codex2\"]."}},
+         "required": ["project_path", "requests"], "additionalProperties": False}},
+    {"name": "codex_image_status", "description": "Progress of a codex_image_batch: per image status (queued, generating, completed, refused, failed, cancelled), output path, size, seconds and error.",
+     "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
+    {"name": "codex_image_cancel", "description": "Stop a codex_image_batch: images not started yet are cancelled; running ones finish.",
+     "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
     {"name": "media_transform", "description": "Queue an edit/variation/extend/remix operation against an exact TEAMYRA asset id.",
      "inputSchema": {"type": "object", "properties": {
          "operation": {"type": "string", "enum": [
@@ -1682,6 +1699,13 @@ def tool_call(name, a):
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
         result["runtime"] = wake_media_surface(surface)
         return result
+    if name == "codex_image_batch":
+        return codex_images.create_batch(ROOT, a["requests"], a["project_path"], max_parallel=a.get("max_parallel"),
+                                         accounts=a.get("accounts"))
+    if name == "codex_image_status":
+        return codex_images.batch_status(ROOT, a["batch_id"])
+    if name == "codex_image_cancel":
+        return codex_images.cancel_batch(ROOT, a["batch_id"])
     if name == "media_batch":
         result = media_engine.create_batch(ROOT, a["requests"], max_parallel=a.get("max_parallel"))
         surfaces = {
