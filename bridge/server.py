@@ -24,6 +24,7 @@ import scheduler
 import media_engine
 import media_support
 import codex_images
+import media_guide
 import desktop_runtime
 from expected_outputs import validate_expect_files
 
@@ -1205,7 +1206,7 @@ TOOLS = [
          "confirm": {"type": "boolean", "default": False},
          "file_path": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
-    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings.",
+    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings. For two or more generations use media_batch (one call, run in parallel); for Codex/gpt-image stills use codex_image_batch. See media_guide.",
      "inputSchema": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
                      "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
     {"name": "media_batch", "description": "Bulk-generate up to 50 images/videos/sound effects in parallel. Jobs share one batch_id; the desktop worker submits them back to back so Flow generates many at once (e.g. 10-30 videos in minutes rather than one by one), then downloads and verifies each result. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames. Poll media_status with batch_id. For the fastest turnaround set download_quality='source' (720p video / original image, no upscale wait); default video downloads are 1080p upscales.",
@@ -1216,6 +1217,8 @@ TOOLS = [
          "max_parallel": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10,
                           "description": "Concurrent Flow generations for this batch; adapts downward automatically when Flow is busy."}},
          "required": ["requests"], "additionalProperties": False}},
+    {"name": "media_guide", "description": "Read first before generating media or images: which TEAMYRA tool to use (Flow media_batch, Codex codex_image_batch), how to batch, poll and recover, plus live capacity (Flow tabs, Google connection, Codex image accounts).",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "codex_image_batch", "description": "Generate up to 50 images with Codex's built-in image tool (gpt-image) in parallel and save each to its own file. Each image is its own short Codex run with the reference images attached directly, the usual model and reasoning effort and full image quality (Codex checks the result once and retries once if it clearly misses); several run at once across the signed-in Codex accounts (codex1, codex2), about 1-2 minutes per image instead of a long worker job. Use this instead of a worker job that generates images one by one. Returns a batch_id at once; poll codex_image_status.",
      "inputSchema": {"type": "object", "properties": {
          "project_path": {"type": "string", "description": "Project folder; outputs and relative paths are inside it."},
@@ -1548,7 +1551,8 @@ TOOLS = [
         "follow_command as a background task (its exit signals completion). worker=auto picks the first idle "
         "worker without a usage cooldown in the configured order. With queue=true (default) a busy worker gets "
         "the job as state queued with queue_position. ChatGPT queues are shared unless pin=true; other "
-        "providers share within their provider only with pool=true. expect_files requires non-empty output files."),
+        "providers share within their provider only with pool=true. expect_files requires non-empty output files. "
+        "Not for drawing images: use codex_image_batch (Codex/gpt-image) or media_batch (Google Flow); see media_guide."),
      "inputSchema": {"type": "object", "properties": {
          "worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
          "label": {"type": "string", "description": "short name shown in lists and the dashboard"},
@@ -1636,7 +1640,7 @@ TOOLS = [
          "required": ["job_id", "position"], "additionalProperties": False}},
     {"name": "clear_worker_cooldown", "description": "Clear the usage-limit cooldown for one worker or all.",
      "inputSchema": {"type": "object", "properties": {"worker": {"type": "string"}}, "additionalProperties": False}},
-    {"name": "run_ai_worker", "description": "Compatibility: start_task, then wait up to timeout_seconds. If the job is still running, returns its job_id instead of stopping it.",
+    {"name": "run_ai_worker", "description": "Compatibility: start_task, then wait up to timeout_seconds. If the job is still running, returns its job_id instead of stopping it. Not for drawing images: use codex_image_batch or media_batch (see media_guide).",
      "inputSchema": {"type": "object", "properties": {"worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
                      "write": {"type": "boolean", "default": True},
@@ -1699,6 +1703,8 @@ def tool_call(name, a):
         surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
         result["runtime"] = wake_media_surface(surface)
         return result
+    if name == "media_guide":
+        return media_guide.guide(ROOT)
     if name == "codex_image_batch":
         return codex_images.create_batch(ROOT, a["requests"], a["project_path"], max_parallel=a.get("max_parallel"),
                                          accounts=a.get("accounts"))
@@ -1999,6 +2005,9 @@ def tool_call(name, a):
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
         )
         result = {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
+        hint = media_guide.image_task_hint(a["task"], worker)
+        if hint:
+            result["hint"] = hint
         try:
             meta = read_meta(job_id)
             result["state"] = meta.get("state")
@@ -2151,7 +2160,8 @@ def tool_call(name, a):
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
         res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}
-        return {**res, **follow_info(job_id)}
+        hint = media_guide.image_task_hint(a["task"], worker)
+        return {**res, **follow_info(job_id), **({"hint": hint} if hint else {})}
     if name == "run_ai_parallel":
         started = []
         for i, t in enumerate(a["tasks"], 1):
@@ -2231,7 +2241,8 @@ def handle(msg):
                 "title": "TEAMYRA Multi-Agent Engineering OS",
                 "version": MCP_SERVER_VERSION,
                 "description": "Local-first multi-agent orchestration, testing, worktrees, reviews and worker routing."
-            }}}
+            },
+            "instructions": media_guide.INSTRUCTIONS}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
     if method == "tools/list":
