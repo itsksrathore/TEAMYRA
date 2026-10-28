@@ -771,6 +771,29 @@ async function accountTests(temp) {
     assert.equal(record.state, others ? 'queued' : 'needs_user_auth', others ? 'another account takes it' : 'alone, it waits for the user');
   }
 
+  // The first tab of a brand-new account creates its own project too, then
+  // keeps it (opening "the most recent project" could land in a sibling tab's).
+  {
+    const fresh = fakeCore(temp, ['n-0', 'n-1'].map((job_id, index) => ({ job_id, created_at: index, batch_id: 'b',
+      request: { type: 'video', prompt: 'p' + index, project_path: 'D:/folder', generation_settings: { download_quality: 'source' } } })));
+    const loaded = loadConsumer(async (name, args = {}) => name === 'media.flow-project'
+      ? { provider_url: null, jobs: 0 } : fresh.core(name, args));
+    const seen = [];
+    const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager, profileId: 'acct7', lane: 0, lanes: 3,
+      provider: { ensureLoaded: async () => {}, destroy() {}, view: { webContents: { getURL: () => 'https://flow.google.com/project/own-0' } },
+        adapter: { probe: async () => ({ buttonLabels: [] }), classifyProbe: () => ({ signedIn: true }), capabilities: async () => ({}),
+          submit: async (job, checkpoint) => {
+            seen.push({ preferred: job.preferred_project_url, create: job.create_new_project });
+            const submission = { submitted_at: Date.now() / 1000, provider_url: 'https://flow.google.com/project/own-0', baseline_failure_signals: 0 };
+            await checkpoint(submission);
+            return submission;
+          },
+          generationStates: async list => ({ page: { state: 'ok', failure_signals: 0 }, states: new Map(list.map(job => [job.job_id, { state: 'generating' }])) }) } } });
+    for (const id of ['n-0', 'n-1']) await consumer.admit({ ...fresh.records.get(id), state: 'preparing' });
+    for (const record of fresh.records.values()) record.state = 'completed';
+    assert.deepEqual(seen, [{ preferred: null, create: true }, { preferred: 'https://flow.google.com/project/own-0', create: false }]);
+  }
+
   // A tab whose account may not claim (disabled, signed out, parked) claims nothing.
   {
     const gated = fakeCore(temp, [{ job_id: 'gated', created_at: 0, batch_id: 'b', request: { type: 'video', prompt: 'p' } }]);

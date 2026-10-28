@@ -386,10 +386,13 @@ class MediaJobConsumer {
       const preferred = await callCore('media.flow-project', { project_path: job.request?.project_path, lane: this.lane,
         profile_id: this.profileId }, { timeout: 15000 })
         .catch(() => null);
-      const preferredUrl = preferred?.provider_url || (this.lane ? this.laneProjects.get(folder) : null) || null;
+      // A tab of an account with no project for the folder yet creates its own
+      // (also the first tab: "the most recent project" may be a sibling tab's
+      // brand-new one, and two tabs in one project confuse result attribution).
+      const preferredUrl = preferred?.provider_url || this.laneProjects.get(folder) || null;
       const submitJob = { ...job, preferred_project_url: preferredUrl,
         // An extra tab starts its own project only when core confirmed it has none.
-        create_new_project: this.lane > 0 && !preferredUrl && Boolean(preferred),
+        create_new_project: !preferredUrl && Boolean(preferred) && (this.lane > 0 || Boolean(folder)),
         allow_navigation: !this.activeDownloads.size };
       try {
         submission = await this.ui.run(() => adapter.submit(submitJob, async pendingSubmission => {
@@ -403,7 +406,7 @@ class MediaJobConsumer {
         // Remember the tab's project even if this submission failed, so the
         // next job does not create yet another one.
         const project = String(this.provider.view?.webContents?.getURL?.() || '').match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1];
-        if (this.lane && project) this.laneProjects.set(folder, project);
+        if (project) this.laneProjects.set(folder, project);
       }
       submission = { ...submission, lane: this.lane, profile_id: this.profileId };
       this.onSubmitResult?.(true);

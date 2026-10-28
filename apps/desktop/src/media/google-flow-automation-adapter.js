@@ -759,12 +759,13 @@ class GoogleFlowAutomationAdapter {
 
     while (Date.now() < createDeadline && !targetUrl) {
       await new Promise(resolve => setTimeout(resolve, 700));
-      const urls = await this.projectUrls();
-      targetUrl = urls.find(url => !before.has(url)) || null;
-
+      // The project this page navigated into is ours. A new entry in the home
+      // list may be another tab's project created at the same moment, so it
+      // counts only when no navigation came.
       const navigated = this.webContents.getURL();
       const navMatch = navigated.match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i);
       if (navMatch?.[1]) targetUrl = navMatch[1];
+      else if (Date.now() - startedAt > 6000) targetUrl = (await this.projectUrls()).find(url => !before.has(url)) || null;
 
       if (!jsFallbackUsed && Date.now() - startedAt > 3500 && !targetUrl) {
         jsFallbackUsed = true;
