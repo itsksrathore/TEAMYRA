@@ -1362,6 +1362,20 @@ async function dispatchDesktopControl(action, payload = {}) {
       if (payload.surface !== 'music' && Array.isArray(payload.find_prompts)) {
         return surface.adapter.browser.withActivePage(() => surface.adapter.findPrompts(payload.find_prompts.slice(0, 20)));
       }
+      // Read-only: does a delivered file match its job's own result tile?
+      // Fingerprints the tile in the job's project (this tab) and the file.
+      if (payload.surface !== 'music' && payload.verify_file && typeof payload.verify_file === 'object') {
+        const { result_key: key, local_path: file, provider_url: projectUrl } = payload.verify_file;
+        return surface.adapter.browser.withActivePage(async () => {
+          const project = String(projectUrl || '').match(/^(https:\/\/flow\.google\.com\/project\/[^/?#]+)/i)?.[1] || '';
+          if (project && !surface.view.webContents.getURL().startsWith(project)) await surface.adapter.loadProjectUrl(project);
+          const tile = await surface.adapter.resultFingerprint(key).catch(() => null);
+          const { mediaFingerprints, hammingDistance } = require('./media/media-output-validator');
+          const hashes = file && fs.existsSync(file) ? await mediaFingerprints(file) : [];
+          const distance = tile && hashes.length ? Math.min(...hashes.map(hash => hammingDistance(tile, hash))) : null;
+          return { url: surface.view.webContents.getURL(), tile, frames: hashes.length, distance, source: surface.adapter.lastFingerprint || null };
+        });
+      }
       if (payload.surface !== 'music' && payload.match_job && typeof payload.match_job === 'object') {
         // Read-only: how the matcher and the downloader see one job's result.
         return surface.adapter.browser.withActivePage(async () => {
