@@ -1242,7 +1242,20 @@ class GoogleFlowAutomationAdapter {
       target.setAttribute('data-teamyra-generate-target', marker);
       return '[data-teamyra-generate-target="' + marker + '"]';
     })()`);
-    if (!selector) throw new Error('selector_failure: Google Flow generate control is unavailable or disabled');
+    if (!selector) {
+      // Flow keeps Generate disabled when the account has no credits left; say
+      // so when the page does, and keep what the composer showed otherwise.
+      const page = await this.executePageScript(`(() => ({
+        body: (document.body?.innerText || '').toLowerCase().replace(/generating will use [0-9]+ credits/g, '').slice(0, 20000),
+        buttons: [...document.querySelectorAll('button')].filter(el => el.getBoundingClientRect().width > 0)
+          .map(el => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')).trim().replace(/\\s+/g, ' ').slice(0, 60))
+          .filter(Boolean).slice(-25)
+      }))()`).catch(() => ({ body: '', buttons: [] }));
+      const credits = CREDIT_WORDS.find(word => String(page?.body || '').includes(word));
+      if (credits) throw new Error('credits_exhausted_before_submission: Google Flow reports "' + credits + '"');
+      throw new Error('selector_failure: Google Flow generate control is unavailable or disabled; buttons=' +
+        JSON.stringify(page?.buttons || []).slice(0, 900));
+    }
 
     const acceptedFrom = async baseline => {
       const deadline = Date.now() + 15000;

@@ -261,6 +261,79 @@ def _atomic_write(path, payload):
         tmp.unlink(missing_ok=True)
 
 
+def _index_file(root):
+    return _media_root(root) / ".job-index.json"
+
+
+def _summarize(job):
+    """The fields queue decisions need, shaped like a job so the same helpers
+    (_job_profile, _handler, _refs_key...) work on it."""
+    request = job.get("request") or {}
+    submission = job.get("provider_submission") or {}
+    return {
+        "job_id": job.get("job_id"), "state": job.get("state"), "batch_id": job.get("batch_id"),
+        "created_at": job.get("created_at"), "updated_at": job.get("updated_at"),
+        "retry_after": job.get("retry_after"), "cancel_requested": job.get("cancel_requested") is True,
+        "reconcile_required": job.get("reconcile_required") is True, "operation": job.get("operation"),
+        "source_profile_id": job.get("source_profile_id"), "claimed_profile": job.get("claimed_profile"),
+        "claimed_lane": job.get("claimed_lane"), "claimed_at": job.get("claimed_at"),
+        "possible_submission": _possible_submission(job),
+        "request": {"surface": request.get("surface"), "max_parallel": request.get("max_parallel"),
+                    "project_path": request.get("project_path")},
+        "provider_submission": {key: submission.get(key) for key in (
+            "submitted_at", "provider_url", "profile_id", "lane", "result_key") if submission.get(key) is not None},
+        "resolved_references": [{"asset_id": item.get("asset_id"), "path": item.get("path")}
+                                for item in job.get("resolved_references") or [] if isinstance(item, dict)],
+    }
+
+
+def _job_summaries(root):
+    """Summaries of every job, re-reading only files changed since last time.
+
+    Every Flow tab of every account claims from the queue; reading all job
+    files (thousands, ~2 s) inside the state lock on each claim kept the lock
+    busy and timed claims out. The cache is advisory: a file whose mtime or
+    size changed is read again, and a claim re-reads its chosen job in full."""
+    folder = _jobs_dir(root)
+    cache_path = _index_file(root)
+    cache = _read_json(cache_path, {})
+    entries = cache.get("jobs") if isinstance(cache, dict) and cache.get("version") == 1 else None
+    entries = entries if isinstance(entries, dict) else {}
+    fresh, changed = {}, False
+    try:
+        listing = list(os.scandir(folder))
+    except OSError:
+        listing = []
+    for entry in listing:
+        name = entry.name
+        if not (name.startswith("media-") and name.endswith(".json")):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        stamp = [stat.st_mtime_ns, stat.st_size]
+        known = entries.get(name)
+        if isinstance(known, dict) and known.get("stamp") == stamp and isinstance(known.get("job"), dict):
+            fresh[name] = known
+            continue
+        job = _read_json(entry.path, None)
+        if not isinstance(job, dict):
+            continue
+        fresh[name] = {"stamp": stamp, "job": _summarize(job)}
+        changed = True
+    if changed or len(fresh) != len(entries):
+        tmp = cache_path.with_name(cache_path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
+        try:
+            tmp.write_text(json.dumps({"version": 1, "jobs": fresh}, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, cache_path)
+        except OSError:
+            pass
+        finally:
+            tmp.unlink(missing_ok=True)
+    return [item["job"] for item in fresh.values()]
+
+
 @contextmanager
 def _state_lock(root, timeout=15.0):
     lock = _lock_file(root)
@@ -748,8 +821,9 @@ def batch_status(root, batch_id):
     if not _BATCH_ID_RE.fullmatch(batch_id):
         raise ValueError("invalid media batch id")
     rows = []
-    for path in _jobs_dir(root).glob("media-*.json"):
-        job = _read_json(path, None)
+    ids = [item["job_id"] for item in _job_summaries(root) if item.get("batch_id") == batch_id and item.get("job_id")]
+    for job_id in ids:
+        job = _read_json(_job_path(root, job_id), None)
         if isinstance(job, dict) and job.get("batch_id") == batch_id:
             item = public_job(job)
             if job.get("asset_id"):
@@ -991,10 +1065,7 @@ def flow_project_for(root, project_path, lane=0, profile_id=None):
         return {"provider_url": None, "lane": lane, "profile_id": profile}
     # The project holding most of the folder's results wins; recency breaks ties.
     usage = {}
-    for path in _jobs_dir(root).glob("media-*.json"):
-        job = _read_json(path, None)
-        if not isinstance(job, dict):
-            continue
+    for job in _job_summaries(root):
         if str((job.get("request") or {}).get("project_path") or "").lower() != wanted:
             continue
         if _job_lane(job) != lane or _job_profile(job) != profile:
@@ -1016,9 +1087,8 @@ def claimed_result_keys(root, provider_url=None):
     project. Durable across desktop restarts, unlike the worker's memory."""
     project = (_FLOW_PROJECT_RE.match(str(provider_url or "")) or [None, None])[1] if provider_url else None
     claimed = {}
-    for path in _jobs_dir(root).glob("media-*.json"):
-        job = _read_json(path, None)
-        if not isinstance(job, dict) or job.get("state") == "cancelled":
+    for job in _job_summaries(root):
+        if job.get("state") == "cancelled":
             continue
         submission = job.get("provider_submission") or {}
         key = submission.get("result_key")
@@ -1199,6 +1269,10 @@ def append_job_metadata(root, job_id, patch):
 
 
 _BATCH_ACTIVE_STATES = {"preparing", "submitting", "generating", "downloading", "extracting_audio", "organizing"}
+# A claim whose worker never got the answer (its core call timed out) leaves the
+# job in "preparing" with nobody working on it; a worker leaves that state
+# within seconds, so after this long it is claimable again.
+ORPHANED_CLAIM_SECONDS = 300
 
 
 def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profile_id=None, main=None):
@@ -1228,10 +1302,11 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
         active = {}
         now = time.time()
         jobs = []
-        for path in _jobs_dir(root).glob("media-*.json"):
-            job = _read_json(path, None)
-            if not isinstance(job, dict):
-                continue
+        for job in _job_summaries(root):
+            orphaned = (job.get("state") == "preparing" and not job.get("possible_submission")
+                        and now - float(job.get("claimed_at") or 0) > ORPHANED_CLAIM_SECONDS)
+            if orphaned:
+                job = {**job, "state": "queued", "orphaned": True}
             jobs.append(job)
             if job.get("batch_id") and job.get("state") in _BATCH_ACTIVE_STATES:
                 key = (job["batch_id"], _handler(job)[0] or DEFAULT_PROFILE)
@@ -1280,10 +1355,18 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
             return None
         candidates.sort(key=lambda item: float(item.get("created_at") or 0))
         resumable = [item for item in candidates if (item.get("provider_submission") or {}).get("submitted_at")]
-        job = resumable[0] if resumable else candidates[0]
+        chosen = resumable[0] if resumable else candidates[0]
         if not resumable and refs_key:
-            same_batch = [item for item in candidates if item.get("batch_id") and item.get("batch_id") == job.get("batch_id")]
-            job = next((item for item in same_batch if _refs_key(item) == refs_key), job)
+            same_batch = [item for item in candidates if item.get("batch_id") and item.get("batch_id") == chosen.get("batch_id")]
+            chosen = next((item for item in same_batch if _refs_key(item) == refs_key), chosen)
+        # The index is advisory: claim only if the job file still says what it said.
+        job = _read_json(_job_path(root, chosen["job_id"]), None)
+        expected = "preparing" if chosen.get("orphaned") else chosen.get("state")
+        if not isinstance(job, dict) or job.get("state") != expected or job.get("cancel_requested"):
+            return None
+        if chosen.get("orphaned"):
+            job.setdefault("history", []).append(_event(
+                "queued", f"Claim by {job.get('claimed_by')} was never picked up; returned to the queue"))
         job["state"] = "preparing"
         job["claimed_by"] = str(worker or surface)[:120]
         job["claimed_at"] = time.time()

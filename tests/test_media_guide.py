@@ -30,6 +30,8 @@ class MediaGuideTests(unittest.TestCase):
                 (root / "profiles" / "google-media" / name).mkdir(parents=True)
                 (root / "profiles" / "google-media" / name / "teamyra-profile.json").write_text(
                     json.dumps({"name": name, "enabled": enabled}), encoding="utf-8")
+            (root / "profiles" / "google-media" / "builtin-google.json").write_text(
+                json.dumps({"enabled": True, "name": "Main"}), encoding="utf-8")
             (root / "media").mkdir()
             (root / "media" / "connection.json").write_text(json.dumps({"connected": True, "profiles": {
                 "acct-a": {"connected": True}, "acct-b": {"connected": True, "challenged": True},
@@ -40,6 +42,15 @@ class MediaGuideTests(unittest.TestCase):
         self.assertEqual(result["flow_accounts_working"], 2, "built-in (top-level state) and acct-a; challenged and disabled do not count")
         self.assertEqual(result["flow_tabs_per_account"], 3)
         self.assertEqual(result["flow_tabs"], 6)
+        self.assertEqual(result["flow_accounts"][0]["name"], "Main")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "profiles" / "google-media").mkdir(parents=True)
+            (root / "profiles" / "google-media" / "builtin-google.json").write_text(
+                json.dumps({"enabled": False}), encoding="utf-8")
+            off = media_guide.capacity(root)
+        self.assertFalse(off["flow_accounts"][0]["enabled"], "the built-in account can be disabled")
+        self.assertEqual(off["flow_accounts_working"], 0)
 
     def test_worker_image_jobs_get_a_hint(self):
         task = "Follow 00_bible/CHARSHEET_TASK.md. Use your BUILT-IN IMAGE GENERATION TOOL (gpt-image / imagegen) only."

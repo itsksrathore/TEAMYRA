@@ -102,7 +102,7 @@ if (app.isPackaged && !process.env.TEAMYRA_CORE_EXE) {
 }
 fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
 
-const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary } = require('./provider-registry');
+const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary, builtinMediaMetaFile } = require('./provider-registry');
 const { callCore } = require('./core-api');
 const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
 const { GoogleMediaEngine } = require('./media/google-media-engine');
@@ -1245,12 +1245,23 @@ async function desktopCreateAccount(providerId, requestedName) {
   return { ok: true, provider: provider.id, profileId, name, loginReady: true };
 }
 
+// Settings file of an account: a managed profile's teamyra-profile.json, or the
+// built-in Google Media account's own file (it can be disabled like the others).
+function profileMetaFile(providerId, profileId) {
+  if (providerId === 'google-media' && profileId === 'google') {
+    const file = builtinMediaMetaFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    return file;
+  }
+  const dir = managedProfileDir(providerId, profileId);
+  return dir ? path.join(dir, 'teamyra-profile.json') : '';
+}
+
 async function desktopUpdateAccount(providerId, profileId, patch = {}) {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
-  const dir = managedProfileDir(providerId, profileId);
-  if (!dir) return { ok: false, reason: 'managed-profile-not-found' };
-  const file = path.join(dir, 'teamyra-profile.json');
+  const file = profileMetaFile(providerId, profileId);
+  if (!file) return { ok: false, reason: 'managed-profile-not-found' };
   let meta = {};
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -1530,10 +1541,9 @@ ipcMain.handle('teamyra:add-account', async (_event, providerId, requestedName) 
 ipcMain.handle('teamyra:update-account', async (_event, providerId, profileId, patch = {}) => {
   const provider = providerById(providerId);
   if (!provider) throw new Error('Unknown provider');
-  const dir = managedProfileDir(providerId, profileId);
-  if (!dir) return { ok: false, reason: 'managed-profile-not-found' };
+  const file = profileMetaFile(providerId, profileId);
+  if (!file) return { ok: false, reason: 'managed-profile-not-found' };
 
-  const file = path.join(dir, 'teamyra-profile.json');
   let meta = {};
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));

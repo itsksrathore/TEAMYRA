@@ -297,6 +297,32 @@ class MediaBulkTests(unittest.TestCase):
         resumed = media_engine.claim_next_job(self.root, "visual", "a", lane=1, lanes=3, profile_id="acct2")
         self.assertEqual(resumed["job_id"], first, "a submitted job resumes before new work, in its own account")
 
+    def test_claim_sees_changes_made_after_the_index_was_built(self):
+        first, second = (job["job_id"] for job in media_engine.create_batch(self.root, [self.request("a"), self.request("b")])["jobs"])
+        media_engine._job_summaries(self.root)
+        self.assertTrue((self.root / "media" / ".job-index.json").exists())
+        media_engine.cancel_job(self.root, first)
+        claimed = media_engine.claim_next_job(self.root, "visual", "g")
+        self.assertEqual(claimed["job_id"], second, "a job cancelled after indexing is not claimed")
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "g"))
+        (self.root / "media" / ".job-index.json").write_text("not json", encoding="utf-8")
+        self.assertEqual(len(media_engine._job_summaries(self.root)), 2, "a broken index is rebuilt")
+
+    def test_orphaned_claim_returns_to_the_queue(self):
+        job_id = media_engine.create_batch(self.root, [self.request("a")])["jobs"][0]["job_id"]
+        claimed = media_engine.claim_next_job(self.root, "visual", "lost-worker", profile_id="acct2")
+        self.assertEqual(claimed["job_id"], job_id)
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "g"), "a fresh claim is left alone")
+        self.edit(job_id, claimed_at=time.time() - media_engine.ORPHANED_CLAIM_SECONDS - 5)
+        again = media_engine.claim_next_job(self.root, "visual", "g")
+        self.assertEqual(again["job_id"], job_id, "nobody picked the claim up, so another tab may")
+        self.assertIn("never picked up", " ".join(str(e.get("detail")) for e in again["history"]))
+        self.assertEqual(again["claimed_profile"], "google")
+        # A possible submission is never reclaimed this way.
+        self.edit(job_id, state="preparing", claimed_at=1.0, submission_phase="may_have_submitted",
+                  reconcile_required=True)
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "g"))
+
     def test_connection_is_kept_per_account(self):
         media_engine.write_connection_status(self.root, {"connected": True, "flow_ready": True}, "google")
         media_engine.write_connection_status(self.root, {"connected": False, "needs_user_auth": True}, "acct2")

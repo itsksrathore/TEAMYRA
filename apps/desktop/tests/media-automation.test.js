@@ -39,7 +39,10 @@ assert.equal(flowLaneCount('nope'), 3);
   write('acct-a', { enabled: true, priority: 100 });
   write('acct-off', { enabled: false });
   write('acct-bare');
-  const listed = mediaProfiles(root);
+  fs.writeFileSync(path.join(root, 'builtin-google.json'), JSON.stringify({ enabled: false }));
+  assert.equal(mediaProfiles(root, path.join(root, 'builtin-google.json'))[0].enabled, false, 'the built-in account can be disabled');
+  fs.unlinkSync(path.join(root, 'builtin-google.json'));
+  const listed = mediaProfiles(root, path.join(root, 'builtin-google.json'));
   fs.rmSync(root, { recursive: true, force: true });
   assert.deepEqual(listed.map(item => item.id).sort(), ['acct-a', 'acct-b', 'acct-bare', 'acct-off', 'google']);
   assert.equal(listed.find(item => item.id === 'acct-off').enabled, false);
@@ -107,8 +110,30 @@ assert.equal(flowLaneCount('nope'), 3);
     assert.equal(runtime.lastStatus.connected, false);
     engine.profiles.get('google').lastStatus.connected = false;
     const alone = { ...runtime, profileId: 'google', stopped: false, lastStatus: { connected: true } };
-    assert.equal(problem.call(alone, 'signed_out', 'x'), false, 'the only account keeps the old behaviour');
+    assert.equal(problem.call(alone, 'signed_out', 'x'), false, 'the only signed-out account keeps the old behaviour');
     assert.equal(alone.stopped, false);
+    alone.parkedUntil = 0;
+    assert.equal(problem.call(alone, 'credits', 'x'), true, 'out of credits parks even the only account: jobs wait instead of failing');
+    assert.ok(alone.parkedUntil > Date.now());
+
+    // Generate found disabled again and again (Flow's out-of-credits state)
+    // parks the account; one successful click resets the count.
+    const blocked = { ...runtime, generateBlocked: 0, parkedUntil: 0, accountProblem(kind) { this.parked = kind; return true; } };
+    const submitResult = GoogleMediaProfileRuntime.prototype.submitResult;
+    assert.deepEqual([1, 2, 3].map(() => submitResult.call(blocked, false)), ['counted', 'counted', 'counted']);
+    assert.equal(submitResult.call(blocked, true), 'ok');
+    assert.deepEqual([1, 2, 3].map(() => submitResult.call(blocked, false)), ['counted', 'counted', 'counted']);
+    assert.equal(submitResult.call(blocked, false), 'parked');
+    assert.equal(blocked.parked, 'credits');
+
+    // A disabled account stops claiming; one enabled again starts.
+    const gate = new GoogleMediaEngine({ window: null, listProfiles: () => listed });
+    const working = GoogleMediaProfileRuntime.prototype.working;
+    const tab = { profileId: 'acct-off', engine: gate, visualConsumerStarted: true, parkedUntil: 0, lastStatus: { connected: true } };
+    assert.equal(working.call(tab), false, 'disabled');
+    assert.equal(working.call({ ...tab, profileId: 'acct-a' }), true);
+    assert.equal(working.call({ ...tab, profileId: 'acct-a', parkedUntil: Date.now() + 1000 }), false, 'parked');
+    assert.equal(working.call({ ...tab, profileId: 'acct-a', lastStatus: { connected: false } }), false, 'signed out');
   } finally {
     console.warn = warn;
   }

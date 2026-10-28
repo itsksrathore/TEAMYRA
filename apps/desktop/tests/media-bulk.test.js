@@ -769,6 +769,41 @@ async function accountTests(temp) {
     assert.deepEqual(reported, ['upload_terms']);
     assert.equal(record.state, others ? 'queued' : 'needs_user_auth', others ? 'another account takes it' : 'alone, it waits for the user');
   }
+
+  // A tab whose account may not claim (disabled, signed out, parked) claims nothing.
+  {
+    const gated = fakeCore(temp, [{ job_id: 'gated', created_at: 0, batch_id: 'b', request: { type: 'video', prompt: 'p' } }]);
+    const loaded = loadConsumer(gated.core);
+    let allowed = false;
+    const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager, profileId: 'acct5', pollMs: 10,
+      mayClaim: () => allowed, provider: { ensureLoaded: async () => {}, destroy() {} } });
+    consumer.start();
+    await sleep(80);
+    consumer.stop();
+    assert.ok(!gated.calls.includes('media.claim'), 'no claim while the account may not work');
+    assert.equal(gated.records.get('gated').state, 'queued');
+  }
+
+  // Generate disabled before the click: the account counts it; once it parks
+  // as out of credits, the job goes back to the queue without a failure.
+  for (const verdict of ['counted', 'parked']) {
+    const disabled = fakeCore(temp, [{ job_id: 'gen-' + verdict, created_at: 0, batch_id: 'b', request: { type: 'video', prompt: 'p' } }]);
+    const loaded = loadConsumer(disabled.core);
+    const problems = [];
+    const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager, profileId: 'acct6',
+      onSubmitResult: ok => ok ? 'ok' : verdict, onAccountProblem: kind => { problems.push(kind); return true; },
+      provider: { ensureLoaded: async () => {}, destroy() {}, view: { webContents: { getURL: () => '' } },
+        adapter: { probe: async () => ({ buttonLabels: [] }), classifyProbe: () => ({ signedIn: true }), capabilities: async () => ({}),
+          submit: async () => { throw new Error('generation_click: selector_failure: Google Flow generate control is unavailable or disabled; buttons=[]'); } } } });
+    await consumer.admit({ ...disabled.records.get('gen-' + verdict), state: 'preparing' });
+    const record = disabled.records.get('gen-' + verdict);
+    if (verdict === 'parked') {
+      assert.equal(record.state, 'queued');
+      assert.equal(record.handed_off, 1);
+    } else {
+      assert.ok(!record.handed_off, 'one disabled Generate is an ordinary failure');
+    }
+  }
 }
 
 async function main() {

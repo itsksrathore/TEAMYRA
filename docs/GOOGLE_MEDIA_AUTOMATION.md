@@ -161,6 +161,23 @@ accounts × tabs (`media_guide` → `capacity.flow_accounts`, `flow_tabs`).
   opened in TEAMYRA) and hands the job to another account; alone, the job waits
   in `needs_user_auth`. TEAMYRA never accepts terms itself: open the account in
   Settings → Google Media and click "I agree" once.
+- **Who may claim (2026-10-28).** A tab claims only while its account is
+  enabled, signed in, unchallenged and not parked; disabling an account
+  (Settings or `agent_account_update`, including the built-in `google`, whose
+  settings live in `profiles/google-media/builtin-google.json`) stops its tabs
+  within ~10 s. Jobs it already submitted still finish there.
+- **Out of credits.** Flow usually just keeps Generate disabled. "Generate
+  disabled" before the click 4 times in a row with no successful submission
+  between, or Flow's own credit wording, parks the account for 30 minutes and
+  hands the job back to the queue (never after Generate was clicked). Out of
+  credits and upload terms park even the only account: jobs wait in the queue
+  instead of failing over and over.
+- **Core load.** Claims, result-key and project lookups read a job index
+  (`media/.job-index.json`, refreshed per file by mtime and size) instead of
+  every job file (~2 s for 2,000 jobs, held under the state lock while 15 tabs
+  polled; claims timed out and the lock jammed). A claim re-reads its chosen
+  job before taking it. A claim nobody picked up (its worker's core call timed
+  out) stays in `preparing`; after 5 minutes it is claimable again.
 - **Connection status** is kept per account (`media/connection.json` →
   `profiles`); the top level says whether any account works, so one signed-out
   account no longer reports Flow as disconnected.

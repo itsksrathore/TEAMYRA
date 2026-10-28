@@ -97,7 +97,7 @@ class Mutex {
 }
 
 class MediaJobConsumer {
-  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null, lane = 0, lanes = 1, isMain = () => true, onAccountProblem = null }) {
+  constructor({ surface, workerName, provider, downloadManager, profileId = 'google', pollMs = 3500, onActivity = () => {}, maxParallel = null, monitorMs = MONITOR_MS, ready = null, lane = 0, lanes = 1, isMain = () => true, onAccountProblem = null, mayClaim = () => true, onSubmitResult = null }) {
     this.surface = surface;
     this.workerName = workerName;
     // Several Flow tabs (lanes) may work one queue; each has its own page and
@@ -114,6 +114,10 @@ class MediaJobConsumer {
     // (onAccountProblem returns true when another account can take them).
     this.isMain = isMain;
     this.onAccountProblem = onAccountProblem;
+    // mayClaim: the account is enabled, signed in, unchallenged and not parked.
+    // onSubmitResult(ok): tells the account whether Generate could be clicked.
+    this.mayClaim = mayClaim;
+    this.onSubmitResult = onSubmitResult;
     this.pollMs = pollMs;
     this.running = false;
     this.busy = false;
@@ -197,7 +201,7 @@ class MediaJobConsumer {
     if (!this.running) return;
     await this.ready;
     if (!this.pipeline) return this.serialTick();
-    if (this.submitting || this.inFlight.size >= this.parallelLimit || Date.now() < this.pausedUntil) {
+    if (this.submitting || this.inFlight.size >= this.parallelLimit || Date.now() < this.pausedUntil || this.mayClaim() === false) {
       this.schedule(Date.now() < this.pausedUntil ? Math.min(this.pollMs, this.pausedUntil - Date.now() + 50) : this.pollMs);
       return;
     }
@@ -224,7 +228,7 @@ class MediaJobConsumer {
   }
 
   async serialTick() {
-    if (this.busy) {
+    if (this.busy || this.mayClaim() === false) {
       this.schedule(this.pollMs);
       return;
     }
@@ -266,8 +270,16 @@ class MediaJobConsumer {
   // is not the job's fault: another account takes the job.
   async handOffAfterError(job, ctx, error) {
     const text = String(error?.message || error || '');
-    if (ctx.checkpointed || !/upload_terms_required/.test(text)) return false;
-    return this.handOff(job, 'upload_terms', 'Flow upload terms are not accepted in this account');
+    if (ctx.checkpointed) return false;
+    if (/upload_terms_required/.test(text)) return this.handOff(job, 'upload_terms', 'Flow upload terms are not accepted in this account');
+    if (/credits_exhausted/.test(text)) return this.handOff(job, 'credits', 'Flow credits are exhausted');
+    // Generate disabled before the click, again and again, is how Flow shows
+    // an account with no credits left; the account decides when that is so.
+    if (/generate control (?:is unavailable or disabled|did not become ready)/i.test(text) &&
+        this.onSubmitResult?.(false) === 'parked') {
+      return this.handOff(job, 'credits', 'Flow keeps Generate disabled in this account (usually no credits left)');
+    }
+    return false;
   }
 
   async stableProbe(adapter, timeoutMs = 15000) {
@@ -391,6 +403,7 @@ class MediaJobConsumer {
         if (this.lane && project) this.laneProjects.set(folder, project);
       }
       submission = { ...submission, lane: this.lane, profile_id: this.profileId };
+      this.onSubmitResult?.(true);
       await callCore('media.patch', { job_id: jobId, patch: {
         provider: this.surface === 'music' ? 'google-flow-music' : 'google-flow',
         provider_submission: submission, reconcile_required: false, submission_phase: 'submitted'

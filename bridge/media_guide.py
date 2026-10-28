@@ -91,8 +91,13 @@ def capacity(root):
 def _flow_accounts(root, saved):
     """Every Google Media account with its last observed state."""
     profiles = saved.get("profiles") if isinstance(saved.get("profiles"), dict) else {}
-    accounts = [{"profile_id": "google", "name": "Google Account 1", "enabled": True}]
     folder = Path(root) / "profiles" / "google-media"
+    try:
+        builtin = json.loads((folder / "builtin-google.json").read_text(encoding="utf-8"))
+    except Exception:
+        builtin = {}
+    accounts = [{"profile_id": "google", "name": str(builtin.get("name") or "Google Account 1"),
+                 "enabled": builtin.get("enabled") is not False}]
     try:
         entries = sorted(folder.iterdir())
     except OSError:

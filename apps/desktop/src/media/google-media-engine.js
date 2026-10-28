@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { callCore } = require('../core-api');
-const { profileRoot } = require('../provider-registry');
+const { profileRoot, builtinMediaMetaFile } = require('../provider-registry');
 const { GoogleMediaSessionManager, safeProfileId } = require('./google-media-session-manager');
 const { MediaDownloadManager } = require('./media-download-manager');
 const { GoogleFlowProvider } = require('./google-flow-provider');
@@ -48,11 +48,18 @@ const CREDITS_PARK_MS = 30 * 60 * 1000;
 // One whose Flow upload terms are not accepted is tried again after this, or
 // as soon as the user opens it in TEAMYRA (where they can accept them).
 const TERMS_PARK_MS = 20 * 60 * 1000;
+// Generate found disabled this many times in a row, with no successful
+// submission between, parks the account as out of credits.
+const GENERATE_BLOCKED_LIMIT = 4;
+const ENABLED_CACHE_MS = 10000;
 
 // Every Google Media account: the built-in one and those added in Settings,
 // with the enabled flag and priority kept in their teamyra-profile.json.
-function mediaProfiles(root = profileRoot('google-media')) {
-  const profiles = [{ id: 'google', enabled: true, priority: 250 }];
+function mediaProfiles(root = profileRoot('google-media'), builtinFile = builtinMediaMetaFile()) {
+  let builtin = {};
+  try { builtin = JSON.parse(fs.readFileSync(builtinFile, 'utf8')) || {}; } catch {}
+  const builtinPriority = Number(builtin.priority);
+  const profiles = [{ id: 'google', enabled: builtin.enabled !== false, priority: Number.isFinite(builtinPriority) ? builtinPriority : 250 }];
   let entries = [];
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch {}
   for (const entry of entries) {
@@ -72,9 +79,12 @@ class GoogleMediaProfileRuntime {
     this.profileId = safeProfileId(profileId);
     this.parkedUntil = 0;
     this.parkReason = '';
+    this.generateBlocked = 0;
     const accountHooks = {
       isMain: () => !this.engine || this.engine.mainProfileId() === this.profileId,
-      onAccountProblem: (kind, reason) => this.accountProblem(kind, reason)
+      onAccountProblem: (kind, reason) => this.accountProblem(kind, reason),
+      mayClaim: () => this.working(),
+      onSubmitResult: ok => this.submitResult(ok)
     };
     this.sessionManager = new GoogleMediaSessionManager(this.profileId);
     this.downloadManager = new MediaDownloadManager(this.sessionManager);
@@ -215,17 +225,34 @@ class GoogleMediaProfileRuntime {
   // Can this account take new Flow work now?
   working() {
     return this.visualConsumerStarted && this.lastStatus.connected === true &&
-      this.lastStatus.challenged !== true && Date.now() >= this.parkedUntil;
+      this.lastStatus.challenged !== true && Date.now() >= this.parkedUntil &&
+      this.engine?.isEnabled(this.profileId) !== false;
   }
 
-  // A consumer found this account unable to take new work. Park it only when
-  // another account is working, so its unsubmitted jobs move there; alone, it
-  // keeps the old behaviour (jobs wait in needs_user_auth for the user).
+  // Generate clicked (ok) or found disabled before the click (not ok).
+  submitResult(ok) {
+    if (ok) {
+      this.generateBlocked = 0;
+      return 'ok';
+    }
+    this.generateBlocked += 1;
+    if (this.generateBlocked < GENERATE_BLOCKED_LIMIT) return 'counted';
+    this.generateBlocked = 0;
+    this.accountProblem('credits', 'Flow keeps Generate disabled in this account (usually no credits left)');
+    return 'parked';
+  }
+
+  // A consumer found this account unable to take new work. Out of credits or
+  // upload terms not accepted always parks it: its unsubmitted jobs wait in the
+  // queue for an account that can run them instead of failing here again and
+  // again. Signed out or challenged parks it only when another account works;
+  // alone, jobs wait in needs_user_auth for the user as before.
   accountProblem(kind, reason = '') {
-    if (!this.engine?.otherWorking(this.profileId)) return false;
+    const timed = kind === 'credits' || kind === 'upload_terms';
+    if (!timed && !this.engine?.otherWorking(this.profileId)) return false;
     console.warn('[google-media] account ' + this.profileId + ' parked: ' + kind + ' (' + reason + ')');
     this.parkReason = String(reason || kind);
-    if (kind === 'credits' || kind === 'upload_terms') {
+    if (timed) {
       this.parkedUntil = Date.now() + (kind === 'credits' ? CREDITS_PARK_MS : TERMS_PARK_MS);
       for (const consumer of this.visualConsumers()) {
         consumer.pausedUntil = Math.max(consumer.pausedUntil, this.parkedUntil);
@@ -240,6 +267,7 @@ class GoogleMediaProfileRuntime {
   }
 
   unpark() {
+    this.generateBlocked = 0;
     if (!this.parkedUntil) return;
     this.parkedUntil = 0;
     for (const consumer of this.visualConsumers()) consumer.pausedUntil = 0;
@@ -593,6 +621,15 @@ class GoogleMediaEngine {
     return this.enabledProfiles().find(id => this.profiles.get(id)?.working()) || this.activeProfileId;
   }
 
+  // Disabling an account in Settings (or with agent_account_update) stops its
+  // tabs from claiming within seconds; jobs it already submitted still finish.
+  isEnabled(profileId) {
+    if (!this.enabledCache || Date.now() - this.enabledCache.at > ENABLED_CACHE_MS) {
+      this.enabledCache = { at: Date.now(), ids: new Set(this.enabledProfiles()) };
+    }
+    return this.enabledCache.ids.has(profileId);
+  }
+
   otherWorking(profileId) {
     return [...this.profiles.values()].some(runtime => runtime.profileId !== profileId && runtime.working());
   }
@@ -600,6 +637,8 @@ class GoogleMediaEngine {
   initialize() {
     if (this.started) return;
     this.started = true;
+    // The built-in account is always set up (single jobs and music fall back to
+    // it); disabled, it takes no bulk work.
     const ids = this.enabledProfiles();
     if (!ids.includes('google')) ids.unshift('google');
     for (const id of ids) this.ensureProfile(id);
@@ -706,13 +745,15 @@ class GoogleMediaEngine {
   // the active one starts as before, so jobs report that sign-in is needed).
   wakeAll(surface = 'visual') {
     if (surface === 'music') return this.wake('music', this.activeProfileId);
+    this.enabledCache = null;
     const ids = this.enabledProfiles();
     const anyWorking = ids.some(id => this.profiles.get(id)?.lastStatus.connected === true);
     const accounts = ids.map(id => {
       const fallback = !anyWorking && id === this.activeProfileId;
       const snapshot = this.ensureProfile(id).wake('visual', { requireConnected: !fallback });
       return { profile_id: id, connected: snapshot.connected === true, challenged: snapshot.challenged === true,
-        needs_user_auth: snapshot.needs_user_auth, status_checked: snapshot.status_checked !== false };
+        needs_user_auth: snapshot.needs_user_auth, status_checked: snapshot.status_checked !== false,
+        parked_until: snapshot.parked_until || null, park_reason: snapshot.park_reason || '' };
     });
     return {
       provider: 'google-media', waking: true, wake_surface: 'visual',

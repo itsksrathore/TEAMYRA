@@ -125,10 +125,10 @@ async function nativeStatus(provider, binary) {
   return { signedIn, label: signedIn ? 'Existing local login detected' : 'Sign-in needed' };
 }
 
-function profileMetadata(dir, fallbackName) {
+function profileMetadata(dir, fallbackName, file = path.join(dir, 'teamyra-profile.json')) {
   let data = {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'teamyra-profile.json'), 'utf8'));
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed;
   } catch {}
 
@@ -141,6 +141,21 @@ function profileMetadata(dir, fallbackName) {
     effort: typeof data.effort === 'string' ? data.effort : '',
     permissionMode: typeof data.permission_mode === 'string' ? data.permission_mode : ''
   };
+}
+
+// The built-in Google Media account has no profile folder of its own; its
+// settings (enabled, priority) live in this file next to the managed ones.
+function builtinMediaMetaFile() {
+  return path.join(PROFILES_ROOT, 'google-media', 'builtin-google.json');
+}
+
+function builtinMediaMeta() {
+  const meta = profileMetadata(path.dirname(builtinMediaMetaFile()), 'Google Account 1', builtinMediaMetaFile());
+  return { ...meta, priority: Number.isFinite(Number(readJsonFile(builtinMediaMetaFile())?.priority)) ? meta.priority : 250 };
+}
+
+function readJsonFile(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
 function managedProfiles(provider) {
@@ -213,13 +228,13 @@ async function detectProviders() {
         managedProfileEnv: null,
         profiles: [{
           id: 'google',
-          name: 'Google Account 1',
+          name: builtinMediaMeta().name,
           kind: 'media',
           path: '',
           signedIn: false,
-          editable: false,
-          enabled: true,
-          priority: 250,
+          editable: true,
+          enabled: builtinMediaMeta().enabled,
+          priority: builtinMediaMeta().priority,
           model: '',
           effort: '',
           permissionMode: ''
@@ -298,4 +313,4 @@ function profileRoot(providerId) {
   return path.join(PROFILES_ROOT, providerId);
 }
 
-module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot, whereBinary };
+module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot, whereBinary, builtinMediaMetaFile };
