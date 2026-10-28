@@ -59,7 +59,10 @@ function mediaProfiles(root = profileRoot('google-media'), builtinFile = builtin
   let builtin = {};
   try { builtin = JSON.parse(fs.readFileSync(builtinFile, 'utf8')) || {}; } catch {}
   const builtinPriority = Number(builtin.priority);
-  const profiles = [{ id: 'google', enabled: builtin.enabled !== false, priority: Number.isFinite(builtinPriority) ? builtinPriority : 250 }];
+  // music: Flow Music for this account; unset, it follows enabled.
+  const musicFlag = (meta, enabled) => typeof meta.music === 'boolean' ? meta.music : enabled;
+  const profiles = [{ id: 'google', enabled: builtin.enabled !== false, music: musicFlag(builtin, builtin.enabled !== false),
+    priority: Number.isFinite(builtinPriority) ? builtinPriority : 250 }];
   let entries = [];
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch {}
   for (const entry of entries) {
@@ -67,7 +70,8 @@ function mediaProfiles(root = profileRoot('google-media'), builtinFile = builtin
     let meta = {};
     try { meta = JSON.parse(fs.readFileSync(path.join(root, entry.name, 'teamyra-profile.json'), 'utf8')) || {}; } catch {}
     const priority = Number(meta.priority);
-    profiles.push({ id: entry.name, enabled: meta.enabled !== false, priority: Number.isFinite(priority) ? priority : 100 });
+    profiles.push({ id: entry.name, enabled: meta.enabled !== false, music: musicFlag(meta, meta.enabled !== false),
+      priority: Number.isFinite(priority) ? priority : 100 });
   }
   return profiles;
 }
@@ -131,7 +135,9 @@ class GoogleMediaProfileRuntime {
       downloadManager: this.downloadManager,
       profileId: this.profileId,
       ready,
-      onActivity: () => this.touch()
+      onActivity: () => this.touch(),
+      // Music is claimed only by an account with Flow Music on and signed in.
+      mayClaim: () => this.musicWorking()
     });
     this.started = false;
     this.visualConsumerStarted = false;
@@ -227,6 +233,11 @@ class GoogleMediaProfileRuntime {
     return this.visualConsumerStarted && this.lastStatus.connected === true &&
       this.lastStatus.challenged !== true && Date.now() >= this.parkedUntil &&
       this.engine?.isEnabled(this.profileId) !== false;
+  }
+
+  musicWorking() {
+    return this.musicConsumerStarted && this.lastStatus.music_signed_in === true &&
+      this.engine?.isEnabled(this.profileId, 'music') !== false;
   }
 
   // Generate clicked (ok) or found disabled before the click (not ok).
@@ -623,11 +634,23 @@ class GoogleMediaEngine {
 
   // Disabling an account in Settings (or with agent_account_update) stops its
   // tabs from claiming within seconds; jobs it already submitted still finish.
-  isEnabled(profileId) {
+  isEnabled(profileId, surface = 'visual') {
     if (!this.enabledCache || Date.now() - this.enabledCache.at > ENABLED_CACHE_MS) {
-      this.enabledCache = { at: Date.now(), ids: new Set(this.enabledProfiles()) };
+      const listed = this.listProfiles();
+      this.enabledCache = { at: Date.now(), ids: new Set(this.enabledProfiles()),
+        music: new Set(listed.filter(item => item.music ?? item.enabled).map(item => item.id)) };
     }
-    return this.enabledCache.ids.has(profileId);
+    return (surface === 'music' ? this.enabledCache.music : this.enabledCache.ids).has(profileId);
+  }
+
+  // The account that runs Flow Music: the active one if it can, else the
+  // first account with music on and signed in to Flow Music.
+  musicProfileId() {
+    if (this.profiles.get(this.activeProfileId)?.musicWorking?.()) return this.activeProfileId;
+    const ids = this.listProfiles().filter(item => item.music ?? item.enabled).map(item => item.id);
+    return ids.find(id => this.profiles.get(id)?.musicWorking?.())
+      || ids.find(id => this.profiles.get(id)?.lastStatus.music_signed_in === true)
+      || this.activeProfileId;
   }
 
   otherWorking(profileId) {
@@ -744,7 +767,11 @@ class GoogleMediaEngine {
   // only once a probe confirms it, unless no account is known to work (then
   // the active one starts as before, so jobs report that sign-in is needed).
   wakeAll(surface = 'visual') {
-    if (surface === 'music') return this.wake('music', this.activeProfileId);
+    if (surface === 'music') {
+      this.enabledCache = null;
+      const id = this.musicProfileId();
+      return { ...this.ensureProfile(id).wake('music'), music_profile_id: id };
+    }
     this.enabledCache = null;
     const ids = this.enabledProfiles();
     const anyWorking = ids.some(id => this.profiles.get(id)?.lastStatus.connected === true);

@@ -1273,6 +1273,9 @@ async function desktopUpdateAccount(providerId, profileId, patch = {}) {
     meta.name = name;
   }
   if ('enabled' in patch) meta.enabled = patch.enabled !== false;
+  // Google Media: Flow Music on or off for this account, apart from video
+  // (an account out of video credits can keep making music).
+  if ('music' in patch && providerId === 'google-media') meta.music = patch.music !== false;
   if ('priority' in patch) {
     const priority = Number.parseInt(patch.priority, 10);
     if (!Number.isFinite(priority) || priority < 0 || priority > 10000) throw new Error('Invalid priority');
@@ -1578,6 +1581,9 @@ ipcMain.handle('teamyra:update-account', async (_event, providerId, profileId, p
     meta.name = name;
   }
   if ('enabled' in patch) meta.enabled = patch.enabled !== false;
+  // Google Media: Flow Music on or off for this account, apart from video
+  // (an account out of video credits can keep making music).
+  if ('music' in patch && providerId === 'google-media') meta.music = patch.music !== false;
   if ('priority' in patch) {
     const priority = Number.parseInt(patch.priority, 10);
     if (!Number.isFinite(priority) || priority < 0 || priority > 10000) throw new Error('Invalid priority');

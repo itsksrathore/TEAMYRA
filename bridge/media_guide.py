@@ -97,7 +97,8 @@ def _flow_accounts(root, saved):
     except Exception:
         builtin = {}
     accounts = [{"profile_id": "google", "name": str(builtin.get("name") or "Google Account 1"),
-                 "enabled": builtin.get("enabled") is not False}]
+                 "enabled": builtin.get("enabled") is not False,
+                 "music": builtin.get("music") if isinstance(builtin.get("music"), bool) else builtin.get("enabled") is not False}]
     try:
         entries = sorted(folder.iterdir())
     except OSError:
@@ -110,12 +111,14 @@ def _flow_accounts(root, saved):
         except Exception:
             meta = {}
         accounts.append({"profile_id": entry.name, "name": str(meta.get("name") or entry.name),
-                         "enabled": meta.get("enabled") is not False})
+                         "enabled": meta.get("enabled") is not False,
+                         "music": meta.get("music") if isinstance(meta.get("music"), bool) else meta.get("enabled") is not False})
     for item in accounts:
         # The built-in account's state lived at the top level before accounts had records.
         state = profiles.get(item["profile_id"]) or (saved if item["profile_id"] == "google" else {})
         item["connected"] = state.get("connected") is True
         item["challenged"] = state.get("challenged") is True
+        item["music_signed_in"] = state.get("music_signed_in") is True
     return accounts
 
 

@@ -169,6 +169,12 @@ accounts × tabs (`media_guide` → `capacity.flow_accounts`, `flow_tabs`).
   may not take new work (disabled, parked, paused) keeps claiming in
   resume-only mode, which returns only its own submitted jobs (reconcile and
   download, no Generate). Every account is set up at desktop start for this.
+- **Music per account.** Flow Music runs on an account with `music` on
+  (unset, it follows `enabled`) that is signed in to Flow Music; set
+  `agent_account_update {provider: google-media, profile_id, patch: {music:
+  true, enabled: false}}` for music only. A music job wakes the active account
+  if it can make music, else the first one that can. Sound effects are Flow
+  video generations (360p, audio extracted) and run on the video accounts.
 - **Out of credits.** Flow usually just keeps Generate disabled. "Generate
   disabled" before the click 4 times in a row with no successful submission
   between, or Flow's own credit wording, parks the account for 30 minutes and

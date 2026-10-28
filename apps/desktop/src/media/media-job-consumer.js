@@ -231,14 +231,16 @@ class MediaJobConsumer {
   }
 
   async serialTick() {
-    if (this.busy || this.mayClaim() === false) {
+    if (this.busy) {
       this.schedule(this.pollMs);
       return;
     }
+    // An account that may not take new work still finishes what it submitted.
+    const resumeOnly = this.mayClaim() === false;
     const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName,
-      profile_id: this.profileId, main: this.isMain() !== false }, { timeout: 10000 });
+      profile_id: this.profileId, main: this.isMain() !== false, resume_only: resumeOnly }, { timeout: 10000 });
     if (!job) {
-      this.schedule(this.pollMs);
+      this.schedule(resumeOnly ? Math.max(this.pollMs, 15000) : this.pollMs);
       return;
     }
     this.busy = true;
