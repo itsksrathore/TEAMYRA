@@ -79,7 +79,11 @@ class MediaDownloadManager {
     }
     const unresolved = [...this.inbox].some(entry => entry.webContentsId === id) ||
       this.held.some(entry => entry.webContentsId === id);
-    if (candidates.length === 1 && !unresolved) {
+    // A job whose result tile has a fingerprint always gets its file checked:
+    // a tab can also deliver a stray file (the late first copy after Download
+    // was clicked again, an abandoned download), and taking whatever arrives
+    // next shifted results into the wrong jobs.
+    if (candidates.length === 1 && !unresolved && !candidates[0].fingerprint) {
       this.assignDirect(candidates[0], item);
       return;
     }
@@ -185,13 +189,27 @@ class MediaDownloadManager {
         return this.restoreTrustIfIdle(webContentsId);
       }
       let choice = this.choosePair(files, pending);
-      if (!choice && pending.length === 1 && files.length === 1 && !arriving && !this.untrusted.has(webContentsId)) {
+      if (!choice) {
+        // A file that is clearly none of the waiting jobs' results is a stray
+        // (a duplicate or abandoned download); it never fills a job.
+        const strays = files.filter(file => file.hashes?.length && pending.every(record =>
+          record.fingerprint && bestDistance(record.fingerprint, file.hashes) > MATCH_MAX_DISTANCE));
+        if (strays.length) {
+          for (const file of strays) this.discard(file);
+          continue;
+        }
+      }
+      const unverifiable = record => !record.fingerprint || !files[0].hashes?.length;
+      if (!choice && pending.length === 1 && files.length === 1 && !arriving && !this.untrusted.has(webContentsId) &&
+          unverifiable(pending[0])) {
         choice = { file: files[0], record: pending[0], attribution: 'only_candidate' };
       }
       if (!choice) {
         const signatures = new Set(pending.map(record => record.signature));
         const abandoned = this.untrusted.get(webContentsId) || new Set();
-        if (signatures.size === 1 && pending[0].signature && [...abandoned].every(item => item === pending[0].signature)) {
+        // Interchangeable only when several identical requests wait (bulk copies).
+        if (pending.length > 1 && signatures.size === 1 && pending[0].signature &&
+            [...abandoned].every(item => item === pending[0].signature)) {
           // Identical requests (bulk copies) are interchangeable.
           const oldest = [...pending].sort((a, b) => a.order - b.order)[0];
           choice = { file: files[0], record: oldest, attribution: 'identical_request' };

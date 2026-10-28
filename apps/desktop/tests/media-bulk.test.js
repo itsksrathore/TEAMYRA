@@ -107,11 +107,49 @@ async function downloadManagerTests(temp) {
   fs.writeFileSync(lateItem.savePath, 'B');
   lateItem.emit('done', {}, 'completed');
   assert.equal((await other).attribution, 'fingerprint');
-  const soloItem = fakeItem();
-  manager.handleDownload({}, soloItem, { id: 5 });
-  fs.writeFileSync(soloItem.savePath, 'C');
-  soloItem.emit('done', {}, 'completed');
-  assert.equal((await solo).attribution, 'single');
+  // A stray file (a late duplicate after Download was clicked again, or an
+  // abandoned download) never fills the job waiting next in the tab: that
+  // shifted results into the wrong jobs. The job waits for its own file.
+  const strayItem = fakeItem();
+  manager.handleDownload({}, strayItem, { id: 5 });
+  assert.notEqual(strayItem.savePath, path.join(temp, 'solo.mp4'), 'a job with a fingerprint gets its file checked');
+  fs.writeFileSync(strayItem.savePath, 'C');
+  strayItem.emit('done', {}, 'completed');
+  await sleep(20);
+  assert.equal(fs.existsSync(path.join(temp, 'solo.mp4')), false, 'the stray is not delivered');
+  assert.equal(manager.held.length, 0, 'and is discarded');
+  const ownItem = fakeItem();
+  manager.handleDownload({}, ownItem, { id: 5 });
+  fs.writeFileSync(ownItem.savePath, 'A');
+  ownItem.emit('done', {}, 'completed');
+  const own = await solo;
+  assert.equal(own.attribution, 'fingerprint');
+  assert.equal(fs.readFileSync(own.path, 'utf8'), 'A');
+  // Without a fingerprint to check, a lone download still goes straight to the lone job.
+  const bare = manager.expect({ jobId: 'bare', webContentsId: 6, destination: path.join(temp, 'bare.mp4'), signature: 'b' });
+  const bareItem = fakeItem();
+  manager.handleDownload({}, bareItem, { id: 6 });
+  assert.equal(bareItem.savePath, path.join(temp, 'bare.mp4'));
+  fs.writeFileSync(bareItem.savePath, 'C');
+  bareItem.emit('done', {}, 'completed');
+  assert.equal((await bare).attribution, 'single');
+  // One waiting job is not "identical requests": an unverifiable file with
+  // another file still arriving is not guessed onto it.
+  const lone2 = manager.expect({ jobId: 'lone2', webContentsId: 7, destination: path.join(temp, 'lone2.mp4'), signature: 'l' });
+  const blocker = manager.expect({ jobId: 'blocker', webContentsId: 7, destination: path.join(temp, 'blocker.mp4'), signature: 'z' });
+  void blocker.catch(() => {});
+  const f1 = fakeItem();
+  const f2 = fakeItem();
+  manager.handleDownload({}, f1, { id: 7 });
+  manager.handleDownload({}, f2, { id: 7 });
+  manager.cancelJob('blocker');
+  fs.writeFileSync(f1.savePath, 'one');
+  f1.emit('done', {}, 'completed');
+  await sleep(20);
+  assert.equal(fs.existsSync(path.join(temp, 'lone2.mp4')), false, 'no identical_request guess for a single job');
+  manager.cancelJob('lone2');
+  await lone2.catch(() => {});
+  f2.emit('done', {}, 'cancelled');
   assert.ok(hammingDistance(HASH.A, HASH.B) === 64 && hammingDistance(HASH.A, HASH.A) === 0);
 }
 
