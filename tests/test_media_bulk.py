@@ -220,6 +220,20 @@ class MediaBulkTests(unittest.TestCase):
                           "an account never opens another account's project (it would 404)")
         self.assertIsNone(media_engine.flow_project_for(self.root, folder, 1, "acct2")["provider_url"])
 
+    def test_a_project_two_tabs_shared_belongs_to_the_lowest_tab(self):
+        jobs = [job["job_id"] for job in media_engine.create_batch(self.root, [self.request(str(i)) for i in range(3)])["jobs"]]
+        shared = "https://flow.google.com/project/shared"
+        self.submit(jobs[0], "acct4", 0, shared, state="failed")
+        self.submit(jobs[1], "acct4", 2, shared, state="failed")
+        self.submit(jobs[2], "acct4", 1, "https://flow.google.com/project/tab2", state="completed")
+        folder = str(self.project)
+        self.assertEqual(media_engine.flow_project_for(self.root, folder, 0, "acct4")["provider_url"], shared)
+        third = media_engine.flow_project_for(self.root, folder, 2, "acct4")
+        self.assertIsNone(third["provider_url"], "tab 3 gets a project of its own")
+        self.assertIn(shared, third["taken"], "and is told not to reuse the shared one")
+        self.assertEqual(media_engine.flow_project_for(self.root, folder, 1, "acct4")["provider_url"],
+                         "https://flow.google.com/project/tab2")
+
     def test_submitted_job_resumes_only_in_its_own_account_and_tab(self):
         old, new = (job["job_id"] for job in media_engine.create_batch(self.root, [self.request("a"), self.request("b")])["jobs"])
         self.submit(old, None, 1)

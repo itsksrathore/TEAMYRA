@@ -389,7 +389,9 @@ class MediaJobConsumer {
       // A tab of an account with no project for the folder yet creates its own
       // (also the first tab: "the most recent project" may be a sibling tab's
       // brand-new one, and two tabs in one project confuse result attribution).
-      const preferredUrl = preferred?.provider_url || this.laneProjects.get(folder) || null;
+      const remembered = this.laneProjects.get(folder);
+      const taken = Array.isArray(preferred?.taken) ? preferred.taken : [];
+      const preferredUrl = preferred?.provider_url || (remembered && !taken.includes(remembered) ? remembered : null) || null;
       const submitJob = { ...job, preferred_project_url: preferredUrl,
         // An extra tab starts its own project only when core confirmed it has none.
         create_new_project: !preferredUrl && Boolean(preferred) && (this.lane > 0 || Boolean(folder)),

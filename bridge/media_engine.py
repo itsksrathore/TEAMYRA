@@ -1064,22 +1064,33 @@ def flow_project_for(root, project_path, lane=0, profile_id=None):
     elif lane == 0:
         return {"provider_url": None, "lane": lane, "profile_id": profile}
     # The project holding most of the folder's results wins; recency breaks ties.
+    # A project several tabs of the account used (two tabs once raced into one)
+    # belongs to the lowest tab only; the others are told to avoid it, since
+    # two tabs watching one project confuse result and failure attribution.
     usage = {}
+    first_lane = {}
     for job in _job_summaries(root):
         if str((job.get("request") or {}).get("project_path") or "").lower() != wanted:
             continue
-        if _job_lane(job) != lane or _job_profile(job) != profile:
+        if _job_profile(job) != profile:
             continue
         submission = job.get("provider_submission") or {}
         match = _FLOW_PROJECT_RE.match(str(submission.get("provider_url") or ""))
         if not match:
             continue
-        count, latest = usage.get(match.group(1), (0, 0.0))
-        usage[match.group(1)] = (count + 1, max(latest, float(submission.get("submitted_at") or 0)))
+        url = match.group(1)
+        first_lane[url] = min(first_lane.get(url, _job_lane(job)), _job_lane(job))
+        if _job_lane(job) != lane:
+            continue
+        count, latest = usage.get(url, (0, 0.0))
+        usage[url] = (count + 1, max(latest, float(submission.get("submitted_at") or 0)))
+    taken = sorted(url for url, owner in first_lane.items() if owner != lane)
+    usage = {url: value for url, value in usage.items() if first_lane.get(url) == lane}
     if not usage:
-        return {"provider_url": None, "jobs": 0, "lane": lane, "profile_id": profile}
+        return {"provider_url": None, "jobs": 0, "lane": lane, "profile_id": profile, "taken": taken}
     url, (count, latest) = max(usage.items(), key=lambda item: item[1])
-    return {"provider_url": url, "jobs": count, "submitted_at": latest or None, "lane": lane, "profile_id": profile}
+    return {"provider_url": url, "jobs": count, "submitted_at": latest or None, "lane": lane, "profile_id": profile,
+            "taken": taken}
 
 
 def claimed_result_keys(root, provider_url=None):
