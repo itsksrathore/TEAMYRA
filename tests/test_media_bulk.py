@@ -267,6 +267,7 @@ class MediaBulkTests(unittest.TestCase):
         self.assertEqual(media_engine.public_job(media_engine.load_job(self.root, job["job_id"]))["handled_by"], "acct2 tab 1")
         handed = media_engine.handoff_job(self.root, job["job_id"], "signed out")
         self.assertEqual(handed["status"], "queued")
+        self.assertIn("Waiting for a Google account", handed["detail"], "status says why it waits, not 'Submitting'")
         self.assertIsNone(handed["handled_by"])
         stored = media_engine.load_job(self.root, job["job_id"])
         self.assertEqual(stored["attempt"], 0, "a hand-off spends no retry budget")

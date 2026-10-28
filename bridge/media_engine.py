@@ -1147,6 +1147,9 @@ def handoff_job(root, job_id, reason=None):
         if _possible_submission(job) or job.get("submission_phase") not in {None, "preparing"}:
             raise ValueError("media job may have been submitted; only its own account can finish it")
         job["state"] = "queued"
+        # The last detail was the claimant's ("Submitting..."); say why it waits.
+        job["detail"] = ("Waiting for a Google account that can take it" +
+                         (" (" + str(reason)[:200] + ")" if reason else ""))
         job["claimed_by"] = None
         job["claimed_at"] = None
         job["claimed_profile"] = None
