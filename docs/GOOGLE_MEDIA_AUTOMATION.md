@@ -187,6 +187,20 @@ accounts × tabs (`media_guide` → `capacity.flow_accounts`, `flow_tabs`).
   polled; claims timed out and the lock jammed). A claim re-reads its chosen
   job before taking it. A claim nobody picked up (its worker's core call timed
   out) stays in `preparing`; after 5 minutes it is claimable again.
+- **Downloads are checked (2026-10-28).** A tab's downloads used to go to
+  its only waiting job unchecked; a stray file (the late first copy after
+  Download was clicked again) then shifted clips one job along the tab (seen
+  on 4f72: three jobs held a neighbour's clip). Every file is now matched
+  against its job's result-tile fingerprint (true matches are 0-12 bits apart);
+  a file that matches no waiting job is discarded. To repair a past wrong
+  delivery without regenerating, put the job back to failed with its asset
+  cleared and call `media_resume_download`; diagnose `verify_file` compares a
+  delivered file with its result tile.
+- **Own project per tab, new accounts too.** Every tab of an account with no
+  project for the folder creates its own (tab 1 used to open "the most recent
+  project", once tab 3's new one); a project two tabs once shared belongs to
+  the lowest tab (`taken` tells the others). Flow's Agent mode is switched off
+  in the prompt box when it hides the settings trigger.
 - **Connection status** is kept per account (`media/connection.json` →
   `profiles`); the top level says whether any account works, so one signed-out
   account no longer reports Flow as disconnected.
