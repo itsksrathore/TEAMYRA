@@ -205,7 +205,8 @@ class GoogleFlowAutomationAdapter {
       signedIn: onFlow && authenticatedUi && !explicitAuthUi,
       challenged: CHALLENGE_WORDS.some(word => body.includes(word)),
       rateLimited: RATE_WORDS.some(word => body.includes(word)),
-      creditsExhausted: CREDIT_WORDS.some(word => body.includes(word)),
+      // Flow shows "Insufficient credits warning" as a button label, not as text.
+      creditsExhausted: CREDIT_WORDS.some(word => body.includes(word) || labels.includes(word)),
       promptFound: probe?.promptFound === true
     };
   }
@@ -1251,7 +1252,8 @@ class GoogleFlowAutomationAdapter {
           .map(el => ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')).trim().replace(/\\s+/g, ' ').slice(0, 60))
           .filter(Boolean).slice(-25)
       }))()`).catch(() => ({ body: '', buttons: [] }));
-      const credits = CREDIT_WORDS.find(word => String(page?.body || '').includes(word));
+      const credits = CREDIT_WORDS.find(word => String(page?.body || '').includes(word) ||
+        (page?.buttons || []).some(label => String(label).toLowerCase().includes(word)));
       if (credits) throw new Error('credits_exhausted_before_submission: Google Flow reports "' + credits + '"');
       throw new Error('selector_failure: Google Flow generate control is unavailable or disabled; buttons=' +
         JSON.stringify(page?.buttons || []).slice(0, 900));

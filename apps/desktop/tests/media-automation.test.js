@@ -139,6 +139,14 @@ assert.equal(flowLaneCount('nope'), 3);
   }
 }
 
+// Out of credits shows as a button label ("Insufficient credits warning").
+{
+  const credits = new GoogleFlowAutomationAdapter({});
+  const base = { url: 'https://flow.google.com/project/p', lower: 'new project', buttonLabels: ['Settings trigger Video', 'Agent'] };
+  assert.equal(credits.classifyProbe(base).creditsExhausted, false);
+  assert.equal(credits.classifyProbe({ ...base, buttonLabels: [...base.buttonLabels, 'Insufficient credits warning info'] }).creditsExhausted, true);
+}
+
 assert.equal(FLOW_HOME, 'https://flow.google.com/');
 assert.equal(FLOW_MUSIC_HOME, 'https://www.flowmusic.app/');
 assert.match(GOOGLE_LOGIN_URL, /^https:\/\/accounts\.google\.com\//);
