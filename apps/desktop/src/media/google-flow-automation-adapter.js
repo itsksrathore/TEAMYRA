@@ -516,12 +516,41 @@ class GoogleFlowAutomationAdapter {
 
   async waitForSettingsTrigger(timeoutMs = 12000) {
     const deadline = Date.now() + timeoutMs;
+    let agentModeChecked = false;
     while (Date.now() < deadline) {
       const text = await this.settingsTriggerText();
       if (text) return text;
+      // With Flow's Agent mode on, the prompt box has no model/ratio/length
+      // settings trigger at all; TEAMYRA drives the plain generation mode.
+      if (!agentModeChecked) {
+        agentModeChecked = true;
+        await this.switchAgentModeOff();
+        continue;
+      }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     return '';
+  }
+
+  agentModeOn() {
+    return this.executePageScript(`[...document.querySelectorAll('button.agent-mode-chip')].some(el =>
+      el.getBoundingClientRect().width > 0 && el.getAttribute('aria-pressed') === 'true')`).catch(() => false);
+  }
+
+  async switchAgentModeOff(timeoutMs = 5000) {
+    if (await this.agentModeOn() !== true) return false;
+    await this.executePageScript(`(() => {
+      const chip = [...document.querySelectorAll('button.agent-mode-chip')].find(el =>
+        el.getBoundingClientRect().width > 0 && el.getAttribute('aria-pressed') === 'true');
+      if (chip) chip.click();
+      return Boolean(chip);
+    })()`).catch(() => false);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.agentModeOn() !== true) return true;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    throw new Error('selector_failure: Flow Agent mode is on in the prompt box and could not be switched off');
   }
 
   async closeSettingsPanel() {

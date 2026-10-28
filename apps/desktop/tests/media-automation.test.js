@@ -147,6 +147,23 @@ assert.equal(flowLaneCount('nope'), 3);
   assert.equal(credits.classifyProbe({ ...base, buttonLabels: [...base.buttonLabels, 'Insufficient credits warning info'] }).creditsExhausted, true);
 }
 
+// Flow's Agent mode hides the settings trigger; it is switched off once.
+(async () => {
+  const agent = new GoogleFlowAutomationAdapter({});
+  let pressed = true;
+  let clicks = 0;
+  agent.executePageScript = async script => {
+    if (script.includes('chip.click()')) { clicks += 1; pressed = false; return true; }
+    if (script.includes("aria-pressed') === 'true'")) return pressed;
+    return false;
+  };
+  agent.settingsTriggerText = async () => pressed ? '' : 'Settings trigger Video';
+  assert.equal(await agent.waitForSettingsTrigger(3000), 'Settings trigger Video');
+  assert.equal(clicks, 1, 'Agent mode is switched off');
+  assert.equal(await agent.waitForSettingsTrigger(1000), 'Settings trigger Video');
+  assert.equal(clicks, 1, 'and left alone when already off');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
 assert.equal(FLOW_HOME, 'https://flow.google.com/');
 assert.equal(FLOW_MUSIC_HOME, 'https://www.flowmusic.app/');
 assert.match(GOOGLE_LOGIN_URL, /^https:\/\/accounts\.google\.com\//);

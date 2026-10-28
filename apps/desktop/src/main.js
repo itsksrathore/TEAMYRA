@@ -1323,15 +1323,37 @@ async function dispatchDesktopControl(action, payload = {}) {
       // Diagnostics drive the same Flow page as the worker (open panels, scroll
       // the grid): run them inside the worker's page lock, never mid-submission.
       const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
-      const consumer = payload.surface === 'music' ? runtime.musicConsumer : runtime.visualConsumer;
+      const tab = Math.max(0, Number(payload.lane) || 0);
+      const consumer = payload.surface === 'music' ? runtime.musicConsumer
+        : tab ? runtime.extraLanes[tab - 1]?.consumer || runtime.visualConsumer : runtime.visualConsumer;
       const lockLimit = Math.min(600000, Math.max(180000, Number(payload.timeout_ms) || 0));
       return consumer.ui.run(() => dispatchDesktopControl(action, { ...payload, __locked: true }), lockLimit);
     }
     if (mediaCmd === 'diagnose') {
       const runtime = googleMediaEngine.ensureProfile(payload.profile_id || 'google');
-      const surface = payload.surface === 'music' ? runtime.music : runtime.visual;
+      const tab = Math.max(0, Number(payload.lane) || 0);
+      const surface = payload.surface === 'music' ? runtime.music
+        : tab ? runtime.extraLanes[tab - 1]?.provider : runtime.visual;
+      if (payload.surface !== 'music' && payload.load === true && surface && !surface.view) await surface.ensureLoaded();
       if (!surface?.view || surface.view.webContents.isDestroyed()) {
         return { surface: payload.surface || 'visual', loaded: false, visible: false, url: '' };
+      }
+      // Read-only: every visible control with its label, text, classes and
+      // state, to see a Flow UI variant without a screenshot.
+      if (payload.surface !== 'music' && payload.dom_dump === true) {
+        return surface.view.webContents.executeJavaScript(`(() => {
+          const shown = el => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none'; };
+          const attrs = el => Object.fromEntries([...el.attributes].filter(a => /^(aria-|role$|data-state|data-testid|type$|disabled$)/.test(a.name)).map(a => [a.name, a.value.slice(0, 80)]));
+          const controls = [...document.querySelectorAll('button,[role="button"],[role="switch"],[role="tab"],[role="checkbox"],[contenteditable="true"],textarea,input')]
+            .filter(shown).map(el => { const r = el.getBoundingClientRect(); return { tag: el.tagName.toLowerCase(),
+              text: (el.innerText || el.value || '').trim().replace(/\s+/g, ' ').slice(0, 90), cls: String(el.className || '').slice(0, 120),
+              attrs: attrs(el), y: Math.round(r.y), x: Math.round(r.x), w: Math.round(r.width) }; });
+          const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog')].filter(shown)
+            .map(el => (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 400));
+          return { url: location.href, title: document.title, viewport: [innerWidth, innerHeight], dialogs, controls: controls.slice(0, 120),
+            body: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 1500) };
+        })()`, true);
       }
       let diagnosticAction = null;
       if (payload.surface !== 'music' && Array.isArray(payload.find_prompts)) {
