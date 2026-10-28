@@ -335,7 +335,8 @@ function fakeCore(temp, jobs) {
     const record = records.get(args.job_id);
     switch (name) {
       case 'media.claim': {
-        const next = [...records.values()].find(item => item.state === 'queued' && !(item.retry_after > Date.now() / 1000));
+        const next = [...records.values()].find(item => item.state === 'queued' && !(item.retry_after > Date.now() / 1000) &&
+          (!args.resume_only || item.provider_submission?.submitted_at));
         if (!next) return null;
         next.state = 'preparing';
         return JSON.parse(JSON.stringify(next));
@@ -773,15 +774,20 @@ async function accountTests(temp) {
   // A tab whose account may not claim (disabled, signed out, parked) claims nothing.
   {
     const gated = fakeCore(temp, [{ job_id: 'gated', created_at: 0, batch_id: 'b', request: { type: 'video', prompt: 'p' } }]);
-    const loaded = loadConsumer(gated.core);
+    const claimArgs = [];
+    const loaded = loadConsumer(async (name, args = {}) => {
+      if (name === 'media.claim') claimArgs.push(args);
+      return gated.core(name, args);
+    });
     let allowed = false;
     const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager, profileId: 'acct5', pollMs: 10,
       mayClaim: () => allowed, provider: { ensureLoaded: async () => {}, destroy() {} } });
     consumer.start();
-    await sleep(80);
+    await until(() => claimArgs.length >= 1, 'a resume-only claim');
     consumer.stop();
-    assert.ok(!gated.calls.includes('media.claim'), 'no claim while the account may not work');
-    assert.equal(gated.records.get('gated').state, 'queued');
+    assert.ok(claimArgs.length && claimArgs.every(args => args.resume_only === true),
+      'an account that may not work only resumes its own submitted jobs');
+    assert.equal(gated.records.get('gated').state, 'queued', 'it takes no new work');
   }
 
   // Generate disabled before the click: the account counts it; once it parks

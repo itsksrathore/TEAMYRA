@@ -308,6 +308,15 @@ class MediaBulkTests(unittest.TestCase):
         (self.root / "media" / ".job-index.json").write_text("not json", encoding="utf-8")
         self.assertEqual(len(media_engine._job_summaries(self.root)), 2, "a broken index is rebuilt")
 
+    def test_resume_only_claims_finish_submitted_work_only(self):
+        fresh, sent = (job["job_id"] for job in media_engine.create_batch(self.root, [self.request("a"), self.request("b")])["jobs"])
+        self.assertIsNone(media_engine.claim_next_job(self.root, "visual", "a", profile_id="acct2", resume_only=True),
+                          "a disabled or out-of-credits account takes no new work")
+        self.submit(sent, "acct2", 0)
+        self.assertEqual(media_engine.claim_next_job(self.root, "visual", "a", profile_id="acct2", resume_only=True)["job_id"], sent,
+                         "but still downloads what it submitted")
+        self.assertEqual(media_engine.load_job(self.root, fresh)["state"], "queued")
+
     def test_orphaned_claim_returns_to_the_queue(self):
         job_id = media_engine.create_batch(self.root, [self.request("a")])["jobs"][0]["job_id"]
         claimed = media_engine.claim_next_job(self.root, "visual", "lost-worker", profile_id="acct2")

@@ -1275,7 +1275,7 @@ _BATCH_ACTIVE_STATES = {"preparing", "submitting", "generating", "downloading", 
 ORPHANED_CLAIM_SECONDS = 300
 
 
-def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profile_id=None, main=None):
+def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profile_id=None, main=None, resume_only=False):
     """Claim the next job for one Flow tab (lane) of one Google account (profile).
 
     Every tab of every signed-in account claims from one queue. A batch's
@@ -1285,6 +1285,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
     account's first tab and edits in the account that made their source; extra
     tabs and accounts take batch work. A tab prefers the batch's jobs that use
     the reference images it has attached already (swapping them is slow).
+    resume_only: the account may not take new work (disabled, out of credits,
+    paused) but still finishes what it already submitted; no Generate click.
     """
     profile = _profile_id(profile_id)
     if main is None:
@@ -1331,6 +1333,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
             if job.get("request", {}).get("surface") != surface:
                 continue
             submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+            if resume_only and not submitted:
+                continue
             if submitted:
                 # Only the submitting account can see, match and download it.
                 if _job_profile(job) != profile:

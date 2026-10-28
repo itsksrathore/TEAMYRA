@@ -165,7 +165,10 @@ accounts × tabs (`media_guide` → `capacity.flow_accounts`, `flow_tabs`).
   enabled, signed in, unchallenged and not parked; disabling an account
   (Settings or `agent_account_update`, including the built-in `google`, whose
   settings live in `profiles/google-media/builtin-google.json`) stops its tabs
-  within ~10 s. Jobs it already submitted still finish there.
+  within ~10 s. Jobs it already submitted still finish there: an account that
+  may not take new work (disabled, parked, paused) keeps claiming in
+  resume-only mode, which returns only its own submitted jobs (reconcile and
+  download, no Generate). Every account is set up at desktop start for this.
 - **Out of credits.** Flow usually just keeps Generate disabled. "Generate
   disabled" before the click 4 times in a row with no successful submission
   between, or Flow's own credit wording, parks the account for 30 minutes and

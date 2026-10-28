@@ -637,9 +637,9 @@ class GoogleMediaEngine {
   initialize() {
     if (this.started) return;
     this.started = true;
-    // The built-in account is always set up (single jobs and music fall back to
-    // it); disabled, it takes no bulk work.
-    const ids = this.enabledProfiles();
+    // Every account is set up, enabled or not: one that is disabled takes no
+    // new work but still finishes the jobs it submitted before.
+    const ids = this.listProfiles().map(item => item.id);
     if (!ids.includes('google')) ids.unshift('google');
     for (const id of ids) this.ensureProfile(id);
     // Jobs the previous desktop process left mid-flight are requeued (or marked

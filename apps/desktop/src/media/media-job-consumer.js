@@ -201,15 +201,18 @@ class MediaJobConsumer {
     if (!this.running) return;
     await this.ready;
     if (!this.pipeline) return this.serialTick();
-    if (this.submitting || this.inFlight.size >= this.parallelLimit || Date.now() < this.pausedUntil || this.mayClaim() === false) {
-      this.schedule(Date.now() < this.pausedUntil ? Math.min(this.pollMs, this.pausedUntil - Date.now() + 50) : this.pollMs);
+    if (this.submitting || this.inFlight.size >= this.parallelLimit) {
+      this.schedule(this.pollMs);
       return;
     }
+    // Paused, parked or disabled: only finish jobs this tab already submitted
+    // (reconcile and download, never a new Generate).
+    const resumeOnly = Date.now() < this.pausedUntil || this.mayClaim() === false;
     const job = await callCore('media.claim', { surface: this.surface, worker: this.workerName,
       lane: this.lane, lanes: this.lanes, refs_key: this.lastRefsKey,
-      profile_id: this.profileId, main: this.isMain() !== false }, { timeout: 10000 });
+      profile_id: this.profileId, main: this.isMain() !== false, resume_only: resumeOnly }, { timeout: 10000 });
     if (!job) {
-      this.schedule(this.pollMs);
+      this.schedule(resumeOnly ? Math.max(this.pollMs, 15000) : this.pollMs);
       return;
     }
     if (typeof job.refs_key === 'string') this.lastRefsKey = job.refs_key;

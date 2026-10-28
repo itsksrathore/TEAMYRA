@@ -100,7 +100,7 @@ def handle(action, payload):
         return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"),
                                            lane=payload.get("lane", 0), lanes=payload.get("lanes", 1),
                                            refs_key=payload.get("refs_key"), profile_id=payload.get("profile_id"),
-                                           main=payload.get("main"))
+                                           main=payload.get("main"), resume_only=payload.get("resume_only") is True)
     if action == "media.status":
         return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30),
                                        payload.get("batch_id"))
