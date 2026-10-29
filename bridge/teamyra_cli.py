@@ -295,10 +295,14 @@ def cmd_pool(args):
     if action == "list":
         result = call("mcp_pool_list", {})
     elif action == "tools":
-        result = call("mcp_pool_tools", {
+        payload = {
             "server": args.server,
             "refresh": args.refresh,
-        })
+            "detail": args.detail,
+        }
+        if args.tool:
+            payload["tool_names"] = args.tool
+        result = call("mcp_pool_tools", payload)
     elif action == "call":
         try:
             arguments = json.loads(args.arguments or "{}")
@@ -620,6 +624,8 @@ def parser():
     pool_tools = pool_sub.add_parser("tools")
     pool_tools.add_argument("server")
     pool_tools.add_argument("--refresh", action="store_true")
+    pool_tools.add_argument("--detail", choices=["auto", "compact", "full"], default="auto")
+    pool_tools.add_argument("--tool", action="append", help="Only this tool, with its full input schema; repeatable")
     pool_tools.set_defaults(func=cmd_pool)
 
     pool_call = pool_sub.add_parser("call")

@@ -76,6 +76,8 @@ Namespaced tools:
 
 Mutating lifecycle actions require `confirm=true`.
 
+`teamyra.mcp_pool_tools` takes `detail` (`auto`, `compact` or `full`; default `auto`) and `tool_names`. With `auto`, a listing larger than 64 KB comes back compact: names, short descriptions, required arguments and read-only/destructive hints, without input schemas. Naming tools in `tool_names` returns their full definitions. The CLI equivalents are `teamyra pool tools <server> --detail compact` and `--tool <name>` (repeatable).
+
 ## Safety and lifecycle
 
 - External servers launch from argv arrays with `shell=False`.

@@ -147,6 +147,59 @@ class MCPPoolTests(unittest.TestCase):
             finally:
                 mcp_pool.shutdown(root)
 
+    def test_listing_can_be_compact_or_limited_to_named_tools(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = self.make_fake(root)
+            mcp_pool.register(root, "fake", [sys.executable, str(fake)], cwd=root, timeout_seconds=10)
+            try:
+                small = mcp_pool.list_tools(root, "fake", detail="auto")
+                self.assertEqual(small["detail"], "full")
+                self.assertIn("inputSchema", small["tools"][0])
+
+                compact = mcp_pool.list_tools(root, "fake", detail="compact")
+                self.assertEqual(compact["detail"], "compact")
+                self.assertEqual(compact["count"], 2)
+                self.assertNotIn("inputSchema", compact["tools"][0])
+
+                named = mcp_pool.list_tools(root, "fake", detail="compact", tool_names=["echo", "nope"])
+                self.assertEqual([tool["name"] for tool in named["tools"]], ["echo"])
+                self.assertEqual(named["missing"], ["nope"])
+                self.assertEqual(named["total"], 2)
+
+                with self.assertRaisesRegex(ValueError, "detail must be one of"):
+                    mcp_pool.list_tools(root, "fake", detail="everything")
+            finally:
+                mcp_pool.shutdown(root)
+
+    def test_auto_listing_drops_schemas_only_when_too_large(self):
+        big_schema = {"type": "object", "required": ["prompt"],
+                      "properties": {"prompt": {"type": "string", "description": "x" * mcp_pool.FULL_LISTING_LIMIT}}}
+        tools = [
+            {"name": "huge", "description": "Line one.\n\n" + "y" * 500, "inputSchema": big_schema,
+             "annotations": {"readOnlyHint": False, "destructiveHint": True, "title": "Huge"}},
+            {"name": "small", "description": "Small tool.", "inputSchema": {"type": "object"}},
+        ]
+        auto = mcp_pool.shape_tools(tools, "auto")
+        self.assertEqual(auto["detail"], "compact")
+        self.assertIn("tool_names", auto["note"])
+        self.assertEqual(auto["tools"][0], {
+            "name": "huge",
+            "description": auto["tools"][0]["description"],
+            "required": ["prompt"],
+            "readOnlyHint": False,
+            "destructiveHint": True,
+        })
+        self.assertLessEqual(len(auto["tools"][0]["description"]), mcp_pool.SUMMARY_DESCRIPTION_CHARS)
+        self.assertNotIn("\n", auto["tools"][0]["description"])
+        self.assertLess(len(json.dumps(auto)), 2000)
+
+        # Asking for a tool by name always returns its full schema, however large.
+        named = mcp_pool.shape_tools(tools, "auto", ["huge"])
+        self.assertEqual(named["detail"], "full")
+        self.assertEqual(named["tools"][0]["inputSchema"], big_schema)
+        self.assertNotIn("note", named)
+
     def test_unknown_tool_is_rejected_after_refresh(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -230,7 +283,11 @@ class MCPPoolTests(unittest.TestCase):
 
         with patch.object(server.mcp_pool, "list_tools", return_value={"tools": []}) as tools:
             server.tool_call("mcp_pool_tools", {"server": "fake", "refresh": True})
-            tools.assert_called_once_with(server.ROOT, "fake", True)
+            tools.assert_called_once_with(server.ROOT, "fake", True, "auto", None)
+
+        with patch.object(server.mcp_pool, "list_tools", return_value={"tools": []}) as tools:
+            server.tool_call("mcp_pool_tools", {"server": "fake", "tool_names": ["echo"]})
+            tools.assert_called_once_with(server.ROOT, "fake", False, "auto", ["echo"])
 
         with patch.object(server.mcp_pool, "call_tool", return_value={"result": {}}) as call:
             server.tool_call("mcp_pool_call", {

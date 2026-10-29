@@ -1450,9 +1450,13 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "mcp_pool_list", "description": "List configured shared external MCP servers and live pooled-process status. Runtime config lives under ignored profiles/.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "mcp_pool_tools", "description": "Start/reuse one pooled MCP server and list its tools.",
+    {"name": "mcp_pool_tools", "description": "Start/reuse one pooled MCP server and list its tools. Large servers (e.g. ElevenLabs) return a compact list of names, short descriptions and required arguments; then pass tool_names to get the full input schemas of the tools you will call.",
      "inputSchema": {"type": "object", "properties": {
-         "server": {"type": "string"}, "refresh": {"type": "boolean", "default": False}},
+         "server": {"type": "string"}, "refresh": {"type": "boolean", "default": False},
+         "detail": {"type": "string", "enum": ["auto", "compact", "full"], "default": "auto",
+                    "description": "auto: full definitions unless the listing is too large for an MCP client, then compact. full can be megabytes."},
+         "tool_names": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50,
+                        "description": "Only these tools, with full input schemas."}},
          "required": ["server"], "additionalProperties": False}},
     {"name": "mcp_pool_call", "description": "Call one tool on a configured pooled external MCP server. The long-lived process is reused across TEAMYRA clients.",
      "inputSchema": {"type": "object", "properties": {
@@ -1914,7 +1918,13 @@ def tool_call(name, a):
     if name == "mcp_pool_list":
         return mcp_pool.list_servers(ROOT)
     if name == "mcp_pool_tools":
-        return mcp_pool.list_tools(ROOT, a["server"], a.get("refresh", False))
+        return mcp_pool.list_tools(
+            ROOT,
+            a["server"],
+            a.get("refresh", False),
+            a.get("detail", "auto"),
+            a.get("tool_names"),
+        )
     if name == "mcp_pool_call":
         return mcp_pool.call_tool(
             ROOT,

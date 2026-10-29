@@ -25,6 +25,11 @@ MAX_STDERR_LINES = 120
 MAX_TOOL_CACHE = 1000
 DEFAULT_TIMEOUT = 30
 CONFIG_NAME = "mcp-pool.json"
+TOOL_DETAILS = ("auto", "compact", "full")
+# Above this, "auto" drops input schemas: most MCP clients cannot take a
+# multi-megabyte tool listing (ElevenLabs serves ~1.4 MB of schemas).
+FULL_LISTING_LIMIT = 64 * 1024
+SUMMARY_DESCRIPTION_CHARS = 240
 
 
 def _config_path(root):
@@ -142,6 +147,54 @@ def public_spec(name, spec):
         "env_keys": sorted((spec.get("env") or {}).keys()),
         "updated_at": spec.get("updated_at"),
     }
+
+
+def _tool_summary(tool):
+    description = " ".join(str(tool.get("description") or "").split())
+    if len(description) > SUMMARY_DESCRIPTION_CHARS:
+        description = description[:SUMMARY_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    item = {"name": tool.get("name"), "description": description}
+    schema = tool.get("inputSchema")
+    if isinstance(schema, dict) and schema.get("required"):
+        item["required"] = list(schema["required"])
+    annotations = tool.get("annotations")
+    if isinstance(annotations, dict):
+        for key in ("readOnlyHint", "destructiveHint"):
+            if key in annotations:
+                item[key] = annotations[key]
+    return item
+
+
+def shape_tools(tools, detail="full", tool_names=None):
+    """Return a tool listing sized for the caller.
+
+    "full" keeps every definition, "compact" keeps name, short description,
+    required arguments and read-only/destructive hints. "auto" is full unless
+    that listing exceeds FULL_LISTING_LIMIT; naming tools always selects full.
+    """
+    if detail not in TOOL_DETAILS:
+        raise ValueError(f"detail must be one of {', '.join(TOOL_DETAILS)}")
+    out = {"total": len(tools)}
+    selected = list(tools)
+    if tool_names:
+        wanted = list(dict.fromkeys(str(name) for name in tool_names))
+        by_name = {tool.get("name"): tool for tool in tools}
+        selected = [by_name[name] for name in wanted if name in by_name]
+        missing = [name for name in wanted if name not in by_name]
+        if missing:
+            out["missing"] = missing
+    if detail == "auto":
+        size = len(json.dumps(selected, ensure_ascii=False, separators=(",", ":")))
+        detail = "full" if tool_names or size <= FULL_LISTING_LIMIT else "compact"
+        if detail == "compact":
+            out["note"] = (
+                f"Input schemas omitted: the full listing is {size // 1024} KB. "
+                "Call again with tool_names=[...] for the schemas of the tools you will use."
+            )
+    out["detail"] = detail
+    out["tools"] = selected if detail == "full" else [_tool_summary(tool) for tool in selected]
+    out["count"] = len(selected)
+    return out
 
 
 class PooledMCPClient:
@@ -490,15 +543,16 @@ class MCPPoolManager:
                 })
         return {"servers": rows, "count": len(rows)}
 
-    def tools(self, name, refresh=False):
+    def tools(self, name, refresh=False, detail="full", tool_names=None):
+        if detail not in TOOL_DETAILS:
+            raise ValueError(f"detail must be one of {', '.join(TOOL_DETAILS)}")
         client = self.get(name)
         client.start()
         tools = client.refresh_tools() if refresh else list(client.tools)
         return {
             "server": name,
             "pid": client.process.pid if client.alive() else None,
-            "tools": tools,
-            "count": len(tools),
+            **shape_tools(tools, detail, tool_names),
         }
 
     def call(self, name, tool_name, arguments=None, timeout=None):
@@ -537,8 +591,8 @@ def list_servers(root):
     return manager(root).status()
 
 
-def list_tools(root, name, refresh=False):
-    return manager(root).tools(name, refresh=refresh)
+def list_tools(root, name, refresh=False, detail="full", tool_names=None):
+    return manager(root).tools(name, refresh=refresh, detail=detail, tool_names=tool_names)
 
 
 def call_tool(root, name, tool_name, arguments=None, timeout=None):
