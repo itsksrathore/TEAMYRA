@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { WebContentsView, Notification } = require('electron');
 const { ChatGPTSessionManager, DEFAULT_CHATGPT_PROFILE_ID } = require('./chatgpt-session-manager');
-const { ChatGPTAutomationAdapter, teamyraError } = require('./chatgpt-automation-adapter');
+const { ChatGPTAutomationAdapter, teamyraError, boundedPageCall, pageTimeoutMs } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
 const { callCore } = require('./core-api');
 
@@ -72,7 +72,7 @@ function looksLikeProtocolLoss(text, successfulTools) {
 }
 
 class ChatGPTWebProvider {
-  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID }) {
+  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID, pageCallTimeoutMs }) {
     this.window = window;
     this.runtimeRoot = runtimeRoot;
     this.stateRoot = path.join(runtimeRoot, 'chatgpt');
@@ -97,6 +97,10 @@ class ChatGPTWebProvider {
     this.heartbeatTimer = null;
     this.unloadTimer = null;
     this.statusRefresh = null;
+    this.pageCallTimeoutMs = pageTimeoutMs(pageCallTimeoutMs);
+    this.pageUnresponsiveSince = null;
+    this.pageGeneration = 0;
+    this.statusTimer = null;
     fs.mkdirSync(this.stateRoot, { recursive: true });
     this.writeStatus({
       profile_update: false,
@@ -122,21 +126,46 @@ class ChatGPTWebProvider {
     }).catch(() => {});
     if (!this.heartbeatTimer) {
       this.heartbeatTimer = setInterval(() => {
-        if (this.view || this.busy) {
-          this.refreshStatus().catch(() => {});
-        } else {
-          // Keep only the desktop heartbeat fresh while the heavy web view is
-          // asleep. A queued job will lazy-open the correct profile.
-          this.writeStatus({ profile_update: false });
-        }
+        try { this.publishHeartbeat(); } catch {}
       }, 5000);
       this.heartbeatTimer.unref?.();
+    }
+    if (!this.statusTimer) {
+      this.statusTimer = setInterval(() => {
+        if (this.view) this.refreshStatus().catch(() => {});
+      }, 5000);
+      this.statusTimer.unref?.();
     }
     if (!this.jobTimer) {
       this.jobTimer = setInterval(() => this.processPendingJobs().catch(() => {}), 2000);
       this.jobTimer.unref?.();
     }
     return this.getStatus();
+  }
+
+  pageCall(operation, label) {
+    const generation = this.pageGeneration;
+    return boundedPageCall(operation, {
+      timeoutMs: this.pageCallTimeoutMs, label,
+      onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+    });
+  }
+
+  markPageUnresponsive() {
+    this.pageUnresponsiveSince ||= Date.now();
+    this.publishHeartbeat();
+  }
+
+  publishHeartbeat() {
+    const since = this.pageUnresponsiveSince;
+    this.writeStatus({
+      busy: this.busy,
+      page_unresponsive_since: since ? since / 1000 : null,
+      ...(since ? {
+        automation_ready: false, worker_ready: false,
+        detail: 'page unresponsive since ' + new Date(since).toISOString()
+      } : {})
+    });
   }
 
   recoverInterruptedJobs() {
@@ -195,14 +224,19 @@ class ChatGPTWebProvider {
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
-        devTools: true
+        devTools: true,
+        backgroundThrottling: false
       }
     });
     this.view.setBackgroundColor('#0b0e14');
     this.view.setBounds(this.bounds);
     this.view.setVisible(this.visible);
     this.window.contentView.addChildView(this.view);
-    this.automation = new ChatGPTAutomationAdapter(this.view.webContents);
+    const generation = this.pageGeneration;
+    this.automation = new ChatGPTAutomationAdapter(this.view.webContents, {
+      timeoutMs: this.pageCallTimeoutMs,
+      onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+    });
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
       if (!safePopupUrl(url)) return { action: 'deny' };
@@ -226,8 +260,10 @@ class ChatGPTWebProvider {
     });
     this.view.webContents.on('render-process-gone', (_event, details) => {
       this.loaded = false;
+      this.markPageUnresponsive();
       this.writeStatus({ detail: 'ChatGPT renderer stopped: ' + (details?.reason || 'unknown') });
     });
+    this.view.webContents.on('unresponsive', () => this.markPageUnresponsive());
     this.view.webContents.on('before-input-event', event => {
       if (this.busy && !this.awaitingUser) event.preventDefault();
     });
@@ -244,7 +280,8 @@ class ChatGPTWebProvider {
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
-        devTools: true
+        devTools: true,
+        backgroundThrottling: false
       }
     });
     this.popupView = popup;
@@ -262,7 +299,7 @@ class ChatGPTWebProvider {
       if (safePopupUrl(url)) {
         setImmediate(() => {
           if (this.popupView === popup && !popup.webContents.isDestroyed()) {
-            popup.webContents.loadURL(url).catch(() => {});
+            this.pageCall(() => popup.webContents.loadURL(url), 'popup navigation').catch(() => {});
           }
         });
       }
@@ -295,7 +332,7 @@ class ChatGPTWebProvider {
     if (this.visible) view.setBounds(this.bounds);
     const url = view.webContents.getURL();
     if (!url || url === 'about:blank') {
-      await view.webContents.loadURL(CHATGPT_HOME);
+      await this.pageCall(() => view.webContents.loadURL(CHATGPT_HOME), 'navigation');
     }
     await this.refreshStatus();
     return this.getStatus();
@@ -314,12 +351,11 @@ class ChatGPTWebProvider {
     void (async () => {
       try {
         if (!current || current === 'about:blank') {
-          view.webContents.loadURL(CHATGPT_HOME).catch(() => {});
+          await this.pageCall(() => view.webContents.loadURL(CHATGPT_HOME), 'navigation');
         }
-        const deadline = Date.now() + 20000;
-        while (Date.now() < deadline && view.webContents.isLoading()) {
-          await sleep(120);
-        }
+        await this.pageCall(async () => {
+          while (view.webContents.isLoading()) await sleep(120);
+        }, 'navigation wait');
         await this.refreshStatus().catch(() => {});
         this.setVisible(true);
       } catch {
@@ -366,19 +402,31 @@ class ChatGPTWebProvider {
   }
 
   async reload() {
-    const view = this.ensureView();
-    if (!view.webContents.getURL()) await view.webContents.loadURL(CHATGPT_HOME);
-    else view.webContents.reload();
+    // Control callers acknowledge immediately. Navigation is bounded in its
+    // own task and cannot hold up another control request.
+    void this.reconnect().catch(() => {});
     return { ok: true };
   }
 
   async reconnect() {
     const view = this.ensureView();
+    this.pageGeneration += 1;
+    const generation = this.pageGeneration;
+    this.statusRefresh = null;
+    this.automation = new ChatGPTAutomationAdapter(view.webContents, {
+      timeoutMs: this.pageCallTimeoutMs,
+      onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+    });
     this.loaded = false;
     this.lastProbe = null;
     const current = view.webContents.getURL();
     const target = safeHttps(current) ? current : CHATGPT_HOME;
-    await view.webContents.loadURL(target);
+    await this.pageCall(() => view.webContents.loadURL(target), 'reconnect');
+    if (generation !== this.pageGeneration) throw teamyraError('ChatGPT navigation superseded', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+    this.loaded = true;
+    const probe = await this.automation.probe();
+    this.lastProbe = probe;
+    this.pageUnresponsiveSince = null;
     return this.refreshStatus();
   }
 
@@ -391,15 +439,15 @@ class ChatGPTWebProvider {
       if (this.interactionCssKey) {
         const key = this.interactionCssKey;
         this.interactionCssKey = null;
-        await this.view.webContents.removeInsertedCSS(key).catch(() => {});
+        await this.pageCall(() => this.view.webContents.removeInsertedCSS(key), 'remove CSS').catch(() => {});
       }
       return;
     }
     const view = this.ensureView();
     if (!this.interactionCssKey) {
-      this.interactionCssKey = await view.webContents.insertCSS(
+      this.interactionCssKey = await this.pageCall(() => view.webContents.insertCSS(
         'html { pointer-events: none !important; }'
-      );
+      ), 'insert CSS');
     }
   }
 
@@ -431,8 +479,7 @@ class ChatGPTWebProvider {
   }
 
   async getStatus() {
-    let workspace = null;
-    try { workspace = await this.workspaceBridge.status(); } catch {}
+    const workspace = this.workspaceBridge.statusCache?.value || null;
     return {
       id: this.activeProfileId === DEFAULT_CHATGPT_PROFILE_ID ? 'chatgpt-normal' : 'chatgpt-' + this.activeProfileId,
       provider: 'chatgpt-web',
@@ -440,8 +487,10 @@ class ChatGPTWebProvider {
       connected: Boolean(this.view && !this.view.webContents.isDestroyed() && this.loaded),
       visible: this.visible,
       loaded: this.loaded,
-      automationReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged),
-      workerReady: Boolean(this.lastProbe?.promptFound && !this.lastProbe?.challenged),
+      automationReady: Boolean(!this.pageUnresponsiveSince && this.lastProbe?.promptFound && !this.lastProbe?.challenged),
+      workerReady: Boolean(!this.pageUnresponsiveSince && this.lastProbe?.promptFound && !this.lastProbe?.challenged),
+      pageUnresponsiveSince: this.pageUnresponsiveSince,
+      detail: this.pageUnresponsiveSince ? 'page unresponsive since ' + new Date(this.pageUnresponsiveSince).toISOString() : '',
       loginVisible: Boolean(this.lastProbe?.loginVisible),
       challenged: Boolean(this.lastProbe?.challenged),
       url: this.view && !this.view.webContents.isDestroyed() ? this.view.webContents.getURL() : '',
@@ -453,16 +502,23 @@ class ChatGPTWebProvider {
 
   refreshStatus() {
     if (this.statusRefresh) return this.statusRefresh;
-    this.statusRefresh = this.refreshStatusOnce().finally(() => { this.statusRefresh = null; });
+    const pending = this.refreshStatusOnce().finally(() => { if (this.statusRefresh === pending) this.statusRefresh = null; });
+    this.statusRefresh = pending;
     return this.statusRefresh;
   }
 
   async refreshStatusOnce() {
+    // Refresh workspace data separately; a core subprocess cannot delay page
+    // status publication or the independent heartbeat.
+    Promise.resolve().then(() => this.workspaceBridge.status()).catch(() => {});
+    const generation = this.pageGeneration;
     if (this.view && !this.view.webContents.isDestroyed() && this.loaded && this.automation) {
       try {
-        this.lastProbe = await this.automation.probe();
+        const probe = await this.automation.probe();
+        if (generation !== this.pageGeneration) return this.getStatus();
+        this.lastProbe = probe;
       } catch {
-        this.lastProbe = null;
+        if (generation === this.pageGeneration) this.lastProbe = null;
       }
     }
     const status = await this.getStatus();
@@ -475,7 +531,7 @@ class ChatGPTWebProvider {
       challenged: status.challenged,
       busy: status.busy,
       url: status.url,
-      detail: status.challenged
+      detail: status.pageUnresponsiveSince ? status.detail : status.challenged
         ? 'ChatGPT requires user verification in the embedded view.'
         : status.automationReady && !status.workspace?.available
           ? 'Embedded ChatGPT session is active; select a workspace to enable worker routing.'
@@ -502,7 +558,7 @@ class ChatGPTWebProvider {
     const profilePatch = { heartbeat_at: Date.now() / 1000 };
     for (const key of [
       'automation_ready', 'worker_ready', 'connected', 'login_visible',
-      'challenged', 'busy', 'url', 'detail', 'session_present'
+      'challenged', 'busy', 'url', 'detail', 'session_present', 'page_unresponsive_since'
     ]) {
       if (Object.prototype.hasOwnProperty.call(statusPatch, key)) profilePatch[key] = statusPatch[key];
     }
@@ -565,7 +621,8 @@ class ChatGPTWebProvider {
     if (!safeHttps(url) || !new URL(url).hostname.endsWith('chatgpt.com')) {
       throw new Error('Invalid ChatGPT conversation URL');
     }
-    await view.webContents.loadURL(url);
+    await this.pageCall(() => view.webContents.loadURL(url), 'conversation navigation');
+    this.loaded = true;
     return this.refreshStatus();
   }
 
@@ -609,11 +666,11 @@ class ChatGPTWebProvider {
       ? fs.realpathSync.native(verified.path)
       : fs.realpathSync(verified.path);
     const view = this.ensureView();
-    await view.webContents.executeJavaScript(`(() => {
+    await this.automation.evaluate(`(() => {
       const button = document.querySelector('button[aria-label*="Attach"], button[aria-label*="attach"], button[data-testid*="attach"]');
       if (button) button.click();
       return !!button;
-    })()`, true);
+    })()`);
     await sleep(350);
     const debuggerApi = view.webContents.debugger;
     let attachedHere = false;
@@ -622,10 +679,10 @@ class ChatGPTWebProvider {
         debuggerApi.attach('1.3');
         attachedHere = true;
       }
-      const { root } = await debuggerApi.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
-      const { nodeId } = await debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="file"]' });
+      const { root } = await this.pageCall(() => debuggerApi.sendCommand('DOM.getDocument', { depth: -1, pierce: true }), 'DOM.getDocument');
+      const { nodeId } = await this.pageCall(() => debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="file"]' }), 'DOM.querySelector');
       if (!nodeId) throw new Error('ChatGPT file input was not found');
-      await debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [approvedPath] });
+      await this.pageCall(() => debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [approvedPath] }), 'DOM.setFileInputFiles');
       return { ok: true, path: approvedPath };
     } finally {
       if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach();
@@ -656,6 +713,7 @@ class ChatGPTWebProvider {
     }
     candidates.sort((a, b) => (a.meta.created || 0) - (b.meta.created || 0));
     if (!candidates.length) return;
+    if (this.pageUnresponsiveSince) await this.reconnect().catch(() => {});
     if (!this.view || this.view.webContents.isDestroyed()) {
       await this.wakeBackground();
     }
@@ -763,7 +821,9 @@ class ChatGPTWebProvider {
       for (;;) {
         this.checkJobActive(job);
         let probe = null;
-        try { probe = await this.automation.probe(); } catch {}
+        try { probe = await this.automation.probe(); } catch (error) {
+          if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') throw error;
+        }
         if (probe && !probe.challenged && probe.promptFound) break;
         await sleep(Math.max(1, Math.min(this.challengePollMs ?? CHALLENGE_POLL_MS, job.deadline - Date.now())));
       }
@@ -804,13 +864,13 @@ class ChatGPTWebProvider {
   // After a verification pause: back in the job conversation, was the last
   // message delivered? If not, it has to be sent again.
   async lastMessageDelivered(job, text) {
-    const current = await this.getCurrentConversation().catch(() => null);
+    const current = await this.getCurrentConversation();
     if (job.conversationUrl && current?.conversationId !== job.conversationId) {
       await this.openConversation(job.conversationUrl);
     }
     const expected = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 160);
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const last = String(await this.automation.lastUserMessage().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+      const last = String(await this.automation.lastUserMessage() || '').replace(/\s+/g, ' ').trim();
       if (last && expected && last.startsWith(expected)) return true;
       await sleep(this.resumePollMs ?? 1000);
     }
@@ -819,10 +879,20 @@ class ChatGPTWebProvider {
 
   // Sends one message and waits for its reply, surviving verification pauses.
   async jobExchange(job, text) {
-    let snap = await this.sendJobMessage(job, text);
+    let snap = null;
     for (;;) {
       this.checkJobActive(job);
       try {
+        if (!snap) {
+          // Keep the baseline even if sending hangs after clicking Send.
+          snap = await this.automation.assistantSnapshot();
+          await this.sendJobMessage(job, text);
+        }
+        const current = await this.getCurrentConversation();
+        if (current?.conversationId) {
+          job.conversationId = current.conversationId;
+          job.conversationUrl = current.url;
+        }
         const reply = await this.automation.waitForAssistantReply({
           previousCount: snap.count,
           previousText: snap.text,
@@ -830,6 +900,8 @@ class ChatGPTWebProvider {
           deadline: job.deadline,
           shouldCancel: job.isCancelled,
           detectChallenge: true,
+          noProgressMs: this.noProgressMs ?? 300000,
+          shouldRecover: () => Boolean(this.pageUnresponsiveSince),
           pollMs: this.replyPollMs,
           progressIntervalMs: this.progressIntervalMs ?? PROGRESS_INTERVAL_MS,
           onProgress: ({ elapsedMs, generating }) => {
@@ -848,6 +920,11 @@ class ChatGPTWebProvider {
         }
         return reply;
       } catch (error) {
+        if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') {
+          const delivered = await this.recoverJobPage(job, () => snap ? this.lastMessageDelivered(job, text) : false);
+          if (!delivered) snap = null;
+          continue;
+        }
         if (error?.code !== 'TEAMYRA_CHALLENGED') throw error;
         await this.waitForChallengeResolution(job);
         if (!await this.lastMessageDelivered(job, text)) {
@@ -856,6 +933,34 @@ class ChatGPTWebProvider {
         }
       }
     }
+  }
+
+  async recoverJobPage(job, afterReload = null) {
+    this.markPageUnresponsive();
+    while ((job.pageRecoveries || 0) < 2) {
+      this.checkJobActive(job);
+      job.pageRecoveries = (job.pageRecoveries || 0) + 1;
+      this.writeJobMeta(job.dir, { page_recoveries: job.pageRecoveries, last_event: 'recovering unresponsive ChatGPT page' });
+      this.appendJobEvent(job.dir, 'page_recovery', `reloading profile (${job.pageRecoveries}/2)`);
+      try {
+        const current = await this.getCurrentConversation();
+        if (!job.conversationUrl && current?.conversationId) {
+          job.conversationId = current.conversationId;
+          job.conversationUrl = current.url;
+        }
+        await this.reconnect();
+        if (job.conversationUrl) await this.openConversation(job.conversationUrl);
+        this.checkJobActive(job);
+        await this.setInteractionLocked(true);
+        const result = afterReload ? await afterReload() : true;
+        this.pageUnresponsiveSince = null;
+        return result;
+      } catch (error) {
+        this.checkJobActive(job);
+        if (error?.code === 'TEAMYRA_CHALLENGED') throw error;
+      }
+    }
+    throw teamyraError('ChatGPT page unresponsive after two recoveries', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
   }
 
   dispatchQueuedJobs() {
@@ -896,14 +1001,16 @@ class ChatGPTWebProvider {
       const requestedConversation = spec.session_id
         ? { conversationId: spec.session_id }
         : null;
-      if (requestedConversation?.conversationId || requestedConversation?.url) {
-        await this.openConversation(requestedConversation.url || requestedConversation.conversationId);
-      } else {
-        // New delegated jobs are isolated by default. Only an explicit resume
-        // session may reuse an earlier worker conversation.
-        await this.createConversation();
+      job.conversationId = requestedConversation?.conversationId || null;
+      job.conversationUrl = job.conversationId ? CHATGPT_HOME + 'c/' + job.conversationId : null;
+      try {
+        if (job.conversationUrl) await this.openConversation(job.conversationUrl);
+        else await this.createConversation();
+        await this.setInteractionLocked(true);
+      } catch (error) {
+        if (error?.code !== 'TEAMYRA_PAGE_UNRESPONSIVE') throw error;
+        await this.recoverJobPage(job);
       }
-      await this.setInteractionLocked(true);
       this.writeJobMeta(jobDir, {
         state: 'running', started: Date.now() / 1000, runner_pid: null, attention: null, usage: { ...job.usage }
       });
@@ -1042,11 +1149,13 @@ class ChatGPTWebProvider {
       fs.writeFileSync(path.join(jobDir, 'DONE'), state, 'utf8');
     } finally {
       this.awaitingUser = false;
-      await this.setInteractionLocked(false).catch(() => {});
       this.activeJobDir = null;
       this.busy = false;
+      // Release ownership before any renderer cleanup, even if it hangs.
+      this.setInteractionLocked(false).catch(() => {});
       this.dispatchQueuedJobs();
-      await this.refreshStatus().catch(() => {});
+      try { this.publishHeartbeat(); } catch {}
+      this.refreshStatus().catch(() => {});
     }
   }
 
@@ -1063,8 +1172,10 @@ class ChatGPTWebProvider {
     } catch {}
     clearInterval(this.jobTimer);
     clearInterval(this.heartbeatTimer);
+    clearInterval(this.statusTimer);
     this.jobTimer = null;
     this.heartbeatTimer = null;
+    this.statusTimer = null;
     this.closeEmbeddedPopup();
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.window.contentView.removeChildView(this.view);

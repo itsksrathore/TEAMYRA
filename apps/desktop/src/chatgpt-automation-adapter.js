@@ -28,6 +28,27 @@ function teamyraError(message, code, reason) {
   return error;
 }
 
+function pageTimeoutMs(value = process.env.TEAMYRA_CHATGPT_PAGE_TIMEOUT_MS) {
+  return Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : 20000;
+}
+
+// Race the operation itself, including synchronous throws. A late settlement
+// is consumed but cannot turn a timed-out call into a successful call.
+async function boundedPageCall(operation, { timeoutMs, onTimeout, label = 'page call' } = {}) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = teamyraError(`ChatGPT ${label} timed out`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+          try { onTimeout?.(error); } catch {} finally { reject(error); }
+        }, pageTimeoutMs(timeoutMs));
+      })
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 // Index just after the JSON object starting at `start`, or -1. A backslash
 // skips the next character inside strings (also for invalid escapes).
 function balancedObjectEnd(text, start) {
@@ -176,13 +197,18 @@ function parseToolRequestDetailed(text) {
 }
 
 class ChatGPTAutomationAdapter {
-  constructor(webContents) {
+  constructor(webContents, options = {}) {
     this.webContents = webContents;
+    this.pageOptions = options;
+  }
+
+  pageCall(operation, label) {
+    return boundedPageCall(operation, { ...this.pageOptions, label });
   }
 
   async evaluate(source) {
     if (!this.webContents || this.webContents.isDestroyed()) throw new Error('ChatGPT view is unavailable');
-    return this.webContents.executeJavaScript(source, true);
+    return this.pageCall(() => this.webContents.executeJavaScript(source, true), 'executeJavaScript');
   }
 
   async probe() {
@@ -196,7 +222,7 @@ class ChatGPTAutomationAdapter {
   }
 
   async newChat() {
-    await this.webContents.loadURL('https://chatgpt.com/');
+    await this.pageCall(() => this.webContents.loadURL('https://chatgpt.com/'), 'navigation');
     return { ok: true };
   }
 
@@ -355,7 +381,8 @@ class ChatGPTAutomationAdapter {
   // with `detectChallenge` a human-verification page raises TEAMYRA_CHALLENGED.
   async waitForAssistantReply({
     previousCount = 0, previousText, previousMessageId = '', timeoutMs, deadline, shouldCancel = null,
-    onProgress = null, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS, pollMs = 1200, detectChallenge = false
+    onProgress = null, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS, pollMs = 1200, detectChallenge = false,
+    noProgressMs = 300000, shouldRecover = null
   } = {}) {
     const startedAt = Date.now();
     const endAt = Number.isFinite(deadline)
@@ -365,6 +392,8 @@ class ChatGPTAutomationAdapter {
     let stableCount = 0;
     let nextProgress = startedAt + progressIntervalMs;
     let lastSnap = null;
+    let lastProgressAt = startedAt;
+    let lastSignature = null;
     while (Date.now() < endAt) {
       if (typeof shouldCancel === 'function' && shouldCancel()) {
         await this.stopGeneration().catch(() => {});
@@ -372,6 +401,12 @@ class ChatGPTAutomationAdapter {
       }
       const snap = await this.assistantSnapshot();
       lastSnap = snap;
+      const signature = JSON.stringify([snap.count, snap.messageId, snap.text]);
+      if (signature !== lastSignature || snap.generating) lastProgressAt = Date.now();
+      lastSignature = signature;
+      if (shouldRecover?.() || (!snap.generating && Date.now() - lastProgressAt >= noProgressMs)) {
+        throw teamyraError('ChatGPT page made no progress', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+      }
       if (detectChallenge && snap?.challenged) {
         throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
       }
@@ -424,5 +459,7 @@ module.exports = {
   PATH_LIKE_KEYS,
   parseToolRequestDetailed,
   repairToolJson,
-  teamyraError
+  teamyraError,
+  boundedPageCall,
+  pageTimeoutMs
 };
