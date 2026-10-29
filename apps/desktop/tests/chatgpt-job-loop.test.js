@@ -92,6 +92,9 @@ function makeProvider(fake, { permissions } = {}) {
   provider.runtimeRoot = root;
   provider.stateRoot = path.join(root, 'chatgpt');
   provider.workerConversationFile = path.join(provider.stateRoot, 'worker-conversation.json');
+  // Without this, writeStatus() writes `undefined.tmp-<pid>` into the cwd.
+  provider.statusFile = path.join(provider.stateRoot, 'status.json');
+  fs.mkdirSync(provider.stateRoot, { recursive: true });
   provider.activeProfileId = 'web';
   provider.loaded = true;
   provider.view = { webContents: { isDestroyed: () => false } };
@@ -414,6 +417,7 @@ async function main() {
     await testCancelSetsExitCode();
     await testDispatchNeverBlocksAndLogsRejections();
     await testWorkerChallengedBeforePickupMarksWaitingJobs();
+    assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
