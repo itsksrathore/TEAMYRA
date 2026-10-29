@@ -2,6 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { agentIconSvg } from './agent-icons.mjs';
+import { openElevenLabsMcp } from './elevenlabs-mcp.mjs';
 
 const $ = selector => document.querySelector(selector);
 
@@ -85,6 +86,7 @@ function workerMeta(worker) {
 }
 
 function providerMeta(providerId) {
+  if (providerId === 'elevenlabs') return { code: 'EL', icon: '', cls: 'chatgpt', label: 'ElevenLabs' };
   if (providerId === 'chatgpt-web') return WORKER_META.chatgpt;
   if (providerId === 'google-media') return WORKER_META.googleMedia;
   return workerMeta(providerId);
@@ -263,7 +265,7 @@ async function refreshJobs() {
 
 function profileRows(provider) {
   let profiles = Array.isArray(provider.profiles) ? [...provider.profiles] : [];
-  if (provider.id !== 'chatgpt-web' && provider.installed && !profiles.length) {
+  if (!['chatgpt-web', 'elevenlabs'].includes(provider.id) && provider.installed && !profiles.length) {
     profiles = [{
       id: 'native',
       name: 'Default',
@@ -276,6 +278,7 @@ function profileRows(provider) {
 }
 
 function profileActionLabel(provider, profile) {
+  if (provider.id === 'elevenlabs') return profile.signedIn ? 'Open' : profile.mcpState === 'connecting' ? 'Connecting…' : 'Connect';
   if (provider.id === 'chatgpt-web' || provider.id === 'google-media') return profile.signedIn ? 'Open' : 'Connect';
   return profile.signedIn ? 'Open' : 'Connect';
 }
@@ -304,7 +307,7 @@ function agentCardHtml(provider) {
   const connected = provider.id === 'chatgpt-web'
     ? provider.signedIn === true
     : profiles.some(profile => profile.signedIn);
-  const status = provider.id === 'chatgpt-web'
+  const status = provider.id === 'elevenlabs' ? provider.status : provider.id === 'chatgpt-web'
     ? (provider.status || 'Embedded web session')
     : !provider.installed
       ? 'Not installed'
@@ -317,13 +320,14 @@ function agentCardHtml(provider) {
         <div class="profile-row">
           <div class="profile-name">
             <strong>${escapeHtml(profile.name || profile.id)}</strong>
-            <span>${profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
+            <span>${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
           </div>
           <div class="profile-actions">
             <button class="profile-action" type="button"
               data-provider="${escapeHtml(provider.id)}"
               data-profile="${escapeHtml(profile.id)}"
               data-signed-in="${profile.signedIn ? '1' : '0'}">${profileActionLabel(provider, profile)}</button>
+            ${provider.id === 'elevenlabs' ? `<button class="profile-action" type="button" data-elevenlabs-tools="${escapeHtml(profile.id)}" title="Open tools for this MCP connection">MCP Tools</button>` : ''}
             ${provider.id === 'google-media' && profile.signedIn
               ? `<button class="profile-action" type="button" data-google-bulk="${escapeHtml(profile.id)}" title="Generate many images, videos or sound effects at once">Bulk</button>
                  <button class="profile-action" type="button" data-google-music="${escapeHtml(profile.id)}" title="${profile.musicSignedIn ? 'Open Flow Music' : 'Authorize Flow Music with Google'}">${profile.musicSignedIn ? 'Music' : 'Connect Music'}</button>`
@@ -393,6 +397,13 @@ async function refreshAgents(force = false) {
     });
   });
 
+  $('#agentGrid').querySelectorAll('[data-elevenlabs-tools]').forEach(button => {
+    button.addEventListener('click', () => {
+      const profile = profileRows(currentProviders.find(provider => provider.id === 'elevenlabs') || {}).find(item => item.id === button.dataset.elevenlabsTools);
+      if (profile) openElevenLabsMcp(profile, () => refreshAgents(true)).catch(error => alert(String(error?.message || error)));
+    });
+  });
+
   $('#agentGrid').querySelectorAll('[data-google-music]').forEach(button => {
     button.addEventListener('click', async () => {
       const profileId = button.dataset.googleMusic || 'google';
@@ -454,7 +465,7 @@ async function refreshAgents(force = false) {
           .map(profile => String(profile.name || '').trim().toLowerCase())
           .filter(Boolean)
       );
-      let suffix = 2;
+      let suffix = provider.id === 'elevenlabs' ? 1 : 2;
       let name = provider.name + ' ' + suffix;
       while (existingNames.has(name.toLowerCase())) {
         suffix += 1;
@@ -470,6 +481,9 @@ async function refreshAgents(force = false) {
 
         if (provider.id === 'chatgpt-web') {
           await openChatgptDetail(result.profileId);
+        } else if (provider.id === 'elevenlabs') {
+          await openElevenLabsMcp({ id: result.profileId, name: result.name }, () => refreshAgents(true), { startLogin: true });
+          refreshAgents(true).catch(() => {});
         } else if (provider.id === 'google-media') {
           await window.teamyra.setChatgptVisible(false).catch(() => {});
           prepareGoogleMediaSurface();
@@ -507,6 +521,10 @@ async function refreshAgents(force = false) {
 }
 
 async function openProvider(provider, profile) {
+  if (provider.id === 'elevenlabs') {
+    await openElevenLabsMcp(profile, () => refreshAgents(true), { startLogin: !profile.signedIn && profile.mcpState !== 'connecting' });
+    return;
+  }
   if (provider.id === 'google-media') {
     await window.teamyra.setChatgptVisible(false).catch(() => {});
     prepareGoogleMediaSurface();
@@ -1225,6 +1243,9 @@ function scheduleJobsPoll(delayMs) {
 
 async function boot() {
   document.body.dataset.platform = window.teamyra.platform || '';
+  window.teamyra.onElevenLabsMcpState(() => {
+    if (activeView === 'agents') refreshAgents(true).catch(() => {});
+  });
   const chatgptAvatar = $('.chatgpt-avatar');
   if (chatgptAvatar) chatgptAvatar.innerHTML = agentIconSvg('openai') || 'GPT';
   window.teamyra.updateStatus().then(updateUpdateNote).catch(() => {});

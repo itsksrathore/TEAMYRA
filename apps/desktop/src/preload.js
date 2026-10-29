@@ -8,6 +8,15 @@ contextBridge.exposeInMainWorld('teamyra', {
   installUpdate: () => ipcRenderer.invoke('teamyra:update-install'),
   onUpdateState: (callback) => ipcRenderer.on('teamyra:update-state', (_event, payload) => callback(payload)),
   providers: (force = false) => ipcRenderer.invoke('teamyra:providers', force === true),
+  elevenLabsMcpStatus: (id) => ipcRenderer.invoke('teamyra:elevenlabs-mcp-status', id),
+  elevenLabsMcpConnect: (id) => ipcRenderer.invoke('teamyra:elevenlabs-mcp-connect', id),
+  elevenLabsMcpReauthorize: (id) => ipcRenderer.invoke('teamyra:elevenlabs-mcp-reauthorize', id),
+  elevenLabsMcpCall: (options) => ipcRenderer.invoke('teamyra:elevenlabs-mcp-call', options),
+  onElevenLabsMcpState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('teamyra:elevenlabs-mcp-state', listener);
+    return () => ipcRenderer.removeListener('teamyra:elevenlabs-mcp-state', listener);
+  },
   closeEmbeddedBrowsers: () => ipcRenderer.invoke('teamyra:browser-close'),
   mediaStatus: (profileId) => ipcRenderer.invoke('teamyra:media-status', profileId),
   openGoogleMedia: (profileId = 'google') => ipcRenderer.invoke('teamyra:media-open', profileId),

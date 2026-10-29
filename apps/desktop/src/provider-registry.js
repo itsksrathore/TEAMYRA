@@ -55,6 +55,10 @@ const PROVIDERS = [
     status: { kind: 'media' },
     managed: { verified: true, env: null, mediaProfiles: true },
     color: 'violet'
+  },
+  {
+    id: 'elevenlabs', name: 'ElevenLabs MCP', kind: 'mcp', bin: null,
+    nativeHome: null, managed: { verified: true, env: null, mcpProfiles: true }, color: 'blue'
   }
 ];
 
@@ -215,6 +219,16 @@ function managedProfiles(provider) {
 
 async function detectProviders() {
   return Promise.all(PROVIDERS.map(async (provider) => {
+    if (provider.id === 'elevenlabs') {
+      const profiles = managedProfiles(provider);
+      return {
+        id: provider.id, name: provider.name, color: provider.color,
+        installed: true, binary: 'Official ElevenLabs hosted MCP · OAuth',
+        signedIn: false,
+        status: profiles.length + ' MCP account profile(s)', managedProfilesVerified: true,
+        managedProfileEnv: null, profiles
+      };
+    }
     if (provider.kind === 'media') {
       return {
         id: provider.id,

@@ -120,6 +120,7 @@ const chatgptProviders = new Map();
 let activeChatgptProfileId = 'web';
 let mainWindow = null;
 let googleMediaEngine = null;
+let elevenLabsMcp = null;
 let isQuitting = false;
 let mcpBootError = null;
 let desktopIdleTimer = null;
@@ -277,6 +278,16 @@ async function providersCached(force = false) {
             : 'Connect a Google account';
         }
       } catch {}
+      const elevenLabs = data.find(item => item.id === 'elevenlabs');
+      if (elevenLabs && elevenLabsMcp) {
+        await elevenLabsMcp.syncStatuses(elevenLabs.profiles.map(profile => profile.id)).catch(() => {});
+        elevenLabs.profiles = elevenLabs.profiles.map(profile => ({
+          ...profile, signedIn: elevenLabsMcp.getState(profile.id).state === 'connected',
+          mcpState: elevenLabsMcp.getState(profile.id).state
+        }));
+        elevenLabs.signedIn = elevenLabs.profiles.some(profile => profile.signedIn);
+        elevenLabs.status = elevenLabs.profiles.filter(profile => profile.signedIn).length + ' of ' + elevenLabs.profiles.length + ' MCP profiles connected';
+      }
       PROVIDER_CACHE = { at: Date.now(), data, pending: null };
       return data;
     })
@@ -428,6 +439,7 @@ function jobBlocksDesktopSleep(job) {
 }
 
 function hasActiveDesktopWork() {
+  if (elevenLabsMcp?.hasActiveWork()) return true;
   if (TERMINALS.size > 0) return true;
   try {
     if (fs.readdirSync(DESKTOP_CONTROL_DIR).some(name => name.endsWith('.request.json'))) return true;
@@ -689,6 +701,11 @@ ipcMain.handle('teamyra:update-install', () => {
 });
 
 ipcMain.handle('teamyra:providers', (_event, force = false) => providersCached(force === true));
+elevenLabsMcp = require('./elevenlabs-mcp').registerElevenLabsMcp({
+  electron: require('electron'), getWindow: () => mainWindow, root: ROOT,
+  ensureMcp: ensureTeamyraMcp, endpoint: require('./mcp-integration').MCP_ENDPOINT,
+  invalidate: () => { PROVIDER_CACHE = { at: 0, data: null, pending: null }; }
+});
 ipcMain.handle('teamyra:browser-close', async () => {
   for (const provider of chatgptProviders.values()) {
     try { await provider.close(); } catch {}
@@ -1229,8 +1246,9 @@ async function desktopCreateAccount(providerId, requestedName) {
   if (!provider) throw new Error('Unknown provider');
   const webProfile = provider.kind === 'web' && provider.managed?.webProfiles === true;
   const mediaProfile = provider.kind === 'media' && provider.managed?.mediaProfiles === true;
+  const mcpProfile = provider.kind === 'mcp' && provider.managed?.mcpProfiles === true;
   const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
-  if (!webProfile && !mediaProfile && !cliProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
+  if (!webProfile && !mediaProfile && !mcpProfile && !cliProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
 
   const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
   const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
