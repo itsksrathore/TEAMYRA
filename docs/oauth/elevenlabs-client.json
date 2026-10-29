@@ -1,0 +1,32 @@
+{
+  "client_id": "https://raw.githubusercontent.com/itsksrathore/TEAMYRA/main/docs/oauth/elevenlabs-client.json",
+  "client_name": "TEAMYRA",
+  "client_uri": "https://github.com/itsksrathore/TEAMYRA",
+  "redirect_uris": [
+    "http://127.0.0.1:47681/oauth/callback",
+    "http://127.0.0.1:47682/oauth/callback",
+    "http://127.0.0.1:47683/oauth/callback",
+    "http://127.0.0.1:47684/oauth/callback",
+    "http://127.0.0.1:47685/oauth/callback",
+    "http://127.0.0.1:47686/oauth/callback",
+    "http://127.0.0.1:47687/oauth/callback",
+    "http://127.0.0.1:47688/oauth/callback",
+    "http://127.0.0.1:47689/oauth/callback",
+    "http://127.0.0.1:47690/oauth/callback",
+    "http://127.0.0.1:47691/oauth/callback",
+    "http://127.0.0.1:47692/oauth/callback",
+    "http://127.0.0.1:47693/oauth/callback",
+    "http://127.0.0.1:47694/oauth/callback",
+    "http://127.0.0.1:47695/oauth/callback",
+    "http://127.0.0.1:47696/oauth/callback"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "token_endpoint_auth_method": "none",
+  "application_type": "native"
+}
