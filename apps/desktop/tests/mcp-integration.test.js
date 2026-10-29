@@ -38,3 +38,35 @@ const { ROOT, PACKAGED_CORE } = require('../src/core-api');
 assert.equal(gatewayIdentityError({ runtime_root: ROOT, core_exe: PACKAGED_CORE }), null);
 assert.match(gatewayIdentityError({ runtime_root: '/another-teamyra' }), /another or older/);
 assert.match(gatewayIdentityError({ service: 'teamyra-wake-gateway' }), /another or older/);
+
+// A live gateway on Windows may take more than a second to summarize its
+// backend. A healthy delayed response must not trigger duplicate startup.
+(async () => {
+  const http = require('node:http');
+  const { EventEmitter } = require('node:events');
+  const { gatewayHealth } = require('../src/mcp-integration');
+  const original = http.request;
+  http.request = (options, callback) => {
+    const request = new EventEmitter();
+    let slowResponse;
+    let deadline;
+    request.destroy = () => { clearTimeout(slowResponse); clearTimeout(deadline); };
+    request.end = () => {
+      deadline = setTimeout(() => request.emit('timeout'), options.timeout);
+      slowResponse = setTimeout(() => {
+        clearTimeout(deadline);
+        const response = new EventEmitter();
+        response.statusCode = 200;
+        callback(response);
+        response.emit('data', Buffer.from(JSON.stringify({ service: 'teamyra-wake-gateway' })));
+        response.emit('end');
+      }, 1200);
+    };
+    return request;
+  };
+  try {
+    assert.equal((await gatewayHealth())?.service, 'teamyra-wake-gateway');
+    assert.equal(await gatewayHealth(20), null, 'explicit short timeout must still be honored');
+    console.log('delayed MCP gateway readiness regression passed');
+  } finally { http.request = original; }
+})().catch(error => { console.error(error); process.exitCode = 1; });

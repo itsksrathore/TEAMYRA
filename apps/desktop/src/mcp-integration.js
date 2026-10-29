@@ -40,7 +40,7 @@ function execFilePromise(file, args, options = {}) {
   });
 }
 
-function gatewayHealth(timeout = 1000) {
+function gatewayHealth(timeout = 5000) {
   return new Promise((resolve) => {
     const req = http.request({
       host: MCP_HOST,
