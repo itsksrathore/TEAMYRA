@@ -628,14 +628,37 @@ def _save_assets(root, data):
     _atomic_write(_assets_file(root), data)
 
 
+_ASSET_CACHE = {}
+
+
+def _assets_snapshot(root):
+    """Read-only asset registry, re-read only when assets.json changes.
+
+    Every job status with an asset looked it up by parsing the whole registry
+    (thousands of assets, ~0.1 s); listing 2,000 jobs took minutes."""
+    path = _assets_file(root)
+    try:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}
+    key = str(path.resolve())
+    cached = _ASSET_CACHE.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    assets = _load_assets(root)["assets"]
+    _ASSET_CACHE[key] = (stamp, assets)
+    return assets
+
+
 def get_asset(root, asset_id):
     asset_id = str(asset_id or "").strip().upper()
     if not _ASSET_ID_RE.fullmatch(asset_id):
         raise ValueError("invalid TEAMYRA asset id")
-    asset = _load_assets(root)["assets"].get(asset_id)
+    asset = _assets_snapshot(root).get(asset_id)
     if not isinstance(asset, dict):
         raise ValueError(f"no such media asset: {asset_id}")
-    return asset
+    return dict(asset)
 
 
 def list_assets(root, project_path=None, asset_id=None, media_type=None, limit=100):
@@ -646,7 +669,7 @@ def list_assets(root, project_path=None, asset_id=None, media_type=None, limit=1
     if media_type and media_type not in MEDIA_TYPES:
         raise ValueError("invalid media type")
     rows = []
-    for asset in _load_assets(root)["assets"].values():
+    for asset in _assets_snapshot(root).values():
         if not isinstance(asset, dict):
             continue
         if project_norm and str(asset.get("project_path") or "").lower() != project_norm:
@@ -962,14 +985,15 @@ def job_status(root, job_id=None, limit=30, batch_id=None, compact=False):
                     submission[key + "_count"] = len(submission.pop(key))
         result["provider_submission"] = submission
         return result
+    # Pick the newest jobs from the index and read only those in full.
+    summaries = sorted(_job_summaries(root), key=lambda item: float(item.get("created_at") or 0), reverse=True)
+    limit = max(1, min(int(limit or 30), 200))
     rows = []
-    for path in _jobs_dir(root).glob("media-*.json"):
-        job = _read_json(path, None)
+    for item in summaries[:limit]:
+        job = _read_json(_job_path(root, item["job_id"]), None) if item.get("job_id") else None
         if isinstance(job, dict):
             rows.append(public_job(job))
-    rows.sort(key=lambda item: float(item.get("created_at") or 0), reverse=True)
-    limit = max(1, min(int(limit or 30), 200))
-    return {"jobs": rows[:limit], "count": min(len(rows), limit), "total": len(rows)}
+    return {"jobs": rows, "count": len(rows), "total": len(summaries)}
 
 
 def status_many(root, job_ids):

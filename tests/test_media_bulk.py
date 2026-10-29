@@ -356,6 +356,28 @@ class MediaBulkTests(unittest.TestCase):
         media_engine.write_connection_status(self.root, {"connected": True, "challenged": True}, "google")
         self.assertFalse(media_engine.connection_status(self.root)["connected"])
 
+    def test_job_list_reads_only_the_newest_jobs(self):
+        ids = [media_engine.create_job(self.root, self.request(str(i)))['job_id'] for i in range(5)]
+        for offset, job_id in enumerate(ids):
+            self.edit(job_id, created_at=1000.0 + offset)
+        with patch.object(media_engine, 'public_job', wraps=media_engine.public_job) as built:
+            listing = media_engine.job_status(self.root, limit=2)
+        self.assertEqual([row['job_id'] for row in listing['jobs']], [ids[4], ids[3]])
+        self.assertEqual(listing['total'], 5)
+        self.assertEqual(built.call_count, 2, 'only the returned jobs are built')
+
+    def test_asset_lookups_reuse_the_registry_until_it_changes(self):
+        media_engine._save_assets(self.root, {'assets': {'TYR-IMG-000001': {'asset_id': 'TYR-IMG-000001', 'type': 'image'}}, 'counters': {}})
+        with patch.object(media_engine, '_load_assets', wraps=media_engine._load_assets) as loads:
+            for _ in range(3):
+                self.assertEqual(media_engine.get_asset(self.root, 'TYR-IMG-000001')['type'], 'image')
+            self.assertEqual(loads.call_count, 1)
+            time.sleep(0.02)
+            media_engine._save_assets(self.root, {'assets': {'TYR-IMG-000001': {'asset_id': 'TYR-IMG-000001', 'type': 'video'}}, 'counters': {}})
+            self.assertEqual(media_engine.get_asset(self.root, 'TYR-IMG-000001')['type'], 'video', 'a changed registry is read again')
+        media_engine.get_asset(self.root, 'TYR-IMG-000001')['type'] = 'changed'
+        self.assertEqual(media_engine.get_asset(self.root, 'TYR-IMG-000001')['type'], 'video', 'callers get copies')
+
     def test_restart_recovery_leaves_a_live_workers_jobs_alone(self):
         job_id = self.claimed()
         media_engine.append_job_metadata(self.root, job_id, {'submission_phase': 'preparing'})

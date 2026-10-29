@@ -873,6 +873,29 @@ async function accountTests(temp) {
   }
 }
 
+// A reference attach that Flow leaves half done is redone once from a clean composer.
+async function referenceRetryTests() {
+  const { FlowReferenceController } = require('../src/media/flow-reference-controller');
+  const controller = new FlowReferenceController({});
+  let clears = 0;
+  let attaches = 0;
+  controller.clearComposer = async () => { clears += 1; };
+  controller.dismissOverlays = async () => {};
+  controller.attach = async () => {
+    attaches += 1;
+    if (attaches === 1) throw new Error('selector_failure: verified prompt image ingredient did not become ready; seen={"chips":2}');
+    return { provider_asset_id: 'img-' + attaches };
+  };
+  const prepared = await controller.prepare([{ path: 'a.png' }]);
+  assert.equal(prepared.attempts, 2);
+  assert.equal(clears, 2, 'the composer is cleared before the second try');
+  const strict = new FlowReferenceController({});
+  strict.clearComposer = async () => {};
+  strict.dismissOverlays = async () => {};
+  strict.attach = async () => { throw new Error('upload_terms_required: accept the terms'); };
+  await assert.rejects(strict.prepare([{ path: 'a.png' }]), /upload_terms_required/, 'other failures are not retried');
+}
+
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-media-bulk-'));
   try {
@@ -880,6 +903,7 @@ async function main() {
     await adapterTests();
     await pipelineTests(temp);
     await laneTests(temp);
+    await referenceRetryTests();
     await accountTests(temp);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });

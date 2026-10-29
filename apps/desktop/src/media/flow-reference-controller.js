@@ -333,10 +333,20 @@ class FlowReferenceController {
       actual.every((value, index) => value && value === expected[index]);
   }
   async prepare(references = []) {
-    await this.clearComposer();
-    const items = [];
-    for (const reference of references) items.push(await this.attach(reference));
-    return { ok: true, mode: 'ingredients', count: items.length, items };
+    // Flow's picker sometimes adds a second chip (a selection it kept) or never
+    // shows the selected preview. Start again from an empty composer once
+    // before the job is failed or requeued.
+    for (let attempt = 0; ; attempt += 1) {
+      await this.clearComposer();
+      try {
+        const items = [];
+        for (const reference of references) items.push(await this.attach(reference));
+        return { ok: true, mode: 'ingredients', count: items.length, items, attempts: attempt + 1 };
+      } catch (error) {
+        if (attempt >= 1 || !/did not become ready/i.test(String(error?.message || error))) throw error;
+        await this.dismissOverlays().catch(() => {});
+      }
+    }
   }
 }
 
