@@ -60,6 +60,18 @@ Conversation metadata is runtime state only and contains no password.
 
 ChatGPT does not receive unrestricted Node.js or OS access. It requests tools through a text protocol handled by `ChatGPTAutomationAdapter`; TEAMYRA validates the request and executes it through the same `WorkspaceToolService` exposed to MCP callers.
 
+Worker prompts must emit a single `TEAMYRA_TOOL_REQUEST` JSON line for local tools; instructions to call native ChatGPT tools conflict with this bridge. Use relative paths with forward slashes. Reply detection follows the last message/turn identity (with a text fallback) because the web page virtualizes older turns and its visible message count can stop growing. Each job has a 256-request bound and uses its assigned job deadline rather than a separate five-minute response deadline.
+
+Git tools use a strict argument contract: an unknown argument is an error that lists the allowed keys (it is never silently ignored). Every ref is verified with `git rev-parse --verify` before use, and the same sensitive-path filtering applies to commit comparisons as to working-tree diffs.
+
+- `git.status`: `path` / `paths`.
+- `git.diff`: `base` + optional `head`, or `range` (`"A..B"` or `"A...B"`; an empty side means `HEAD`), `staged` (not with `head`/`range`), `stat`, `name_only`, `unified` (context lines), `path` / `paths`.
+- `git.log`: `max_count` (alias `limit`, max 100), `range`, `since` (for example `2026-01-31` or `2 weeks ago`), `path` / `paths`.
+- `git.show`: `ref` (default `HEAD`), `stat`, `path` / `paths`. Credential-like files touched by the commit are left out and reported in `blocked_paths`.
+- `git.add`: `paths` (explicit files). `git.commit`: `message`. `git.restore`: `paths`, `staged`.
+
+For durable sequential worker queues, `python scripts/teamyra-task-queue.py <manifest.json>` resumes persisted job IDs, waits for each worker to become idle, and validates fresh output artifacts before advancing. Review JSONs require the assigned checkout's exact head. Failed jobs or missing/stale outputs stop that worker's queue and are recorded in `queue.log`; a CLI process exiting successfully alone is not evidence that a review completed. `teamyra run --wait`, `teamyra wait` and `teamyra result` exit with 0 only when the job state is `done`, 1 for `failed`/`cancelled`/`timed_out`, and 2 when the wait expired while a job is still `queued`, `running`, `waiting_for_desktop` or `needs_user`; the final state and reason of every job are printed to stderr.
+
 Supported tools:
 
 - `filesystem.list`
@@ -76,11 +88,12 @@ Supported tools:
 - `git.status`
 - `git.diff`
 - `git.log`
+- `git.show`
 - `git.add`
 - `git.commit`
 - `git.restore`
 
-MCP callers use the same implementation through `teamyra.workspace_tool`; they do not mutate the selected ChatGPT workspace. MCP callers cannot self-authorize destructive/per-command confirmations. Their terminal surface is limited to the same bounded automatic inspection commands unless a future user-approval subsystem grants a capability explicitly.
+MCP callers use the same implementation through `teamyra.workspace_tool`; they do not mutate the selected ChatGPT workspace. Explicit-workspace calls (`execute_in_workspace`, used by MCP and delegated jobs) take the user-only switches from the persisted user setting: a caller may lower `full_access`, `outside_workspace` or `destructive_without_confirmation`, but any attempt to raise one is rejected and audited. Without Full PC access their terminal surface is the sandboxed dev allowlist described under Permissions.
 
 Desktop-backed controls are also exposed through MCP without exposing browser cookies or provider credentials:
 - `provider_list` — provider/account inventory for ChatGPT, Codex, Claude and Antigravity.
@@ -102,7 +115,25 @@ By default:
 - TEAMYRA runtime/profile stores and common credential/provider/browser stores remain blocked even when they are physically nested under the selected workspace;
 - credential-like files such as `.env`, provider auth JSON, private key/certificate files, and SSH private-key names are blocked (example/sample env templates remain usable).
 
-Blocked sensitive locations include SSH/GPG, AWS/Azure/GCloud/Kubernetes/Docker credentials, Claude/Codex/Antigravity provider homes, Windows credential/protect stores, Chrome/Edge profiles, Firefox profiles, TEAMYRA's own Electron userData/browser partition (including the persistent ChatGPT cookies/session), Windows system directories, and the TEAMYRA local-agent token directory.
+Blocked sensitive locations include SSH/GPG, AWS/Azure/GCloud/Kubernetes/Docker credentials, Claude/Codex/Antigravity/GitHub CLI provider homes and auth files (`~/.codex`, `~/.claude`, `~/.claude.json`, `~/.gemini`, `~/.config/gh`, `%APPDATA%\GitHub CLI`, `%APPDATA%\Claude`), Windows credential/protect/vault stores, Chrome/Edge/Brave/Chromium/Opera/Firefox profiles, TEAMYRA's own Electron userData/browser partition (including the persistent ChatGPT cookies/session), TEAMYRA runtime state (`chatgpt/`, `profiles/`, `jobs/`, `logs/`, `backups/`, ...), Windows system directories, and the TEAMYRA local-agent token directory.
+
+## Full PC access (user-only)
+
+`full_access` is a global switch stored in `ROOT/chatgpt/workspace.json` together with `outside_workspace` and `destructive_without_confirmation`. Only the user can turn these on:
+
+- TEAMYRA Desktop settings: the desktop core action `chatgpt.workspace.configure` with a separate `access` object (`{"full_access": true, "outside_workspace": true, "destructive_without_confirmation": false}`) and `user_confirmed: true`, sent by the settings UI after its confirmation dialog. `access` without `workspace` changes only the switches.
+- The interactive CLI: `teamyra chatgpt-access --full [--destructive-without-confirmation]` asks y/N and refuses without a TTY. `teamyra chatgpt-access --off` turns all three off and needs no TTY.
+
+The regular `permissions` object, `execute`, `execute_in_workspace`, MCP tools (including `chatgpt_control` `workspace_configure`) and jobs can keep or lower these switches but never raise them; such attempts raise `PermissionError` and are audited. Switching the selected workspace keeps `full_access`/`outside_workspace` (they are not workspace-specific) and resets `destructive_without_confirmation`.
+
+With Full PC access on:
+
+- with `outside_workspace` also on, any absolute path on any drive is allowed for filesystem tools and as terminal `cwd`/arguments; relative paths still resolve against the workspace;
+- the credential denylist above stays enforced (the blanket Windows directory block narrows to `Windows\System32\config`); drive roots and the home directory cannot be moved or deleted;
+- `terminal.run` may run any argv, including shells, inline eval, package installs and network tools, without per-command confirmation;
+- destructive commands still need `confirm` unless `destructive_without_confirmation` is on: recursive or wildcard deletes (`rm -r`, `rmdir`, `rd /s`, `del /s`, `Remove-Item -Recurse`), format/disk tools, `git push --force`/`--delete`, `git reset --hard`, `git clean -f*`, forced checkout, branch deletion, and registry edits (`reg add/delete/import`, PowerShell `HKLM:`/`HKCU:` writes). Shell scripts are scanned heuristically for these commands.
+
+Terminal argument checks are heuristic: an absolute path argument is checked against the denylist, but a command running with Full PC access can reach anything the user account can.
 
 ## Permissions
 
@@ -114,12 +145,20 @@ Persisted with the current selected ChatGPT workspace. When the user switches to
 - Edit files
 - Terminal
 - Git
-- Access outside workspace (shown for forward compatibility but disabled in v1)
-- Destructive operations without confirmation (off by default)
+- Full PC access, Access outside workspace and Destructive operations without confirmation (user-only, off by default; see Full PC access)
 
-Terminal access is also off by default. Enabling destructive-without-confirmation requires an explicit typed UI acknowledgement. The automation tool loop always submits `confirm=false`.
+The automation tool loop always submits `confirm=false`.
 
-`git.restore` and filesystem deletion are confirmation-gated unless the user explicitly opted into the destructive policy. The automated ChatGPT terminal path is intentionally limited to version checks (for example `node --version`) and read-only Git inspection. Other terminal commands, including interpreters, build/package scripts, shells, eval and destructive commands, require explicit per-command confirmation and therefore cannot be silently executed by the automated ChatGPT loop. Mutating Git commands are rejected through `terminal.run` and must use TEAMYRA's normalized Git tools. Drive formatting/system-management executables are blocked, and TEAMYRA-created commits use `--no-verify` so repository hooks are not executed implicitly.
+`git.restore` and filesystem deletion are confirmation-gated unless the user explicitly opted into the destructive policy.
+
+With Full PC access off, `terminal.run` runs inside the workspace without confirmation only for this dev allowlist:
+
+- version checks (`node|npm|npx --version`, `python --version`);
+- read-only Git: `status`, `rev-parse`, `show`, `log`, `diff`, `blame`, `ls-files`, `grep`, `branch --list`, `rev-list`. TEAMYRA adds `-c core.fsmonitor=false`, `--no-ext-diff --no-textconv` and exclude pathspecs for credential-like files, and rejects Git global options, `--output`, `--no-index`, `--ext-diff`, `--textconv` and `rev:path` reads of credential-like files;
+- `git add <files>` and `git commit -m <message>` (no `--amend`, `-a` or other options), executed through the `git.add`/`git.commit` tool checks;
+- `node <script in workspace>`, `npx tsx <script in workspace>` (run as `npx --no tsx` so nothing is downloaded), `npm run <script>`, `npm test`, `python -m unittest|pytest`, `python <script in workspace>`.
+
+Package installs (`npm install`, `pip install`, `python -m pip`, `npx <pkg>`, winget, choco, ...), network tools (curl, wget, ssh, `git fetch/pull/push/clone`, ...), drive/system-management executables and other mutating Git commands are refused even with confirmation unless Full PC access is on. Other commands (shells, eval, deletes, other interpreters) need explicit per-command confirmation. Arguments with shell metacharacters are refused for `.cmd`/`.bat` launchers. TEAMYRA-created commits use `--no-verify` so repository hooks are not executed implicitly.
 
 ## Recoverability and audit
 
@@ -127,16 +166,24 @@ Existing files up to 50 MiB receive a recovery copy before TEAMYRA write/patch o
 
 Tool results injected back into ChatGPT are also hard-capped; large results instruct the agent to request a narrower path/query/range instead of flooding the embedded prompt.
 
-Audit records are JSONL under `logs/workspace-tools.jsonl` and include:
+Audit records are JSONL under `logs/workspace-tools.jsonl`. Every tool call is recorded, including denied ones, terminal commands and writes. Records include:
 - timestamp;
 - agent identity;
 - tool;
 - target;
-- success/error.
+- success/error;
+- access mode (`sandboxed` or `full_access`) and whether `confirm` was set;
+- for `terminal.run`, the argv (clipped to 1000 characters) and exit code.
+
+Access changes are recorded as `workspace.configure` / `workspace.access` with the resulting switch values, and rejected attempts to raise a user-only switch are recorded as errors.
 
 File contents, browser cookies and the local-agent token are not written to the audit record.
 
 Terminal subprocesses receive a scrubbed environment that removes variables whose names contain token/secret/password/API-key markers.
+
+## Claude Code CLI discovery
+
+`runtime_paths.claude_launch()` looks for the Claude Code CLI in this order: `TEAMYRA_CLAUDE`; `claude.exe`/`claude.cmd`/`claude.bat` on `PATH`; `where claude`; the npm global prefix from `npm prefix -g` (including the package binary `node_modules/@anthropic-ai/claude-code/bin/claude.exe`); `%APPDATA%\npm`; `%LOCALAPPDATA%\Programs`; `%USERPROFILE%\.claude\local`; `%USERPROFILE%\.local\bin`; and the CLI bundled with Claude desktop (`%APPDATA%\Claude\claude-code\<version>\<build>\claude.exe`, newest version). Extensionless npm shell shims are skipped on Windows. `teamyra doctor` reports the chosen path and how it was found under `claude_cli`.
 
 ## File attachments
 
@@ -179,6 +226,8 @@ The device initiates the connection; no inbound port is required. Capability/ses
 Automated CI verifies:
 - Python workspace sandbox/tool tests on Windows and Linux;
 - traversal/outside/system-root rejection;
+- Full PC access is only enabled by the desktop `access` + `user_confirmed` path or the TTY-only CLI, never by tool/MCP calls, and the credential denylist stays enforced;
+- strict Git tool arguments and the sandboxed terminal dev allowlist;
 - file lifecycle, search, terminal and Git behavior;
 - recovery backups;
 - token authentication and audit identity;

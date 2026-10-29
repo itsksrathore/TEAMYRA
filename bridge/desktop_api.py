@@ -33,6 +33,10 @@ def _bridge_token(payload):
 def handle(action, payload):
     payload = payload if isinstance(payload, dict) else {}
 
+    if action == "scheduler.dispatch":
+        import scheduler
+        return scheduler.dispatch_once(ROOT, BRIDGE, sys.executable)
+
     if action == "task.start":
         import server
         task = str(payload.get("task") or "").strip()
@@ -93,9 +97,32 @@ def handle(action, payload):
             payload.get("kinds"),
         )
     if action == "media.claim":
-        return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"))
+        return media_engine.claim_next_job(ROOT, payload.get("surface"), payload.get("worker"),
+                                           lane=payload.get("lane", 0), lanes=payload.get("lanes", 1),
+                                           refs_key=payload.get("refs_key"))
     if action == "media.status":
-        return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30))
+        return media_engine.job_status(ROOT, payload.get("job_id"), payload.get("limit", 30),
+                                       payload.get("batch_id"))
+    if action == "media.recover-incomplete":
+        return media_engine.recover_incomplete_jobs(ROOT)
+    if action == "media.claimed-keys":
+        return media_engine.claimed_result_keys(ROOT, payload.get("provider_url"))
+    if action == "media.flow-project":
+        return media_engine.flow_project_for(ROOT, payload.get("project_path"), lane=payload.get("lane", 0))
+    if action == "media.status-many":
+        return media_engine.status_many(ROOT, payload.get("job_ids") or [])
+    if action == "media.release":
+        return media_engine.release_job(ROOT, payload["job_id"], delay=payload.get("delay", 15),
+                                        reason=payload.get("reason"))
+    if action == "media.batch":
+        return media_engine.create_batch(ROOT, payload.get("requests") or [],
+                                         max_parallel=payload.get("max_parallel"))
+    if action == "media.cancel":
+        return media_engine.cancel_job(ROOT, payload["job_id"])
+    if action == "media.cancel-batch":
+        return media_engine.cancel_batch(ROOT, payload["batch_id"])
+    if action == "media.recover":
+        return media_engine.recover_job(ROOT, payload["job_id"], automatic=payload.get("automatic") is True)
     if action == "media.prepare-output":
         return media_engine.prepare_output(ROOT, payload["job_id"])
     if action == "media.update-state":
@@ -185,12 +212,29 @@ def handle(action, payload):
             payload.get("tags"), payload.get("max_chars", 8000), payload.get("limit", 40),
         )
     if action == "chatgpt.workspace.configure":
+        # ``permissions`` can keep or lower the user-only switches (full_access,
+        # outside_workspace, destructive_without_confirmation) but never raise
+        # them. Raising one needs the separate ``access`` object together with
+        # ``user_confirmed: true``, which only the desktop settings UI sends
+        # after its confirmation dialog; the MCP chatgpt_control
+        # workspace_configure path forwards ``permissions`` only.
         service = workspace_tools.WorkspaceToolService(ROOT)
+        access = payload.get("access")
+        user_confirmed = payload.get("user_confirmed") is True
+        if access is not None and not str(payload.get("workspace") or "").strip():
+            return service.set_access(
+                access,
+                token=_bridge_token(payload),
+                actor="desktop-user",
+                user_confirmed=user_confirmed,
+            )
         return service.configure(
             payload.get("workspace"),
             payload.get("permissions"),
             token=_bridge_token(payload),
-            actor="chatgpt-normal",
+            actor="desktop-user" if access is not None else "chatgpt-normal",
+            access=access,
+            user_confirmed=user_confirmed,
         )
     if action == "chatgpt.workspace.status":
         return workspace_tools.WorkspaceToolService(ROOT).status(

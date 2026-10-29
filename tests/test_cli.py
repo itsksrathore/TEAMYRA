@@ -14,6 +14,143 @@ import teamyra_cli
 
 
 class CliTests(unittest.TestCase):
+    def test_waiting_run_reports_terminal_failures_in_exit_code(self):
+        for state, expected in (
+            ("done", 0), ("running", 2), ("queued", 2), ("waiting_for_desktop", 2), ("needs_user", 2),
+            ("failed", 1), ("cancelled", 1), ("timed_out", 1),
+        ):
+            with patch.object(teamyra_cli.server, "tool_call", return_value={"state": state, "reason": "why"}):
+                code, out, err = self.run_cli(["run", "--project", "P", "--task", "Review", "--wait"])
+            self.assertEqual(code, expected, state)
+            self.assertEqual(json.loads(out)["state"], state)
+            self.assertIn(state, err)
+            self.assertIn("why", err)
+
+    def test_wait_exit_codes(self):
+        cases = (
+            ([{"state": "done"}, {"state": "done"}], "all", 0),
+            ([{"state": "done"}, {"state": "running"}], "all", 2),
+            ([{"state": "done"}, {"state": "failed", "reason": "timeout"}], "all", 1),
+            ([{"state": "needs_user", "reason": "chatgpt_verification"}], "all", 2),
+            ([{"state": "done"}, {"state": "running"}], "any", 0),
+            ([{"state": "queued"}, {"state": "running"}], "any", 2),
+            ([{"state": "cancelled"}, {"state": "running"}], "any", 1),
+        )
+        for jobs, mode, expected in cases:
+            rows = [{**job, "terminal_job_id": f"job-{index}"} for index, job in enumerate(jobs)]
+            with patch.object(teamyra_cli.server, "tool_call", return_value={"timed_out": False, "jobs": rows}) as call:
+                code, out, err = self.run_cli(["wait", "job-0", "job-1", "--mode", mode, "--timeout-seconds", "5"])
+            self.assertEqual(code, expected, (jobs, mode))
+            self.assertEqual(call.call_args.args[0], "job_wait")
+            self.assertIn("job-0", err)
+
+    def test_result_exit_codes(self):
+        for state, expected in (("done", 0), ("failed", 1), ("running", 2)):
+            with patch.object(teamyra_cli.server, "tool_call", return_value={"state": state, "terminal_job_id": "j"}):
+                code, _, err = self.run_cli(["result", "j"])
+            self.assertEqual(code, expected, state)
+            self.assertIn(f"j: {state}", err)
+
+    def access_service(self, root):
+        import workspace_tools
+        return workspace_tools.WorkspaceToolService(Path(root))
+
+    class FakeStdin:
+        def __init__(self, answer, tty=True):
+            self.answer, self.tty = answer, tty
+
+        def isatty(self):
+            return self.tty
+
+        def readline(self):
+            return self.answer
+
+    def test_chatgpt_access_requires_tty_and_explicit_yes(self):
+        with tempfile.TemporaryDirectory() as td, patch.object(teamyra_cli, "ROOT", Path(td)):
+            service = self.access_service(td)
+            with patch.object(sys, "stdin", self.FakeStdin("y\n", tty=False)):
+                code, _, err = self.run_cli(["chatgpt-access", "--full"])
+            self.assertEqual(code, 1)
+            self.assertIn("interactive terminal", err)
+            self.assertFalse(service.status(trusted=True)["permissions"]["full_access"])
+
+            with patch.object(sys, "stdin", self.FakeStdin("\n")):
+                code, _, err = self.run_cli(["chatgpt-access", "--full"])
+            self.assertEqual(code, 1)
+            self.assertIn("[y/N]", err)
+            self.assertFalse(service.status(trusted=True)["permissions"]["full_access"])
+
+            with patch.object(sys, "stdin", self.FakeStdin("yes\n")):
+                code, out, _ = self.run_cli(["chatgpt-access", "--full"])
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertTrue(payload["full_access"])
+            self.assertTrue(payload["outside_workspace"])
+            self.assertFalse(payload["destructive_without_confirmation"])
+            permissions = service.status(trusted=True)["permissions"]
+            self.assertTrue(permissions["full_access"] and permissions["outside_workspace"])
+
+            with patch.object(sys, "stdin", self.FakeStdin("y\n")):
+                code, out, _ = self.run_cli(["chatgpt-access", "--full", "--destructive-without-confirmation"])
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(out)["destructive_without_confirmation"])
+
+            # turning it off never needs a TTY
+            with patch.object(sys, "stdin", self.FakeStdin("", tty=False)):
+                code, out, _ = self.run_cli(["chatgpt-access", "--off"])
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                {key: value for key, value in json.loads(out).items() if key != "settings_file"},
+                {"full_access": False, "outside_workspace": False, "destructive_without_confirmation": False},
+            )
+            rows = [json.loads(line) for line in service.audit_file.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(
+                [row["agent"] for row in rows if row["tool"] == "workspace.access" and row["result"] == "success"],
+                ["teamyra-cli-user", "teamyra-cli-user", "teamyra-cli"],
+            )
+
+    def test_chatgpt_access_requires_full_or_off(self):
+        with self.assertRaises(SystemExit):
+            with redirect_stderr(io.StringIO()):
+                teamyra_cli.main(["chatgpt-access"])
+
+    def test_desktop_configure_only_enables_access_with_user_confirmation(self):
+        import desktop_api
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.access_service(root)
+            service.state_root.mkdir(parents=True)
+            service.token_file.write_text("x" * 64, encoding="utf-8")
+            with patch.object(desktop_api, "ROOT", root), \
+                    patch.dict("os.environ", {"TEAMYRA_LOCAL_AGENT_TOKEN": ""}):
+                base = {"workspace": str(workspace), "bridge_token": "x" * 64}
+                desktop_api.handle("chatgpt.workspace.configure", base)
+                # what the MCP chatgpt_control workspace_configure path can send
+                for payload in (
+                    {**base, "permissions": {"full_access": True}},
+                    {**base, "permissions": {"outside_workspace": True, "user_confirmed": True}},
+                    {**base, "access": {"full_access": True}},
+                    {**base, "access": {"full_access": True}, "user_confirmed": "yes"},
+                ):
+                    with self.assertRaises(PermissionError, msg=payload):
+                        desktop_api.handle("chatgpt.workspace.configure", payload)
+                with self.assertRaises(PermissionError):
+                    desktop_api.handle("chatgpt.tool.execute-in-workspace", {
+                        **base, "tool": "filesystem.list", "args": {}, "permissions": {"full_access": True},
+                    })
+                self.assertFalse(service.status(trusted=True)["permissions"]["full_access"])
+                enabled = desktop_api.handle("chatgpt.workspace.configure", {
+                    **base, "access": {"full_access": True, "outside_workspace": True}, "user_confirmed": True,
+                })
+                self.assertTrue(enabled["permissions"]["full_access"])
+                off = desktop_api.handle("chatgpt.workspace.configure", {
+                    "bridge_token": "x" * 64, "access": {"full_access": False},
+                })
+                self.assertFalse(off["permissions"]["full_access"])
+                self.assertEqual(off["workspace"], str(workspace.resolve()))
+
     def run_cli(self, argv):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -21,8 +158,11 @@ class CliTests(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_doctor_reports_ready_workers(self):
+        import runtime_paths
         workers = [{"worker": "codex1", "ready": True}]
-        with patch.object(teamyra_cli.server, "worker_status", return_value=workers):
+        info = {"argv": ["C:/c/claude.exe"], "path": "C:/c/claude.exe", "source": "PATH"}
+        with patch.object(teamyra_cli.server, "worker_status", return_value=workers), \
+                patch.object(runtime_paths, "claude_launch_info", return_value=info):
             code, out, err = self.run_cli(["doctor"])
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
@@ -30,6 +170,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["ready_workers"], 1)
         self.assertEqual(payload["mcp_server"], "teamyra")
+        self.assertEqual(payload["claude_cli"]["source"], "PATH")
 
     def test_run_delegates_to_start_task(self):
         with patch.object(teamyra_cli.server, "tool_call", return_value={"job_id": "job-1"}) as call:

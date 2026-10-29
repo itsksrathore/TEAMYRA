@@ -14,6 +14,8 @@ stop the job.
 """
 import json, os, subprocess, sys, threading, time
 from pathlib import Path
+from expected_outputs import missing_outputs
+from runtime_paths import share_codex_sandbox
 
 LIMIT_MARKERS = ["rate limit", "usage limit", "quota", "too many requests",
                  "resource exhausted", "limit reached", "insufficient quota"]
@@ -232,6 +234,11 @@ class Job:
     def run_once(self, cmd, env, deadline):
         """Runs one worker process to its end; returns (rc, stderr, timed_out, cancelled)."""
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if (env or {}).get("CODEX_HOME"):
+            try:  # one sandbox setup for every Codex account: no repeated UAC prompts
+                share_codex_sandbox(env["CODEX_HOME"])
+            except Exception:
+                pass
         proc = subprocess.Popen(cmd, cwd=self.spec["cwd"], env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=flags)
@@ -346,6 +353,12 @@ class Job:
             state, reason = "failed", "worker_error"
         else:
             state, reason = "done", None
+        if state == "done":
+            missing = missing_outputs(spec["cwd"], spec.get("expect_files", self.meta.get("expect_files", [])))
+            if missing:
+                state, reason = "failed", "missing_output"
+                self.save_meta(missing_outputs=missing)
+                self.emit("error", "Expected outputs missing or empty: " + ", ".join(missing))
         if reason and err.strip():
             self.emit("error", clip(err.strip().splitlines()[-1], 400))
         self.emit("done", f"{state}{' (' + reason + ')' if reason else ''}, exit {rc}, "
@@ -354,7 +367,8 @@ class Job:
         self.save_meta(
             state=state,
             reason=reason,
-            exit_code=rc,
+            exit_code=0 if state == "done" else 1,
+            process_exit_code=rc,
             ended=time.time(),
             runner_pid=None,
             worker_pid=None,
@@ -362,6 +376,16 @@ class Job:
             recovery_state="completed" if self.meta.get("recovery_requested") else self.meta.get("recovery_state"),
         )
         (self.dir / "DONE").write_text(state, encoding="utf-8")
+
+def dispatch_next(job_dir):
+    """On-exit hook: start the next queued job of any free worker (FIFO per worker)."""
+    try:
+        import scheduler
+        root = Path(job_dir).resolve().parent.parent
+        scheduler.dispatch_once(root, Path(__file__).resolve().parent, sys.executable)
+    except Exception as exc:  # the job itself is already finished; never fail it here
+        print(f"queue dispatch failed: {exc}", file=sys.stderr, flush=True)
+
 
 def main():
     if len(sys.argv) != 2:
@@ -372,10 +396,11 @@ def main():
     except Exception as exc:
         job.emit("error", f"runner crashed: {exc}")
         job.save_meta(
-            state="failed", reason="runner_crash", ended=time.time(),
+            state="failed", reason="runner_crash", exit_code=1, ended=time.time(),
             runner_pid=None, worker_pid=None,
         )
         (job.dir / "DONE").write_text("failed", encoding="utf-8")
+    dispatch_next(job.dir)
 
 
 if __name__ == "__main__":

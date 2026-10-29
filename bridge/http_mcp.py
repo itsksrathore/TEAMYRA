@@ -135,6 +135,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            self._send_json(413, _json_error(None, -32600, "Request body is too large"))
+            return
+
+        # Consume the bounded body before an early rejection. Closing a socket
+        # with unread request bytes can reset it on Windows and lose the error
+        # response. Reading bytes does not dispatch or parse the request.
+        body = self.rfile.read(length)
         if self.path == SHUTDOWN_PATH:
             if self._reject_host():
                 return
@@ -164,15 +176,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            length = int(self.headers.get("Content-Length") or "0")
-        except ValueError:
-            length = -1
-        if length < 0 or length > MAX_BODY:
-            self._send_json(413, _json_error(None, -32600, "Request body is too large"))
-            return
-
-        try:
-            body = self.rfile.read(length)
             msg = json.loads(body.decode("utf-8"))
         except Exception as exc:
             self._send_json(400, _json_error(None, -32700, "Invalid JSON", str(exc)))
@@ -227,6 +230,7 @@ def serve(host="127.0.0.1", port=8787):
             flush=True,
         )
     httpd = create_server(host, port)
+    server.start_background_services()  # queue dispatcher + readiness refresher
     actual_host, actual_port = httpd.server_address[:2]
     print(
         f"TEAMYRA HTTP MCP listening on http://{actual_host}:{actual_port}{MCP_PATH}",

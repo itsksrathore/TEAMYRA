@@ -16,6 +16,9 @@ def _run_internal(mode, argv):
     if mode == "__failover-monitor":
         import failover_monitor
         return failover_monitor.main()
+    if mode == "__codex-images":
+        import codex_images
+        return codex_images.main(argv)
     if mode == "__desktop-api":
         import desktop_api
         return desktop_api.main()

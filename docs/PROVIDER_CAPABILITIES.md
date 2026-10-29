@@ -15,6 +15,8 @@ TEAMYRA only enables provider features that can be verified through the provider
 - Managed profile isolation: supported through `CODEX_HOME`.
 - Multiple TEAMYRA-managed profiles: supported.
 - Reliable live context-window telemetry: currently not exposed through the CLI surface TEAMYRA can verify, so the UI does not fabricate a value.
+- Windows sandbox: extra Codex homes link their `.sandbox`, `.sandbox-secrets` and `.sandbox-bin` to the main home (`%USERPROFILE%\.codex`) before a worker starts. The sandbox users are machine-wide; with separate copies every account switch re-provisioned them and raised a UAC prompt for `codex-windows-sandbox-setup.exe`. The account's own copy is kept beside it as `.sandbox*.local-<time>`.
+- Image generation (`codex_image_batch`, `codex_image_status`, `codex_image_cancel`): up to 50 images per batch with Codex's built-in image tool. Each image is one short `codex exec` (reference images attached with `-i`, the configured model and reasoning effort, read-only sandbox; Codex looks at the result once and retries once if it clearly misses), and two run at once per signed-in Codex account. TEAMYRA copies the image from that account's `generated_images/<thread>` folder to the requested output (PNG, or converted to JPEG/WebP) and records its size. An account that hits its usage limit rests 15 minutes and its images move to the other account; a refusal is reported as `refused`, not retried. A worker job that drew images one at a time took 2–5 minutes per image; a direct image takes about 1 minute.
 
 ## Antigravity
 

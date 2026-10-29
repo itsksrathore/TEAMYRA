@@ -3,14 +3,60 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
 
+import runner
 from runner import Job
 
 
 class ClaudeRunnerTests(unittest.TestCase):
+    def test_terminal_states_normalize_exit_code_and_preserve_process_code(self):
+        cases = (
+            (0, "", False, False, {}, "done", None),
+            (37, "", False, False, {}, "failed", "worker_error"),
+            (0, "", True, False, {}, "failed", "timeout"),
+            (0, "", False, True, {}, "cancelled", "cancelled"),
+            (0, "", False, False, {"reported_error": True}, "failed", "worker_reported_error"),
+            (0, "", False, False, {"denied_actions": ["blocked"]}, "failed", "permission_denied"),
+            (42, "rate limit", False, False, {}, "failed", "usage_or_rate_limit"),
+        )
+        for rc, err, timed_out, cancelled, metadata, state, reason in cases:
+            with self.subTest(state=state, reason=reason):
+                tmp, job = self.make_job()
+                try:
+                    job.meta.update(metadata)
+                    with patch.object(job, "run_once", return_value=(rc, err, timed_out, cancelled)):
+                        job.run()
+                    persisted = json.loads((job.dir / "meta.json").read_text())
+                    self.assertEqual(persisted["state"], state)
+                    self.assertEqual(persisted["exit_code"], 0 if state == "done" else 1)
+                    self.assertEqual(persisted["process_exit_code"], rc)
+                    self.assertEqual(persisted["reason"], reason)
+                    self.assertEqual((job.dir / "DONE").read_text(), state)
+                finally:
+                    self.close_job(job)
+                    tmp.cleanup()
+
+    def test_crash_sets_failure_exit_code_and_still_dispatches(self):
+        tmp, job = self.make_job()
+        try:
+            with patch.object(runner.sys, "argv", ["runner.py", str(job.dir)]), \
+                 patch.object(runner, "Job", return_value=job), \
+                 patch.object(job, "run", side_effect=RuntimeError("crash")), \
+                 patch.object(runner, "dispatch_next") as dispatch:
+                runner.main()
+            persisted = json.loads((job.dir / "meta.json").read_text())
+            self.assertEqual(persisted["exit_code"], 1)
+            self.assertEqual(persisted["reason"], "runner_crash")
+            self.assertEqual((job.dir / "DONE").read_text(), "failed")
+            dispatch.assert_called_once_with(job.dir)
+        finally:
+            self.close_job(job)
+            tmp.cleanup()
+
     def make_job(self):
         tmp = tempfile.TemporaryDirectory()
         job = Path(tmp.name)

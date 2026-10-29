@@ -28,6 +28,8 @@ JOB_STATES = {
     "queued", "preparing", "waiting_for_browser", "submitting", "generating",
     "processing", "downloading", "extracting_audio", "organizing", "completed",
     "failed", "cancelled", "needs_user_auth", "rate_limited",
+    # A TEAMYRA helper agent has taken the job over (see media_support).
+    "assisted",
 }
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 ASSET_PREFIX = {
@@ -73,10 +75,127 @@ RUNTIME_IN_PROGRESS = {
 MAX_PROMPT = 24000
 MAX_REFERENCES = 24
 MAX_HISTORY = 120
+MAX_AUTO_RECOVERIES = 2
+MAX_PARALLEL = 30
+MAX_BATCH = 50
+MAX_BACKPRESSURE_RELEASES = 8
+
+
+def _possible_submission(job):
+    text = str(job.get("error") or job.get("detail") or "").lower()
+    legacy_intent_failure = text.startswith("selector_failure: intent: selector_failure:")
+    return bool((job.get("provider_submission") or {}).get("submitted_at")) or job.get("reconcile_required") is True or (
+        any(e.get("state") == "submitting" for e in job.get("history", [])) and
+        job.get("submission_phase") != "preparing" and not legacy_intent_failure
+    )
+
+
+def recovery_plan(job):
+    """Explain safe recovery using durable checkpoints, never a blind Generate retry."""
+    failure = job.get("failure") or {}
+    text = str(job.get("error") or job.get("detail") or "").lower()
+    category = failure.get("category") or next((name for name in (
+        "human_verification", "login_required", "credits_exhausted", "policy_refusal",
+        "rate_limited", "selector_failure", "output_mismatch", "result_match_failed", "provider_no_result", "download_failure", "browser_probe_failed",
+    ) if name in text), "generation_failure")
+    submission = job.get("provider_submission") or {}
+    submitted = bool(submission.get("submitted_at"))
+    possible = _possible_submission(job)
+    plan = {"category": category, "action": "inspect_failure", "can_recover": False,
+            "automatic": False, "submitted": submitted,
+            "auto_attempts": int((job.get("recovery") or {}).get("auto_attempts") or 0),
+            "max_auto_attempts": MAX_AUTO_RECOVERIES}
+    state = job.get("state")
+    if job.get("cancel_requested") or state in {"completed", "cancelled"}:
+        plan.update(action="none", instruction="This job is finished or cancelled.")
+    elif job.get("assisted_by"):
+        plan.update(action="wait_for_helper", ticket_id=job["assisted_by"],
+                    instruction="A TEAMYRA helper agent is handling this job (ticket " + str(job["assisted_by"]) +
+                    "). Do not retry or resubmit it; poll this job or teamyra.media_ticket_status. The result is "
+                    "delivered into this job id.")
+    elif state not in {"failed", "needs_user_auth", "rate_limited"}:
+        plan.update(action="wait", instruction="Poll teamyra.media_status for this job; do not create a replacement.")
+    elif state == "needs_user_auth" or category in {"human_verification", "login_required"}:
+        plan.update(action="restore_auth", instruction="Ask the user to sign in or finish verification, then call teamyra.media_resume_auth.")
+    elif category == "result_match_failed":
+        plan.update(action="report_issue", can_recover=submitted, automatic=False,
+                    instruction="Flow produced results but TEAMYRA could not attribute them to this job. Do not resubmit or "
+                                "reword: credits were already used. Call teamyra.media_report_issue (a helper/maintenance "
+                                "delivers it) or teamyra.media_recover to retry matching and download.")
+    elif category == "provider_no_result":
+        plan.update(action="revise_request", can_recover=submitted, automatic=False,
+                    instruction="Flow accepted the generation but no result appeared and a full project search found none; this is usually a silent moderation refusal. Reword the prompt and queue a new job. teamyra.media_recover only waits for the same submission again.")
+    elif category == "output_mismatch":
+        plan.update(action="revise_request",
+                    instruction="Flow produced media that does not match the requested aspect ratio. Recovery would download the same result again; queue a new job if the output is still needed.")
+    elif category in {"credits_exhausted", "policy_refusal"}:
+        plan.update(action="add_credits" if category == "credits_exhausted" else "revise_request",
+                    instruction="Resolve the provider refusal before requesting another generation.")
+    elif possible and not (submitted and submission.get("provider_url")):
+        plan.update(action="manual_reconciliation", instruction="Submission is uncertain and lacks provider identity. Inspect the provider; never submit again automatically.")
+    else:
+        recoverable = category in {"selector_failure", "download_failure", "browser_probe_failed", "browser_failure", "rate_limited"} or (
+            category == "generation_failure" and any(word in text for word in ("timed out", "timeout", "acknowledg", "page_transition")))
+        if recoverable:
+            action = "resume_existing_submission" if submitted else "retry_before_submission"
+            plan.update(action=action, can_recover=True,
+                        automatic=plan["auto_attempts"] < MAX_AUTO_RECOVERIES,
+                        instruction="Call teamyra.media_recover with this job_id; poll the same job. Existing submissions reconcile and download without another Generate click.")
+        else:
+            plan["instruction"] = "Inspect this failure before recovery; do not create a replacement job blindly."
+    if state in {"failed", "needs_user_auth", "rate_limited"} and not job.get("assisted_by"):
+        plan["helper"] = ("If you cannot resolve this quickly, call teamyra.media_report_issue with this job id: a "
+                          "TEAMYRA helper agent logs it, finishes the work and delivers into this job.")
+    return plan
+
+
+def _helper_view(job, helper_ticket):
+    """The job as its own helper sees it: an ordinary stopped job."""
+    if helper_ticket and job.get("assisted_by") == helper_ticket:
+        view = dict(job)
+        view["assisted_by"] = None
+        if view.get("state") == "assisted":
+            view["state"] = "failed"
+        return view
+    return job
+
+
+def recover_job(root, job_id, *, automatic=False, helper_ticket=None):
+    """Requeue a stopped job atomically, preserving submission/download identity.
+
+    The helper owning an assisted job (helper_ticket) may recover it; the job
+    stays assisted for its reporter until it completes.
+    """
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        plan = recovery_plan(_helper_view(job, helper_ticket))
+        if not plan["can_recover"] or (automatic and not plan["automatic"]):
+            return {"job_id": job_id, "recovered": False, "recovery_plan": plan}
+        recovery = dict(job.get("recovery") or {})
+        recovery["auto_attempts"] = plan["auto_attempts"] + int(automatic)
+        recovery["manual_attempts"] = int(recovery.get("manual_attempts") or 0) + int(not automatic)
+        recovery.update(action=plan["action"], reset_browser=True, last_error=job.get("error") or job.get("detail"),
+                        last_category=plan["category"], scheduled_at=time.time())
+        job["recovery"] = recovery
+        submitted = plan["submitted"]
+        job["state"] = "waiting_for_browser" if submitted else "queued"
+        job["reconcile_required"] = submitted
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["error"] = None
+        delay = (5 * 2 ** (recovery["auto_attempts"] - 1)) if automatic else 0
+        if plan["category"] == "rate_limited":
+            delay = max(delay, 60)
+        job["retry_after"] = max(time.time() + delay, float(job.get("retry_after") or 0))
+        job.setdefault("history", []).append(_event(job["state"], "Recovery: " + plan["action"]))
+        _save_job(root, job)
+        return {"job_id": job_id, "recovered": True, "status": job["state"],
+                "retry_after": job["retry_after"], "recovery": recovery, "recovery_plan": plan}
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _ASSET_ID_RE = re.compile(r"^TYR-(IMG|VID|MUS|SFX)-(\d{6,})$")
 _JOB_ID_RE = re.compile(r"^media-[A-Za-z0-9._-]{8,96}$")
+_BATCH_ID_RE = re.compile(r"^batch-[A-Za-z0-9._-]{8,96}$")
 
 
 def _media_root(root):
@@ -117,16 +236,33 @@ def _read_json(path, default=None):
         return default
 
 
+def _replace_with_retry(source, destination):
+    error = None
+    for attempt in range(25):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            error = exc
+            time.sleep(min(0.02 * (attempt + 1), 0.25))
+    if error:
+        raise error
+
+
 def _atomic_write(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    tmp.write_text(content, encoding="utf-8")
+    try:
+        _replace_with_retry(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @contextmanager
-def _state_lock(root, timeout=5.0):
+def _state_lock(root, timeout=15.0):
     lock = _lock_file(root)
     deadline = time.time() + timeout
     fd = None
@@ -134,7 +270,9 @@ def _state_lock(root, timeout=5.0):
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, f"{os.getpid()} {time.time()}".encode("ascii", errors="ignore"))
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # Windows reports PermissionError while another process is deleting
+            # the lock file; both mean "held right now", so wait and retry.
             try:
                 age = time.time() - lock.stat().st_mtime
                 if age > 30:
@@ -256,17 +394,16 @@ def _normalize_references(values):
     return normalized
 
 
-def _sfx_prompt(prompt):
+def _sfx_prompt(prompt, vocals=False):
     base = str(prompt or "").strip()
     lowered = base.lower()
-    # Preserve explicitly requested multi-sound ambience and dialogue/music intent.
-    wants_music = any(word in lowered for word in ("music", "score", "song", "instrumental", "melody"))
-    wants_voice = any(word in lowered for word in ("dialogue", "speech", "spoken", "narration", "voice"))
-    constraints = ["Generate ONLY the requested sound effect/audio event."]
-    if not wants_music:
-        constraints += ["No background music.", "No musical score.", "No instruments.", "No soundtrack.", "No singing."]
+    positive_voice = re.sub(r"\b(?:no|without)\s+(?:vocals?|voices?|dialogue|speech|spoken dialogue|narration|singing)\b", "", lowered)
+    wants_voice = vocals or any(word in positive_voice for word in ("dialogue", "speech", "spoken", "narration", "voice", "vocal", "singing"))
+    constraints = ["Generate ONLY a single requested sound effect/audio event.",
+                   "No background music.", "No musical score.", "No instruments.",
+                   "No melody.", "No soundtrack."]
     if not wants_voice:
-        constraints += ["No spoken dialogue.", "No narration."]
+        constraints += ["No vocals.", "No singing.", "No spoken dialogue.", "No narration."]
     constraints += [
         "No unrelated ambient sounds unless explicitly requested.",
         "The audio should contain only the requested sound event(s): " + base,
@@ -287,10 +424,13 @@ def normalize_generate_request(root, request):
     if len(prompt) > MAX_PROMPT:
         raise ValueError("prompt is too long")
 
+    default_model = "Lyria 3.5" if media_type in MUSIC_TYPES else (
+        "Gemini Omni Flash" if media_type in {"video", "sound_effect"} else "auto"
+    )
     result = {
         "type": media_type,
         "prompt": prompt,
-        "provider_prompt": _sfx_prompt(prompt) if media_type == "sound_effect" else prompt,
+        "provider_prompt": _sfx_prompt(prompt, request.get("vocals") is True) if media_type == "sound_effect" else prompt,
         "project_path": str(project),
         "surface": route_for_type(media_type),
         "aspect_ratio": str(request.get("aspect_ratio") or "").strip()[:32] or None,
@@ -301,9 +441,11 @@ def normalize_generate_request(root, request):
         "instrumental": request.get("instrumental") is True or media_type in {"instrumental", "background_music"},
         "vocals": request.get("vocals") is True,
         "lyrics": str(request.get("lyrics") or "").strip()[:MAX_PROMPT] or None,
-        "model_preference": str(request.get("model_preference") or "").strip()[:120] or None,
+        "model_preference": str(request.get("model_preference") or default_model).strip()[:120] or default_model,
         "generation_settings": {},
     }
+    if request.get("max_parallel") is not None:
+        result["max_parallel"] = max(1, min(int(request.get("max_parallel")), MAX_PARALLEL))
     if request.get("duration") is not None:
         duration = float(request.get("duration"))
         if duration <= 0 or duration > 1800:
@@ -315,16 +457,80 @@ def normalize_generate_request(root, request):
         if value:
             result[key] = value
 
-    settings = request.get("generation_settings")
-    if settings is not None:
-        if not isinstance(settings, dict):
-            raise ValueError("generation_settings must be an object")
-        # Generic, bounded settings only. Google-specific DOM controls are not part of this contract.
-        result["generation_settings"] = {
-            str(key)[:80]: value
-            for key, value in list(settings.items())[:32]
-            if isinstance(value, (str, int, float, bool)) or value is None
+    defaults = {}
+    if media_type == "image":
+        defaults = {
+            "download_quality": "prefer_4x_then_2x",
+            "wait_for_upscale": True,
         }
+    elif media_type == "video":
+        defaults = {
+            "generation_model": "Gemini Omni Flash",
+            "generation_resolution": "720p",
+            "download_quality": "1080p",
+            "wait_for_upscale": True,
+        }
+    elif media_type == "sound_effect":
+        defaults = {
+            "generation_model": "Gemini Omni Flash",
+            "generation_resolution": "360p",
+            "download_quality": "source",
+            "wait_for_upscale": False,
+            "audio_only": True,
+        }
+    else:
+        defaults = {
+            "generation_model": "Lyria 3.5",
+        }
+
+    settings = request.get("generation_settings")
+    if settings is not None and not isinstance(settings, dict):
+        raise ValueError("generation_settings must be an object")
+    bounded_settings = {
+        str(key)[:80]: value
+        for key, value in list((settings or {}).items())[:32]
+        if isinstance(value, (str, int, float, bool)) or value is None
+    }
+    if "download_quality" in request:
+        bounded_settings["download_quality"] = request.get("download_quality")
+    if "generation_resolution" in request:
+        bounded_settings["generation_resolution"] = request.get("generation_resolution")
+    if "wait_for_upscale" in request:
+        bounded_settings["wait_for_upscale"] = request.get("wait_for_upscale") is True
+    if "audio_only" in request:
+        bounded_settings["audio_only"] = request.get("audio_only") is True
+    defaults.update(bounded_settings)
+    if media_type == "video":
+        resolution = str(defaults.get("generation_resolution") or "auto").lower()
+        if resolution == "auto":
+            resolution = "720p"
+        if resolution not in {"360p", "720p"}:
+            raise ValueError("Flow video generation supports 360p/720p; use generation_resolution=720p and download_quality=1080p for an upscaled download")
+        defaults["generation_resolution"] = resolution
+        quality = str(defaults.get("download_quality") or "auto").lower()
+        if quality == "auto":
+            quality = "1080p"
+        if quality not in {"source", "1080p"}:
+            raise ValueError("Flow video download_quality must be source or 1080p")
+        defaults["download_quality"] = quality
+        defaults["wait_for_upscale"] = quality != "source"
+    elif media_type == "sound_effect":
+        # SFX is an inexpensive source video followed by audio extraction.
+        # A video-quality override must never upscale its discarded picture.
+        defaults.update(generation_resolution="360p", download_quality="source",
+                        wait_for_upscale=False, audio_only=True)
+
+    mode = str(request.get("reference_mode") or "auto").strip().lower()
+    if mode not in {"auto", "ingredients"}:
+        raise ValueError("Omni supports reference_mode=ingredients or auto; exact first/last Frames are unavailable")
+    if result.get("last_frame"):
+        raise ValueError("Omni does not support last_frame; attach images directly with references as prompt ingredients")
+    if result.get("first_frame") and media_type != "video":
+        raise ValueError("first_frame compatibility alias requires type=video; use references for image ingredients")
+    result["reference_mode"] = "ingredients"
+    if result.get("first_frame"):
+        result["reference_note"] = "Omni treats first_frame as a prompt image ingredient; it does not guarantee the exact opening frame. Prefer references."
+    result["generation_settings"] = defaults
     ensure_project_folders(root, project)
     return result
 
@@ -391,7 +597,8 @@ def _resolve_reference(root, project, value):
             "kind": "asset",
             "asset_id": asset["asset_id"],
             "path": str(path),
-            "provider_asset_id": asset.get("provider_asset_id"),
+            "provider_asset_id": asset.get("provider_asset_id") or
+                ((asset.get("metadata") or {}).get("download_action") or {}).get("result_key"),
             "provider_project_id": asset.get("provider_project_id"),
             "provider_url": asset.get("provider_url"),
             "type": asset.get("type"),
@@ -412,18 +619,26 @@ def _resolve_reference(root, project, value):
 
 def resolve_request_references(root, request):
     project = Path(request["project_path"]).resolve()
-    values = list(request.get("references") or [])
-    for key in ("first_frame", "last_frame", "character_reference", "audio_reference", "video_reference"):
-        if request.get(key):
-            values.append(request[key])
+    values = [(key, request[key]) for key in
+              ("first_frame", "last_frame", "character_reference", "audio_reference", "video_reference")
+              if request.get(key)]
+    values += [("ingredient", value) for value in request.get("references") or []]
     resolved = []
-    seen = set()
-    for value in values:
+    seen = {}
+    for role, value in values:
         item = _resolve_reference(root, project, value)
         identity = (item.get("asset_id") or "", item["path"])
+        if role in {"first_frame", "last_frame"} and (
+                item.get("type") not in {None, "image"} or
+                Path(item["path"]).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}):
+            raise ValueError(role + " must reference an image")
         if identity in seen:
+            existing = seen[identity]
+            if role != "ingredient" and role not in existing["roles"]:
+                existing["roles"].append(role)
             continue
-        seen.add(identity)
+        item["roles"] = [role]
+        seen[identity] = item
         resolved.append(item)
     return resolved
 
@@ -446,16 +661,23 @@ def _event(state, detail=None):
     return item
 
 
-def create_job(root, request, *, operation=None, source_asset=None):
+def _prepare_job(root, request, *, operation=None, source_asset=None):
     normalized = normalize_generate_request(root, request)
     refs = resolve_request_references(root, normalized)
     parent_ids = [item["asset_id"] for item in refs if item.get("asset_id")]
     if source_asset and source_asset.get("asset_id") not in parent_ids:
         parent_ids.insert(0, source_asset["asset_id"])
+    return normalized, refs, parent_ids
+
+
+def create_job(root, request, *, operation=None, source_asset=None, batch_id=None, prepared=None):
+    normalized, refs, parent_ids = prepared or _prepare_job(
+        root, request, operation=operation, source_asset=source_asset)
     job_id = _new_job_id()
     now = time.time()
     job = {
         "job_id": job_id,
+        "batch_id": batch_id,
         "state": "queued",
         "created_at": now,
         "updated_at": now,
@@ -480,13 +702,71 @@ def create_job(root, request, *, operation=None, source_asset=None):
     return public_job(job)
 
 
-def create_batch(root, requests):
+def _new_batch_id():
+    return "batch-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+
+
+def create_batch(root, requests, *, max_parallel=None):
+    """Queue many independent jobs under one batch id.
+
+    Every request is validated before any job is written, so an invalid entry
+    never leaves a partially queued batch behind.
+    """
     if not isinstance(requests, list) or not requests:
         raise ValueError("requests must be a non-empty array")
-    if len(requests) > 50:
-        raise ValueError("media_batch accepts at most 50 requests")
-    jobs = [create_job(root, item) for item in requests]
-    return {"jobs": jobs, "count": len(jobs)}
+    if len(requests) > MAX_BATCH:
+        raise ValueError(f"media_batch accepts at most {MAX_BATCH} requests")
+    if max_parallel is not None:
+        max_parallel = max(1, min(int(max_parallel), MAX_PARALLEL))
+    prepared = []
+    for index, item in enumerate(requests):
+        if not isinstance(item, dict):
+            raise ValueError(f"requests[{index}] must be an object")
+        item = dict(item)
+        if max_parallel is not None and item.get("max_parallel") is None:
+            item["max_parallel"] = max_parallel
+        try:
+            prepared.append((item, _prepare_job(root, item)))
+        except (ValueError, PermissionError) as exc:
+            raise type(exc)(f"requests[{index}]: {exc}") from exc
+    batch_id = _new_batch_id()
+    jobs = [create_job(root, item, batch_id=batch_id, prepared=ready) for item, ready in prepared]
+    # Compact per-job rows keep bulk responses small for agents; full detail
+    # (settings, recovery plan) is one media_status call away.
+    rows = [{key: job.get(key) for key in (
+        "job_id", "status", "type", "prompt_preview", "provider_surface", "max_parallel")} for job in jobs]
+    settings = [job.get("generation_settings") or {} for job in jobs]
+    return {"batch_id": batch_id, "count": len(jobs), "max_parallel": max_parallel,
+            "jobs": rows, "generation_settings": settings[0] if all(item == settings[0] for item in settings) else settings,
+            "next": "Poll teamyra.media_status with this batch_id; do not resubmit queued jobs."}
+
+
+def batch_status(root, batch_id):
+    batch_id = str(batch_id or "").strip()
+    if not _BATCH_ID_RE.fullmatch(batch_id):
+        raise ValueError("invalid media batch id")
+    rows = []
+    for path in _jobs_dir(root).glob("media-*.json"):
+        job = _read_json(path, None)
+        if isinstance(job, dict) and job.get("batch_id") == batch_id:
+            item = public_job(job)
+            if job.get("asset_id"):
+                try:
+                    asset = get_asset(root, job["asset_id"])
+                    item["asset"] = {"asset_id": asset["asset_id"], "local_path": asset.get("local_path")}
+                except Exception:
+                    pass
+            rows.append(item)
+    if not rows:
+        raise ValueError(f"no such media batch: {batch_id}")
+    rows.sort(key=lambda item: float(item.get("created_at") or 0))
+    counts = {}
+    for item in rows:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    finished = sum(counts.get(state, 0) for state in TERMINAL_STATES)
+    return {"batch_id": batch_id, "total": len(rows), "counts": counts,
+            "completed": counts.get("completed", 0), "finished": finished,
+            "done": finished == len(rows), "jobs": rows}
 
 
 def create_transform_job(root, request):
@@ -519,6 +799,9 @@ def create_transform_job(root, request):
     for key in ("first_frame", "last_frame", "character_reference", "audio_reference", "video_reference"):
         if request.get(key):
             generate[key] = request[key]
+    for key in ("reference_mode", "download_quality", "generation_resolution", "wait_for_upscale", "audio_only"):
+        if key in request:
+            generate[key] = request[key]
     if target_type == "music":
         generate["instrumental"] = request.get("instrumental") is True
     return create_job(root, generate, operation=operation, source_asset=asset)
@@ -546,13 +829,28 @@ def _save_job(root, job):
 def public_job(job):
     result = {
         "job_id": job.get("job_id"),
+        "batch_id": job.get("batch_id"),
         "status": job.get("state"),
+        "detail": job.get("detail"),
         "type": job.get("request", {}).get("type"),
+        "prompt_preview": str(job.get("request", {}).get("prompt") or "")[:160],
+        "max_parallel": job.get("request", {}).get("max_parallel"),
+        "lane": (job.get("provider_submission") or {}).get("lane"),
         "operation": job.get("operation"),
         "project_path": job.get("request", {}).get("project_path"),
         "provider_surface": job.get("provider_surface"),
+        "generation_settings": dict(job.get("request", {}).get("generation_settings") or {}),
+        "reference_mode": job.get("request", {}).get("reference_mode", "ingredients"),
+        "parent_asset_ids": list(job.get("parent_asset_ids") or []),
+        "reference_note": job.get("request", {}).get("reference_note"),
         "asset_id": job.get("asset_id"),
+        "assisted_by": job.get("assisted_by"),
+        "fulfilled_by": job.get("fulfilled_by"),
         "error": job.get("error"),
+        "failure": dict(job.get("failure") or {}),
+        "recovery": dict(job.get("recovery") or {}),
+        "recovery_plan": recovery_plan(job),
+        "retry_after": job.get("retry_after"),
         "cancel_requested": job.get("cancel_requested") is True,
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
@@ -565,7 +863,9 @@ def public_job(job):
     return result
 
 
-def job_status(root, job_id=None, limit=30):
+def job_status(root, job_id=None, limit=30, batch_id=None, compact=False):
+    if batch_id and not job_id:
+        return batch_status(root, batch_id)
     if job_id:
         job = load_job(root, job_id)
         result = public_job(job)
@@ -575,7 +875,14 @@ def job_status(root, job_id=None, limit=30):
             except Exception:
                 pass
         result["history"] = list(job.get("history") or [])[-30:]
-        result["provider_submission"] = dict(job.get("provider_submission") or {})
+        submission = dict(job.get("provider_submission") or {})
+        if compact:
+            # For agents: baselines hold hundreds of tile keys; the count is enough.
+            # The desktop worker reads the full baseline (compact=False) to match results.
+            for key in ("baseline_result_keys", "baseline_result_labels"):
+                if isinstance(submission.get(key), list):
+                    submission[key + "_count"] = len(submission.pop(key))
+        result["provider_submission"] = submission
         return result
     rows = []
     for path in _jobs_dir(root).glob("media-*.json"):
@@ -585,6 +892,136 @@ def job_status(root, job_id=None, limit=30):
     rows.sort(key=lambda item: float(item.get("created_at") or 0), reverse=True)
     limit = max(1, min(int(limit or 30), 200))
     return {"jobs": rows[:limit], "count": min(len(rows), limit), "total": len(rows)}
+
+
+def status_many(root, job_ids):
+    """Compact state for many in-flight jobs in one core round trip."""
+    if not isinstance(job_ids, list):
+        raise ValueError("job_ids must be an array")
+    result = {}
+    for job_id in job_ids[:MAX_PARALLEL * 2]:
+        try:
+            job = load_job(root, job_id)
+        except ValueError as exc:
+            result[str(job_id)] = {"missing": True, "error": str(exc)[:300]}
+            continue
+        result[job["job_id"]] = {
+            "state": job.get("state"),
+            "cancel_requested": job.get("cancel_requested") is True,
+            "provider_submission": dict(job.get("provider_submission") or {}),
+        }
+    return {"jobs": result}
+
+
+_FLOW_PROJECT_RE = re.compile(r"^(https://flow\.google\.com/project/[A-Za-z0-9-]+)")
+
+
+def _job_lane(job):
+    """Flow tab (lane) a job was submitted from; jobs from before lanes are lane 0."""
+    try:
+        return max(0, int((job.get("provider_submission") or {}).get("lane") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _refs_key(job):
+    refs = job.get("resolved_references") or []
+    return "|".join(sorted(str(item.get("asset_id") or item.get("path") or "")
+                           for item in refs if isinstance(item, dict)))
+
+
+def flow_project_for(root, project_path, lane=0):
+    """Most recent Flow project used by jobs of this local project folder.
+
+    Keeping one folder in one Flow project keeps its uploads and results
+    together, so reference pickers see them and no empty projects are created.
+    Each extra Flow tab (lane) keeps its own project for the folder.
+    """
+    try:
+        lane = max(0, int(lane or 0))
+    except (TypeError, ValueError):
+        lane = 0
+    wanted = ""
+    if project_path:
+        try:
+            wanted = str(Path(project_path).expanduser().resolve()).lower()
+        except (OSError, ValueError, TypeError):
+            return {"provider_url": None, "lane": lane}
+    elif lane == 0:
+        return {"provider_url": None, "lane": lane}
+    # The project holding most of the folder's results wins; recency breaks ties.
+    usage = {}
+    for path in _jobs_dir(root).glob("media-*.json"):
+        job = _read_json(path, None)
+        if not isinstance(job, dict):
+            continue
+        if str((job.get("request") or {}).get("project_path") or "").lower() != wanted:
+            continue
+        if _job_lane(job) != lane:
+            continue
+        submission = job.get("provider_submission") or {}
+        match = _FLOW_PROJECT_RE.match(str(submission.get("provider_url") or ""))
+        if not match:
+            continue
+        count, latest = usage.get(match.group(1), (0, 0.0))
+        usage[match.group(1)] = (count + 1, max(latest, float(submission.get("submitted_at") or 0)))
+    if not usage:
+        return {"provider_url": None, "jobs": 0, "lane": lane}
+    url, (count, latest) = max(usage.items(), key=lambda item: item[1])
+    return {"provider_url": url, "jobs": count, "submitted_at": latest or None, "lane": lane}
+
+
+def claimed_result_keys(root, provider_url=None):
+    """Result tiles already owned by a job (key -> job id), optionally in one Flow
+    project. Durable across desktop restarts, unlike the worker's memory."""
+    project = (_FLOW_PROJECT_RE.match(str(provider_url or "")) or [None, None])[1] if provider_url else None
+    claimed = {}
+    for path in _jobs_dir(root).glob("media-*.json"):
+        job = _read_json(path, None)
+        if not isinstance(job, dict) or job.get("state") == "cancelled":
+            continue
+        submission = job.get("provider_submission") or {}
+        key = submission.get("result_key")
+        if not key:
+            continue
+        if project and not str(submission.get("provider_url") or "").startswith(project):
+            continue
+        claimed[str(key)] = job["job_id"]
+    return {"claimed": claimed}
+
+
+def release_job(root, job_id, *, delay=15.0, reason=None):
+    """Return a claimed job to the queue before its paid submission.
+
+    Used for provider backpressure while other generations are still running.
+    A job that may have reached Generate is never released for a second click.
+    """
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        if job.get("state") not in {"preparing", "waiting_for_browser", "submitting"}:
+            raise ValueError(f"media job cannot be released from state {job.get('state')}")
+        if _possible_submission(job) or job.get("submission_phase") not in {None, "preparing"}:
+            raise ValueError("media job may have been submitted; it cannot be released for resubmission")
+        recovery = dict(job.get("recovery") or {})
+        releases = int(recovery.get("backpressure_releases") or 0) + 1
+        if releases > MAX_BACKPRESSURE_RELEASES:
+            raise ValueError("media job exceeded its provider backpressure retry budget")
+        recovery["backpressure_releases"] = releases
+        job["recovery"] = recovery
+        job["state"] = "queued"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        # Keep the explicit pre-click checkpoint so release history never reads
+        # as a possible submission.
+        if job.get("submission_phase") is None and any(
+                e.get("state") == "submitting" for e in job.get("history", [])):
+            job["submission_phase"] = "preparing"
+        job["attempt"] = max(0, int(job.get("attempt") or 0) - 1)
+        job["retry_after"] = time.time() + max(0.0, min(float(delay or 0), 600.0))
+        job.setdefault("history", []).append(_event(
+            "queued", "Provider is busy; waiting for a free generation slot" + (": " + str(reason)[:300] if reason else "")))
+        _save_job(root, job)
+        return public_job(job)
 
 
 def update_job_state(root, job_id, state, detail=None, extra=None):
@@ -600,18 +1037,81 @@ def update_job_state(root, job_id, state, detail=None, extra=None):
             job["detail"] = str(detail)[:1000]
         if state == "failed":
             job["error"] = str(detail or "media generation failed")[:2000]
+            if job.get("assisted_by"):
+                # A helper already owns this job; its reporter keeps waiting.
+                job["state"] = "assisted"
         elif state not in {"rate_limited", "needs_user_auth"}:
             job["error"] = None
         if isinstance(extra, dict):
             allowed = {
                 "provider", "provider_surface", "provider_submission", "planned_output", "asset_id",
                 "retry_after", "capabilities", "reconcile_required", "claimed_by", "claimed_at",
-                "attempt", "download", "processing", "result_metadata",
+                "attempt", "download", "processing", "result_metadata", "failure", "submission_phase", "recovery",
             }
             for key, value in extra.items():
                 if key in allowed:
                     job[key] = value
         job.setdefault("history", []).append(_event(state, detail))
+        saved = _save_job(root, job)
+    if state == "failed":
+        import media_support
+        media_support.log_job_failure(root, saved)
+    return saved
+
+
+def assign_helper(root, job_ids, ticket_id):
+    """Mark jobs as handled by a helper ticket; stopped jobs wait as 'assisted'."""
+    result = []
+    for job_id in job_ids:
+        with _state_lock(root):
+            job = load_job(root, job_id)
+            if job.get("state") == "completed":
+                result.append({"job_id": job_id, "state": "completed", "note": "already completed"})
+                continue
+            job["assisted_by"] = ticket_id
+            if job.get("state") in {"failed", "needs_user_auth", "rate_limited"}:
+                job["state"] = "assisted"
+            job.setdefault("history", []).append(_event(job["state"], f"Handed to TEAMYRA helper ticket {ticket_id}"))
+            _save_job(root, job)
+            result.append({"job_id": job_id, "state": job["state"]})
+    return result
+
+
+def release_helper(root, job_ids, ticket_id, reason):
+    """A closed ticket returns its undelivered jobs to ordinary failed state."""
+    for job_id in job_ids:
+        with _state_lock(root):
+            try:
+                job = load_job(root, job_id)
+            except ValueError:
+                continue
+            if job.get("assisted_by") != ticket_id or job.get("state") == "completed":
+                continue
+            job["assisted_by"] = None
+            if job.get("state") == "assisted":
+                job["state"] = "failed"
+                job["error"] = str(reason)[:2000]
+            job.setdefault("history", []).append(_event(job["state"], str(reason)[:1000]))
+            _save_job(root, job)
+
+
+def fulfill_job(root, job_id, asset_id, ticket_id):
+    """Complete a reporter's job with an asset a helper produced for it."""
+    asset = get_asset(root, asset_id)
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        if job.get("state") == "completed" and job.get("asset_id") and job.get("asset_id") != asset["asset_id"]:
+            raise ValueError(f"{job_id} already completed with {job['asset_id']}")
+        if asset.get("type") != job["request"].get("type"):
+            raise ValueError("delivered asset type does not match the job")
+        job["state"] = "completed"
+        job["asset_id"] = asset["asset_id"]
+        job["error"] = None
+        job["reconcile_required"] = False
+        job["fulfilled_by"] = {"ticket_id": ticket_id, "asset_id": asset["asset_id"],
+                               "job_id": asset.get("job_id"), "at": time.time()}
+        job.setdefault("history", []).append(_event(
+            "completed", f"Delivered by TEAMYRA helper ticket {ticket_id}: {asset['asset_id']}"))
         return _save_job(root, job)
 
 
@@ -623,7 +1123,7 @@ def append_job_metadata(root, job_id, patch):
         allowed = {
             "provider", "provider_surface", "provider_submission", "planned_output",
             "retry_after", "capabilities", "reconcile_required", "download",
-            "processing", "result_metadata",
+            "processing", "result_metadata", "failure", "submission_phase", "recovery",
         }
         for key, value in patch.items():
             if key in allowed:
@@ -631,27 +1131,48 @@ def append_job_metadata(root, job_id, patch):
         return _save_job(root, job)
 
 
-def claim_next_job(root, surface, worker):
+_BATCH_ACTIVE_STATES = {"preparing", "submitting", "generating", "downloading", "extracting_audio", "organizing"}
+
+
+def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None):
+    """Claim the next job for one Flow tab (lane).
+
+    Several tabs claim from one queue: a batch's max_parallel caps its running
+    jobs across all tabs, a job already submitted is resumed only by the tab
+    whose project holds it, and a tab prefers the batch's jobs that use the
+    reference images it has attached already (swapping them is the slow part).
+    """
     surface = str(surface or "").strip().lower()
     if surface not in {"visual", "music"}:
         raise ValueError("surface must be visual or music")
+    try:
+        lane = max(0, int(lane or 0))
+        lanes = max(1, int(lanes or 1))
+    except (TypeError, ValueError):
+        lane, lanes = 0, 1
     with _state_lock(root):
         candidates = []
+        active = {}
         now = time.time()
+        jobs = []
         for path in _jobs_dir(root).glob("media-*.json"):
             job = _read_json(path, None)
             if not isinstance(job, dict):
                 continue
+            jobs.append(job)
+            if job.get("batch_id") and job.get("state") in _BATCH_ACTIVE_STATES:
+                active[job["batch_id"]] = active.get(job["batch_id"], 0) + 1
+        for job in jobs:
             state = job.get("state")
             if state == "queued":
-                eligible = True
+                eligible = float(job.get("retry_after") or 0) <= now
             elif state == "rate_limited":
                 submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
                 retry_after = float(job.get("retry_after") or 0)
                 eligible = not submitted and retry_after > 0 and retry_after <= now
             elif state == "waiting_for_browser":
                 submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-                eligible = job.get("reconcile_required") is True and submitted
+                eligible = job.get("reconcile_required") is True and submitted and float(job.get("retry_after") or 0) <= now
             else:
                 eligible = False
             if not eligible:
@@ -660,18 +1181,35 @@ def claim_next_job(root, surface, worker):
                 continue
             if job.get("request", {}).get("surface") != surface:
                 continue
+            submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+            # Extra tabs take batch work only: a single job or an edit of an
+            # existing result stays in the folder's main Flow project.
+            if lane > 0 and not submitted and (not job.get("batch_id") or job.get("operation")):
+                continue
+            if submitted:
+                owner = _job_lane(job)
+                if owner != lane and owner < lanes:
+                    continue
+            else:
+                limit = (job.get("request") or {}).get("max_parallel")
+                if job.get("batch_id") and limit and active.get(job["batch_id"], 0) >= int(limit):
+                    continue
             candidates.append(job)
-        candidates.sort(key=lambda item: float(item.get("created_at") or 0))
         if not candidates:
             return None
-        job = candidates[0]
+        candidates.sort(key=lambda item: float(item.get("created_at") or 0))
+        resumable = [item for item in candidates if (item.get("provider_submission") or {}).get("submitted_at")]
+        job = resumable[0] if resumable else candidates[0]
+        if not resumable and refs_key:
+            same_batch = [item for item in candidates if item.get("batch_id") and item.get("batch_id") == job.get("batch_id")]
+            job = next((item for item in same_batch if _refs_key(item) == refs_key), job)
         job["state"] = "preparing"
         job["claimed_by"] = str(worker or surface)[:120]
         job["claimed_at"] = time.time()
         job["attempt"] = int(job.get("attempt") or 0) + 1
         job.setdefault("history", []).append(_event("preparing", f"Claimed by {job['claimed_by']}"))
         _save_job(root, job)
-        return job
+        return {**job, "refs_key": _refs_key(job)}
 
 
 def cancel_job(root, job_id):
@@ -680,13 +1218,24 @@ def cancel_job(root, job_id):
         if job.get("state") in TERMINAL_STATES:
             return public_job(job)
         job["cancel_requested"] = True
-        if job.get("state") in {"queued", "preparing", "waiting_for_browser", "rate_limited", "needs_user_auth"}:
+        if job.get("state") in {"queued", "preparing", "waiting_for_browser", "rate_limited", "needs_user_auth", "assisted"}:
             job["state"] = "cancelled"
             job.setdefault("history", []).append(_event("cancelled", "Cancellation requested before provider execution"))
         else:
             job.setdefault("history", []).append(_event(job.get("state"), "Cancellation requested"))
         _save_job(root, job)
         return public_job(job)
+
+
+def cancel_batch(root, batch_id):
+    status = batch_status(root, batch_id)
+    cancelled = []
+    for item in status["jobs"]:
+        if item["status"] in TERMINAL_STATES:
+            continue
+        cancel_job(root, item["job_id"])
+        cancelled.append(item["job_id"])
+    return {"batch_id": status["batch_id"], "cancel_requested": cancelled, "count": len(cancelled)}
 
 
 def _next_destination_index(folder):
@@ -701,6 +1250,28 @@ def _next_destination_index(folder):
     return highest + 1
 
 
+def _reserved_outputs(root, folder, exclude=None):
+    """Planned output paths (lowercased) -> index for unfinished jobs in folder."""
+    folder_norm = str(Path(folder).resolve()).lower()
+    reserved = {}
+    for path in _jobs_dir(root).glob("media-*.json"):
+        job = _read_json(path, None)
+        if not isinstance(job, dict) or job.get("job_id") == exclude:
+            continue
+        # Failed jobs can be recovered onto their reserved path; completed files exist.
+        if job.get("state") in {"completed", "cancelled"}:
+            continue
+        planned = (job.get("planned_output") or {}).get("path")
+        if not planned:
+            continue
+        planned_path = Path(planned)
+        if str(planned_path.parent.resolve()).lower() != folder_norm:
+            continue
+        match = re.match(r"^(\d{3,6})_", planned_path.name)
+        reserved[str(planned_path).lower()] = int(match.group(1)) if match else 0
+    return reserved
+
+
 def prepare_output(root, job_id):
     with _state_lock(root):
         job = load_job(root, job_id)
@@ -711,11 +1282,14 @@ def prepare_output(root, job_id):
         media_type = request["type"]
         ext = "." + _normalize_format(media_type, request.get("format"))
         folder = Path(folders[ASSET_FOLDER[media_type]])
-        index = _next_destination_index(folder)
+        # Concurrent jobs reserve paths before any file exists; include their
+        # reservations so bulk outputs never share an index or a destination.
+        reserved = _reserved_outputs(root, folder, exclude=job_id)
+        index = max(_next_destination_index(folder), max(reserved.values(), default=0) + 1)
         slug = _prompt_slug(request.get("prompt"), media_type)
         name = f"{index:03d}_{slug}{ext}"
         destination = folder / name
-        while destination.exists():
+        while destination.exists() or str(destination).lower() in reserved:
             index += 1
             name = f"{index:03d}_{slug}{ext}"
             destination = folder / name
@@ -773,6 +1347,8 @@ def register_asset(
         job = load_job(root, job_id)
         if job.get("asset_id"):
             return get_asset(root, job["asset_id"])
+        if job.get("cancel_requested") or job.get("state") == "cancelled":
+            raise ValueError("cancelled media job cannot register an asset")
         registry = _load_assets(root)
         asset_id = _allocate_asset_id(registry, job["request"]["type"])
         now = time.time()
@@ -846,38 +1422,53 @@ def write_connection_status(root, patch):
     return connection_status(root)
 
 
-def recover_incomplete_jobs(root):
-    report = {"requeued": [], "reconcile_required": [], "unchanged": [], "errors": []}
+def recover_incomplete_jobs(root, *, worker_alive=False):
+    """Requeue (or mark for reconciliation) jobs a dead desktop left mid-flight.
+
+    worker_alive: a desktop is running and owns its in-progress jobs; nothing is
+    touched (a core/MCP restart used to requeue jobs the live worker was
+    submitting, inviting a second claim and a second paid Generate).
+    """
+    report = {"requeued": [], "reconcile_required": [], "unchanged": [], "errors": [],
+              "skipped_live_worker": bool(worker_alive)}
+    if worker_alive:
+        return report
     for path in _jobs_dir(root).glob("media-*.json"):
         try:
-            job = _read_json(path, None)
-            if not isinstance(job, dict):
-                continue
-            state = job.get("state")
-            if state not in RUNTIME_IN_PROGRESS:
-                report["unchanged"].append(job.get("job_id") or path.stem)
-                continue
-            submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-            if state == "preparing" and not submitted:
-                job["state"] = "queued"
-                job["claimed_by"] = None
-                job["claimed_at"] = None
-                job["reconcile_required"] = False
-                job.setdefault("history", []).append(_event("queued", "Recovered before provider submission"))
-                report["requeued"].append(job["job_id"])
-            else:
-                # Never blindly resubmit once submission may have occurred.
-                job["state"] = "waiting_for_browser"
-                job["reconcile_required"] = True
-                job.setdefault("history", []).append(_event(
-                    "waiting_for_browser",
-                    "Restart recovery requires provider reconciliation before any resubmission",
-                ))
-                report["reconcile_required"].append(job["job_id"])
-            _save_job(root, job)
+            with _state_lock(root):
+                _recover_one(root, path, report)
         except Exception as exc:
             report["errors"].append({"path": str(path), "error": str(exc)[:1000]})
     return report
+
+
+def _recover_one(root, path, report):
+    job = _read_json(path, None)
+    if not isinstance(job, dict):
+        return
+    state = job.get("state")
+    if state not in RUNTIME_IN_PROGRESS:
+        report["unchanged"].append(job.get("job_id") or path.stem)
+        return
+    submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+    possible_submission = _possible_submission(job)
+    if state in {"preparing", "waiting_for_browser", "submitting"} and not possible_submission:
+        job["state"] = "queued"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["reconcile_required"] = False
+        job.setdefault("history", []).append(_event("queued", "Recovered safely before provider submission"))
+        report["requeued"].append(job["job_id"])
+    else:
+        # Never blindly resubmit once submission may have occurred.
+        job["state"] = "waiting_for_browser"
+        job["reconcile_required"] = True
+        job.setdefault("history", []).append(_event(
+            "waiting_for_browser",
+            "Restart recovery requires provider reconciliation before any resubmission",
+        ))
+        report["reconcile_required"].append(job["job_id"])
+    _save_job(root, job)
 
 
 def mark_reconciled(root, job_id, *, provider_submission=None, resume_state="generating"):
@@ -895,26 +1486,47 @@ def resume_auth_jobs(root):
     """Requeue only auth-blocked jobs that were never submitted to a provider."""
     resumed = []
     preserved = []
-    for path in _jobs_dir(root).glob("media-*.json"):
-        job = _read_json(path, None)
-        if not isinstance(job, dict) or job.get("state") != "needs_user_auth":
-            continue
-        submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
-        if submitted:
-            job["state"] = "waiting_for_browser"
-            job["reconcile_required"] = True
-            job.setdefault("history", []).append(_event("waiting_for_browser", "Authentication restored; provider reconciliation required"))
-            _save_job(root, job)
-            preserved.append(job["job_id"])
-        else:
-            job["state"] = "queued"
-            job["claimed_by"] = None
-            job["claimed_at"] = None
-            job["reconcile_required"] = False
-            job.setdefault("history", []).append(_event("queued", "Authentication restored; safe to retry before submission"))
-            _save_job(root, job)
-            resumed.append(job["job_id"])
+    with _state_lock(root):
+        for path in _jobs_dir(root).glob("media-*.json"):
+            job = _read_json(path, None)
+            if not isinstance(job, dict) or job.get("state") != "needs_user_auth":
+                continue
+            submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
+            possible_submission = _possible_submission(job)
+            if possible_submission:
+                job["state"] = "waiting_for_browser"
+                job["reconcile_required"] = True
+                job.setdefault("history", []).append(_event("waiting_for_browser", "Authentication restored; provider reconciliation required"))
+                _save_job(root, job)
+                preserved.append(job["job_id"])
+            else:
+                job["state"] = "queued"
+                job["claimed_by"] = None
+                job["claimed_at"] = None
+                job["reconcile_required"] = False
+                job.setdefault("history", []).append(_event("queued", "Authentication restored; safe to retry before submission"))
+                _save_job(root, job)
+                resumed.append(job["job_id"])
     return {"resumed": resumed, "reconcile_required": preserved}
+
+
+def resume_download_job(root, job_id, helper_ticket=None):
+    """Retry reconciliation/download of an identified submission, never generation."""
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        submission = job.get("provider_submission") or {}
+        if _helper_view(job, helper_ticket).get("state") not in {"failed", "needs_user_auth", "rate_limited"}:
+            raise ValueError("only a stopped submitted job can resume its download")
+        if not submission.get("submitted_at") or not submission.get("provider_url"):
+            raise ValueError("provider submission identity is required; generation will not be retried")
+        job["state"] = "waiting_for_browser"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["reconcile_required"] = True
+        job["error"] = None
+        job.setdefault("history", []).append(_event("waiting_for_browser", "Resume submitted result for reconciliation and download only"))
+        _save_job(root, job)
+        return public_job(job)
 
 def summary(root):
     jobs = job_status(root, None, 200)["jobs"]

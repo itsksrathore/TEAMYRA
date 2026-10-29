@@ -928,6 +928,118 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 }
 
 .tools-dialog { width: min(520px, calc(100vw - 40px)); }
+
+.bulk-dialog { width: min(680px, calc(100vw - 40px)); }
+.bulk-dialog .dialog-card { max-height: calc(100vh - 60px); overflow-y: auto; }
+.bulk-type { display: flex; padding: 0 17px 10px; }
+.bulk-type .segmented button { min-width: 86px; }
+.bulk-dialog .task-prompt textarea { min-height: 170px; font-size: 12px; }
+.bulk-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 17px 2px;
+}
+.bulk-field { display: grid; gap: 4px; min-width: 0; }
+.bulk-field[hidden] { display: none; }
+.bulk-field span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.bulk-field input,
+.bulk-field select {
+  height: 36px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--rim);
+  border-radius: 999px;
+  outline: 0;
+  background: rgba(255,255,255,.52);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.bulk-folder { padding: 10px 17px 0; }
+.bulk-folder .workspace-field { height: 40px; width: 100%; padding: 0 12px; }
+.bulk-summary {
+  margin: 10px 17px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.bulk-progress {
+  margin: 12px 17px 0;
+  padding: 12px;
+  border: 1px solid var(--rim);
+  border-radius: 16px;
+  background: rgba(255,255,255,.44);
+}
+.bulk-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.bulk-progress-head span { color: var(--muted); font-family: var(--mono); font-size: 9px; text-align: right; }
+.bulk-bar {
+  height: 6px;
+  margin: 9px 0 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(29,29,34,.08);
+}
+.bulk-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width .4s ease;
+}
+.bulk-jobs {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.bulk-jobs li {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 10px;
+  background: rgba(255,255,255,.5);
+  font-size: 11px;
+}
+.bulk-jobs .bulk-index { color: var(--muted-2); font-family: var(--mono); font-size: 9px; }
+.bulk-jobs .bulk-prompt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bulk-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(125,126,144,.12);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.bulk-chip.working { color: var(--amber); background: rgba(170,116,23,.12); }
+.bulk-chip.done { color: var(--green); background: rgba(46,125,79,.12); }
+.bulk-chip.failed { color: var(--red); background: rgba(239,100,97,.12); }
+.bulk-jobs .bulk-lane { color: var(--muted-2); font-family: var(--mono); font-size: 8px; white-space: nowrap; }
+@media (max-width: 640px) {
+  .bulk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .tool-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -948,6 +1060,38 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 }
 
 .tool-grid input { accent-color: var(--accent); }
+.access-zone {
+  display: grid;
+  gap: 7px;
+  margin: 10px 17px 0;
+  padding: 10px;
+  border: 1px solid rgba(178,50,47,.20);
+  border-radius: 14px;
+  background: rgba(239,100,97,.05);
+}
+
+.access-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 11px;
+  background: rgba(255,255,255,.35);
+  font-size: 11px;
+}
+
+.access-switch input { margin-top: 2px; accent-color: var(--red); }
+.access-switch span { display: grid; gap: 2px; }
+.access-switch small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.access-switch.danger strong { color: var(--red); }
+.access-switch:has(input:disabled) { opacity: .55; }
+.access-warning {
+  margin: 0 2px;
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .tools-note {
   margin: 10px 18px 0;
   color: var(--muted);

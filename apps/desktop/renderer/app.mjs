@@ -325,7 +325,8 @@ function agentCardHtml(provider) {
               data-profile="${escapeHtml(profile.id)}"
               data-signed-in="${profile.signedIn ? '1' : '0'}">${profileActionLabel(provider, profile)}</button>
             ${provider.id === 'google-media' && profile.signedIn
-              ? `<button class="profile-action" type="button" data-google-music="${escapeHtml(profile.id)}" title="${profile.musicSignedIn ? 'Open Flow Music' : 'Authorize Flow Music with Google'}">${profile.musicSignedIn ? 'Music' : 'Connect Music'}</button>`
+              ? `<button class="profile-action" type="button" data-google-bulk="${escapeHtml(profile.id)}" title="Generate many images, videos or sound effects at once">Bulk</button>
+                 <button class="profile-action" type="button" data-google-music="${escapeHtml(profile.id)}" title="${profile.musicSignedIn ? 'Open Flow Music' : 'Authorize Flow Music with Google'}">${profile.musicSignedIn ? 'Music' : 'Connect Music'}</button>`
               : ''}
           </div>
         </div>
@@ -415,6 +416,10 @@ async function refreshAgents(force = false) {
         }
       }
     });
+  });
+
+  $('#agentGrid').querySelectorAll('[data-google-bulk]').forEach(button => {
+    button.addEventListener('click', () => openBulkMedia(button.dataset.googleBulk || 'google').catch(error => alert(String(error?.message || error))));
   });
 
   $('#agentGrid').querySelectorAll('[data-connect-mcp]').forEach(button => {
@@ -645,6 +650,9 @@ async function refreshChatgptStatus() {
   })) {
     if (Object.prototype.hasOwnProperty.call(permissions, name)) $('#' + id).checked = permissions[name] === true;
   }
+  $('#chatgptPermFullAccess').checked = permissions.full_access === true || workspace?.full_access === true;
+  $('#chatgptPermDestructive').checked = permissions.destructive_without_confirmation === true;
+  syncChatgptAccessUi();
 
   syncChatgptBounds();
   return { status, workspace };
@@ -725,6 +733,7 @@ async function selectChatgptWorkspace() {
 }
 
 function chatgptPermissionsFromUi() {
+  const fullAccess = $('#chatgptPermFullAccess').checked;
   return {
     read: $('#chatgptPermRead').checked,
     search: $('#chatgptPermSearch').checked,
@@ -732,9 +741,20 @@ function chatgptPermissionsFromUi() {
     write: $('#chatgptPermWrite').checked,
     git: $('#chatgptPermGit').checked,
     terminal: $('#chatgptPermTerminal').checked,
-    outside_workspace: false,
-    destructive_without_confirmation: false
+    full_access: fullAccess,
+    outside_workspace: fullAccess,
+    destructive_without_confirmation: fullAccess && $('#chatgptPermDestructive').checked
   };
+}
+
+function syncChatgptAccessUi() {
+  const fullAccess = $('#chatgptPermFullAccess').checked;
+  $('#chatgptPermDestructive').disabled = !fullAccess;
+  if (!fullAccess) $('#chatgptPermDestructive').checked = false;
+  $('#chatgptToolsNote').textContent = fullAccess
+    ? 'Full PC access is ON: ChatGPT workers can use any path on this PC except credential folders. ' +
+      ($('#chatgptPermDestructive').checked ? 'Destructive commands run without confirmation.' : 'Destructive actions remain confirmation-gated.')
+    : 'Access always stays inside the selected workspace. Destructive actions remain confirmation-gated.';
 }
 
 async function saveChatgptPermissions() {
@@ -743,7 +763,20 @@ async function saveChatgptPermissions() {
     await selectChatgptWorkspace();
     return;
   }
-  await window.teamyra.configureChatgptWorkspace(status.workspace, chatgptPermissionsFromUi());
+  $('#chatgptToolsError').hidden = true;
+  const result = await window.teamyra.configureChatgptWorkspace(status.workspace, chatgptPermissionsFromUi());
+  if (result?.cancelled) {
+    // The user declined the confirmation dialog: show the stored permissions again.
+    await refreshChatgptStatus();
+    return;
+  }
+  const stored = result?.permissions;
+  if (stored && $('#chatgptPermFullAccess').checked && stored.full_access !== true) {
+    $('#chatgptToolsError').textContent = 'Full PC access was not enabled by the TEAMYRA core.';
+    $('#chatgptToolsError').hidden = false;
+    await refreshChatgptStatus();
+    return;
+  }
   $('#chatgptToolsDialog').close();
   await refreshChatgptStatus();
 }
@@ -881,6 +914,8 @@ $('#chatgptTools').addEventListener('click', async () => {
   $('#chatgptToolsDialog').showModal();
 });
 $('#chatgptToolsClose').addEventListener('click', () => $('#chatgptToolsDialog').close());
+$('#chatgptPermFullAccess').addEventListener('change', syncChatgptAccessUi);
+$('#chatgptPermDestructive').addEventListener('change', syncChatgptAccessUi);
 $('#chatgptSavePermissions').addEventListener('click', () => saveChatgptPermissions().catch(error => alert(String(error?.message || error))));
 $('#chatgptViewChanges').addEventListener('click', () => showChanges().catch(error => alert(String(error?.message || error))));
 $('#changesClose').addEventListener('click', () => $('#changesDialog').close());
@@ -889,6 +924,290 @@ $('#chatgptReload').addEventListener('click', () => window.teamyra.reloadChatgpt
 $('#chatgptStop').addEventListener('click', () => window.teamyra.stopChatgpt().catch(() => {}));
 
 window.teamyra.onUpdateState(updateUpdateNote);
+
+// --- Bulk Google media ------------------------------------------------------
+
+const BULK_MAX = 50;
+const BULK_OPTIONS = {
+  video: {
+    aspects: [['16:9', '16:9 landscape'], ['9:16', '9:16 portrait']],
+    qualities: [['1080p', '1080p upscaled'], ['source', '720p original']],
+    duration: true
+  },
+  image: {
+    aspects: [['16:9', '16:9 landscape'], ['9:16', '9:16 portrait'], ['1:1', '1:1 square'], ['4:3', '4:3'], ['3:4', '3:4']],
+    qualities: [['prefer_4x_then_2x', '4K, else 2K'], ['2x', '2K upscaled'], ['source', 'Original']],
+    duration: false
+  },
+  sound_effect: { aspects: [], qualities: [], duration: true }
+};
+const BULK_STATE_LABELS = {
+  queued: 'Queued', preparing: 'Preparing', waiting_for_browser: 'Preparing', submitting: 'Submitting',
+  generating: 'Generating', processing: 'Processing', downloading: 'Downloading', extracting_audio: 'Extracting',
+  organizing: 'Saving', completed: 'Done', failed: 'Failed', cancelled: 'Stopped',
+  needs_user_auth: 'Sign in', rate_limited: 'Waiting', assisted: 'Helper'
+};
+const bulkState = { type: 'video', profileId: 'google', projectPath: '', batchId: '', projectOfBatch: '', timer: null, done: false };
+
+function storageGet(key) { try { return localStorage.getItem(key) || ''; } catch { return ''; } }
+function storageSet(key, value) { try { if (value) localStorage.setItem(key, value); else localStorage.removeItem(key); } catch {} }
+
+// One prompt per line, or blocks separated by a line of --- for multi-line prompts.
+function bulkPrompts() {
+  const text = $('#bulkPrompts').value.replace(/\r\n/g, '\n');
+  const separator = /^\s*-{3,}\s*$/m;
+  const parts = separator.test(text) ? text.split(separator) : text.split('\n');
+  return parts.map(part => part.trim()).filter(Boolean);
+}
+
+function bulkCopies() {
+  return Math.max(1, Math.min(10, Math.round(Number($('#bulkCopies').value) || 1)));
+}
+
+function bulkParallel() {
+  return Math.max(1, Math.min(30, Math.round(Number($('#bulkParallel').value) || 10)));
+}
+
+function fillSelect(select, options, remembered) {
+  select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('');
+  if (options.some(([value]) => value === remembered)) select.value = remembered;
+}
+
+function setBulkType(type) {
+  bulkState.type = BULK_OPTIONS[type] ? type : 'video';
+  storageSet('teamyra-bulk-type', bulkState.type);
+  document.querySelectorAll('[data-bulk-type]').forEach(button => {
+    const active = button.dataset.bulkType === bulkState.type;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+  const options = BULK_OPTIONS[bulkState.type];
+  fillSelect($('#bulkAspect'), options.aspects, storageGet('teamyra-bulk-aspect-' + bulkState.type));
+  fillSelect($('#bulkQuality'), options.qualities, storageGet('teamyra-bulk-quality-' + bulkState.type));
+  $('#bulkAspectField').hidden = !options.aspects.length;
+  $('#bulkQualityField').hidden = !options.qualities.length;
+  $('#bulkDurationField').hidden = !options.duration;
+  updateBulkSummary();
+}
+
+function updateBulkSummary() {
+  const prompts = bulkPrompts().length;
+  const copies = bulkCopies();
+  const total = prompts * copies;
+  const noun = { video: 'video', image: 'image', sound_effect: 'sound effect' }[bulkState.type];
+  const summary = $('#bulkSummary');
+  if (!prompts) {
+    summary.textContent = 'Add prompts to start.';
+  } else if (total > BULK_MAX) {
+    summary.textContent = total + ' generations. One batch takes at most ' + BULK_MAX + '; remove prompts or copies.';
+  } else {
+    const parallel = Math.min(bulkParallel(), total);
+    summary.textContent = total + ' ' + noun + (total === 1 ? '' : 's') + ' · ' + prompts + ' prompt' + (prompts === 1 ? '' : 's') +
+      (copies > 1 ? ' × ' + copies + ' copies' : '') + ' · up to ' + parallel + ' generating at once';
+  }
+  $('#bulkStart').disabled = !prompts || total > BULK_MAX || Boolean(bulkState.batchId && !bulkState.done);
+}
+
+function setBulkWorkspace(projectPath) {
+  bulkState.projectPath = projectPath || '';
+  $('#bulkWorkspaceLabel').textContent = projectPath
+    ? (projectPath.split(/[\\/]/).filter(Boolean).pop() || projectPath)
+    : 'Choose project folder';
+  $('#bulkWorkspacePick').title = projectPath || '';
+}
+
+function showBulkError(message) {
+  $('#bulkError').textContent = message || '';
+  $('#bulkError').hidden = !message;
+}
+
+function remoteMessage(error) {
+  return String(error?.message || error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+}
+
+async function openBulkMedia(profileId = 'google') {
+  bulkState.profileId = profileId || 'google';
+  // Native browser views draw above the page; hide them so the dialog is visible.
+  await window.teamyra.setGoogleMediaVisible(false).catch(() => {});
+  await window.teamyra.setChatgptVisible(false).catch(() => {});
+  setBrowserCloseVisible(false);
+  showBulkError('');
+  if (!bulkState.projectPath) {
+    setBulkWorkspace(storageGet('teamyra-bulk-workspace') || storageGet('teamyra-task-workspace'));
+  }
+  const parallel = Number(storageGet('teamyra-bulk-parallel'));
+  if (parallel) $('#bulkParallel').value = String(Math.max(1, Math.min(30, parallel)));
+  setBulkType(storageGet('teamyra-bulk-type') || bulkState.type);
+  if (!bulkState.batchId) {
+    const saved = storageGet('teamyra-bulk-batch');
+    if (saved) {
+      bulkState.batchId = saved;
+      bulkState.projectOfBatch = storageGet('teamyra-bulk-batch-project');
+      bulkState.done = false;
+    }
+  }
+  $('#bulkMediaDialog').showModal();
+  if (bulkState.batchId) refreshBulkProgress().catch(() => {});
+  else setTimeout(() => $('#bulkPrompts').focus(), 40);
+}
+
+async function pickBulkWorkspace() {
+  const result = await window.teamyra.pickProject();
+  if (result?.cancelled || !result?.path) return;
+  setBulkWorkspace(result.path);
+  storageSet('teamyra-bulk-workspace', result.path);
+}
+
+async function submitBulkMedia(event) {
+  event.preventDefault();
+  showBulkError('');
+  const prompts = bulkPrompts();
+  const copies = bulkCopies();
+  const total = prompts.length * copies;
+  if (!prompts.length) return;
+  if (total > BULK_MAX) { showBulkError('One batch takes at most ' + BULK_MAX + ' generations.'); return; }
+  if (!bulkState.projectPath) { showBulkError('Choose a project folder first.'); return; }
+  const options = BULK_OPTIONS[bulkState.type];
+  const shared = {};
+  if (options.aspects.length) shared.aspect_ratio = $('#bulkAspect').value;
+  if (options.qualities.length) shared.download_quality = $('#bulkQuality').value;
+  if (options.duration && $('#bulkDuration').value) shared.duration = Number($('#bulkDuration').value);
+  const requests = [];
+  for (const prompt of prompts) for (let copy = 0; copy < copies; copy += 1) requests.push({ ...shared, prompt });
+  storageSet('teamyra-bulk-aspect-' + bulkState.type, shared.aspect_ratio || '');
+  storageSet('teamyra-bulk-quality-' + bulkState.type, shared.download_quality || '');
+  storageSet('teamyra-bulk-parallel', String(bulkParallel()));
+
+  const button = $('#bulkStart');
+  button.disabled = true;
+  button.textContent = 'Queuing…';
+  try {
+    const result = await window.teamyra.startMediaBatch({
+      type: bulkState.type,
+      projectPath: bulkState.projectPath,
+      requests,
+      maxParallel: bulkParallel(),
+      profileId: bulkState.profileId
+    });
+    bulkState.batchId = result.batch_id;
+    bulkState.projectOfBatch = bulkState.projectPath;
+    bulkState.done = false;
+    storageSet('teamyra-bulk-batch', result.batch_id);
+    storageSet('teamyra-bulk-batch-project', bulkState.projectPath);
+    if (result.runtime?.error) showBulkError('Queued, but the Google Media browser could not start: ' + result.runtime.error);
+    else if (result.runtime && result.runtime.connected === false) showBulkError('Queued. Connect your Google account from the Google Media card to start generating.');
+    await refreshBulkProgress();
+  } catch (error) {
+    showBulkError(remoteMessage(error));
+  } finally {
+    button.textContent = 'Generate';
+    updateBulkSummary();
+  }
+}
+
+function renderBulkProgress(status) {
+  const jobs = Array.isArray(status?.jobs) ? status.jobs : [];
+  const counts = status?.counts || {};
+  const total = Number(status?.total) || jobs.length;
+  const completed = Number(counts.completed) || 0;
+  const finished = Number(status?.finished) || 0;
+  const working = total - finished - (Number(counts.queued) || 0);
+  $('#bulkProgress').hidden = false;
+  $('#bulkProgressLabel').textContent = status?.done
+    ? (completed === total ? 'All ' + total + ' done' : 'Batch finished')
+    : 'Generating ' + total + ' item' + (total === 1 ? '' : 's');
+  const parts = [completed + '/' + total + ' done'];
+  if (working > 0) parts.push(working + ' in progress');
+  if (counts.queued) parts.push(counts.queued + ' queued');
+  if (counts.failed) parts.push(counts.failed + ' failed');
+  if (counts.cancelled) parts.push(counts.cancelled + ' stopped');
+  if (counts.needs_user_auth) parts.push('sign-in needed');
+  $('#bulkProgressCounts').textContent = parts.join(' · ');
+  $('#bulkBar').style.width = (total ? Math.round(finished / total * 100) : 0) + '%';
+  $('#bulkJobs').innerHTML = jobs.map((job, index) => {
+    const state = job.status || 'queued';
+    const tone = state === 'completed' ? 'done'
+      : ['failed', 'cancelled', 'needs_user_auth'].includes(state) ? 'failed'
+        : state === 'queued' ? '' : 'working';
+    const title = [job.prompt_preview, job.asset?.asset_id, state === 'failed' ? job.error : job.detail].filter(Boolean).join('\n');
+    return `<li title="${escapeHtml(title)}">
+      <span class="bulk-index">${index + 1}</span>
+      <span class="bulk-prompt">${escapeHtml(job.prompt_preview || job.job_id)}</span>
+      <span class="bulk-lane">${Number.isInteger(job.lane) && state !== 'queued' ? 'Tab ' + (job.lane + 1) : ''}</span>
+      <span class="bulk-chip ${tone}">${escapeHtml(job.asset?.asset_id || BULK_STATE_LABELS[state] || state)}</span>
+    </li>`;
+  }).join('');
+  bulkState.done = status?.done === true;
+  $('#bulkCancelRun').hidden = bulkState.done;
+  $('#bulkNew').hidden = !bulkState.done;
+  $('#bulkOpenFolder').hidden = !bulkState.projectOfBatch;
+  if (bulkState.done) storageSet('teamyra-bulk-batch', '');
+  updateBulkSummary();
+}
+
+async function refreshBulkProgress() {
+  if (bulkState.timer) clearTimeout(bulkState.timer);
+  bulkState.timer = null;
+  if (!bulkState.batchId) return;
+  try {
+    renderBulkProgress(await window.teamyra.mediaBatchStatus(bulkState.batchId));
+  } catch (error) {
+    if (/no such media batch|invalid media batch/i.test(remoteMessage(error))) {
+      resetBulkBatch();
+      return;
+    }
+  }
+  if (!bulkState.done && $('#bulkMediaDialog').open) {
+    bulkState.timer = setTimeout(() => refreshBulkProgress().catch(() => {}), 3000);
+  }
+}
+
+function resetBulkBatch() {
+  if (bulkState.timer) clearTimeout(bulkState.timer);
+  bulkState.timer = null;
+  bulkState.batchId = '';
+  bulkState.done = false;
+  storageSet('teamyra-bulk-batch', '');
+  $('#bulkProgress').hidden = true;
+  $('#bulkJobs').innerHTML = '';
+  $('#bulkCancelRun').hidden = true;
+  $('#bulkNew').hidden = true;
+  $('#bulkOpenFolder').hidden = true;
+  updateBulkSummary();
+}
+
+document.querySelectorAll('[data-bulk-type]').forEach(button => {
+  button.addEventListener('click', () => setBulkType(button.dataset.bulkType));
+});
+$('#bulkPrompts').addEventListener('input', updateBulkSummary);
+$('#bulkCopies').addEventListener('input', updateBulkSummary);
+$('#bulkParallel').addEventListener('input', updateBulkSummary);
+$('#bulkWorkspacePick').addEventListener('click', () => pickBulkWorkspace().catch(error => showBulkError(remoteMessage(error))));
+$('#bulkMediaForm').addEventListener('submit', submitBulkMedia);
+$('#bulkMediaClose').addEventListener('click', () => $('#bulkMediaDialog').close());
+$('#bulkMediaDialog').addEventListener('close', () => {
+  if (bulkState.timer) clearTimeout(bulkState.timer);
+  bulkState.timer = null;
+});
+$('#bulkNew').addEventListener('click', () => {
+  resetBulkBatch();
+  $('#bulkPrompts').value = '';
+  updateBulkSummary();
+  $('#bulkPrompts').focus();
+});
+$('#bulkCancelRun').addEventListener('click', async () => {
+  if (!bulkState.batchId) return;
+  if (!confirm('Stop every unfinished item in this batch? Generations Flow already started may still use credits.')) return;
+  try {
+    await window.teamyra.cancelMediaBatch(bulkState.batchId);
+    await refreshBulkProgress();
+  } catch (error) {
+    showBulkError(remoteMessage(error));
+  }
+});
+$('#bulkOpenFolder').addEventListener('click', () => {
+  window.teamyra.openMediaFolder(bulkState.projectOfBatch || bulkState.projectPath).catch(error => showBulkError(remoteMessage(error)));
+});
 
 function scheduleJobsPoll(delayMs) {
   if (jobsPollTimer) clearTimeout(jobsPollTimer);
