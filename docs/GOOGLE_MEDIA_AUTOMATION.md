@@ -279,6 +279,46 @@ new credits; new jobs passed for an image without references (5504 × 3072), an
 image with `Projects/refs/esme_ref.png`, a 16:9 8 s video (720p → 1080p, audio)
 and a 3-video batch, each frame checked against its own prompt.
 
+## Google Vids (2026-11-03)
+
+Google Vids (vids.new, Omni) runs inside Google Media with the same accounts
+and sign-in as Flow. Agents choose it per job with `engine: "vids"` on
+`media_generate` / `media_batch`; everything else (accounts, batches, polling,
+assets, maintenance issues) is shared with Flow.
+
+- **What it makes:** video only, 3-10 s per clip, 16:9 or 9:16, native 720p or
+  1080p (default 1080p, H.264 + AAC audio, about 2 MB/s). No Flow credits.
+- **Modes (`vids_mode`):** `create` (prompt + up to 3 reference images, shown to
+  Vids as Image1-Image3 ingredients), `animate` (one image), `extend`
+  (`source_video`; the result holds the original plus the new part, e.g. 10 s +
+  10 s = 20 s), `edit` (`source_video` plus changes, optional images).
+  `source_video` is a project video or a TEAMYRA video asset id.
+- **Tabs:** each enabled account runs `TEAMYRA_VIDS_TABS` hidden Vids tabs
+  (default 2) beside its Flow tabs, each working in its own Vids file
+  (created once with vids.new, remembered in
+  `profiles/google-media/vids-workspaces.json`). One tab runs up to 3 clips at
+  once; a batch's `max_parallel` caps it per account as for Flow.
+- **Results and download:** a finished clip appears in the panel as
+  `video[aria-label="Generated video: <prompt>, 1080p, 10 seconds"]` whose
+  source is a direct download URL. TEAMYRA matches it to its job by prompt
+  (oldest job first for copies), saves it with the account's session (no
+  timeline export), checks it with FFmpeg (resolution, aspect) and registers
+  the asset (`provider: google-vids`).
+- **Restarts:** Vids keeps unfinished clips only in the open tab. A job running
+  when TEAMYRA restarts ends `vids_tab_lost` with recovery action `requeue`.
+- **Automation notes (learned live):** buttons respond to `element.click()`,
+  except the side rail and the welcome card, which need real input. Real input
+  goes through DevTools (`Input.dispatchMouseEvent`), and a hidden tab only
+  hit-tests it after a frame is drawn (a 1x1 `Page.captureScreenshot` first).
+  Modes switch only with an empty composer. Images and videos go straight into
+  the page's file inputs (`DOM.setFileInputFiles`); native file pickers are
+  intercepted. Docs pages never report a finished load, so navigation is not
+  awaited.
+- **Live test:** one clip in each of the 5 accounts (one with a reference
+  image, one portrait 1080x1920, one 6 s): 5/5 delivered in 2.0-2.5 min each,
+  1080p with audio; a 6-job batch ran 4 create jobs across 3 accounts, two at
+  once in two tabs of one account.
+
 ## One TEAMYRA per PC
 
 `%USERPROFILE%\.teamyra\runtime.json` names the canonical checkout

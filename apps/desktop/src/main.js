@@ -454,7 +454,9 @@ function hasActiveDesktopWork() {
   } catch {}
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
-  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumers?.().some(consumer => consumer.busy === true) || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
+  if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumers?.().some(consumer => consumer.busy === true) || runtime.vidsConsumers?.().some(consumer => consumer.busy === true) || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
+  // Google Vids work (and the developer Vids tool) keeps the desktop awake.
+  if (Date.now() - (globalThis.__teamyraVidsActiveAt || 0) < DESKTOP_IDLE_SECONDS * 1000) return true;
   return false;
 }
 
@@ -750,7 +752,7 @@ ipcMain.handle('teamyra:media-bounds', (_event, bounds = {}) => {
 });
 
 const BULK_MEDIA_TYPES = new Set(['image', 'video', 'sound_effect']);
-const BULK_REQUEST_KEYS = ['prompt', 'aspect_ratio', 'duration', 'format', 'download_quality', 'generation_resolution', 'references'];
+const BULK_REQUEST_KEYS = ['prompt', 'aspect_ratio', 'duration', 'format', 'download_quality', 'generation_resolution', 'references', 'engine', 'vids_mode'];
 ipcMain.handle('teamyra:media-batch', async (_event, options = {}) => {
   const type = String(options.type || '');
   if (!BULK_MEDIA_TYPES.has(type)) throw new Error('Bulk generation supports images, videos and sound effects');
@@ -769,9 +771,10 @@ ipcMain.handle('teamyra:media-batch', async (_event, options = {}) => {
   let runtime = null;
   try {
     // Bulk work runs in every signed-in Google account unless one is named.
+    const surface = requests.some(request => request.engine === 'vids') ? 'vids' : 'visual';
     runtime = googleMediaEngine ? (options.profileId
-      ? googleMediaEngine.wake('visual', options.profileId)
-      : googleMediaEngine.wakeAll('visual')) : null;
+      ? googleMediaEngine.wake(surface, options.profileId)
+      : googleMediaEngine.wakeAll(surface)) : null;
   } catch (error) {
     runtime = { error: String(error?.message || error) };
   }
@@ -1324,6 +1327,12 @@ async function dispatchDesktopControl(action, payload = {}) {
   if (action === 'provider.list') return providersCached(true);
   if (action === 'account.create') return desktopCreateAccount(payload.provider, payload.name);
   if (action === 'account.update') return desktopUpdateAccount(payload.provider, payload.profile_id, payload.patch || {});
+  if (action === 'vids.debug') {
+    if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
+    // Developer tool: re-read on every call so it can change without a restart.
+    delete require.cache[require.resolve('./media/vids-debug')];
+    return require('./media/vids-debug').vidsDebug(googleMediaEngine, mainWindow, payload);
+  }
   if (action.startsWith('media.')) {
     if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
     const mediaCmd = action.slice('media.'.length);

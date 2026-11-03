@@ -427,6 +427,38 @@ class MediaBulkTests(unittest.TestCase):
         self.assertEqual(calls[0], {'provider': 'google-media', 'profile_id': 'acct-a', 'patch': {'enabled': True}})
         self.assertEqual([call['profile_id'] for call in calls[1:]], ['google', 'acct-a', 'acct-b'])
 
+    def test_vids_jobs_go_to_the_vids_surface(self):
+        (self.project / 'a.png').write_bytes(b'png')
+        job = media_engine.create_job(self.root, self.request('fox at dawn', engine='vids', references=['a.png'],
+                                                              duration=6, aspect_ratio='9:16'))
+        stored = media_engine.load_job(self.root, job['job_id'])
+        self.assertEqual(stored['provider_surface'], 'google-vids')
+        self.assertEqual(stored['request']['surface'], 'vids')
+        self.assertEqual(stored['request']['generation_settings']['generation_resolution'], '1080p', 'native 1080p by default')
+        self.assertEqual(stored['request']['duration'], 6)
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'flow'), 'Flow tabs never take Vids jobs')
+        self.assertEqual(media_engine.claim_next_job(self.root, 'vids', 'vids-tab1')['job_id'], job['job_id'])
+
+    def test_vids_modes_are_validated(self):
+        (self.project / 'a.png').write_bytes(b'png')
+        (self.project / 'clip.mp4').write_bytes(b'mp4')
+        extend = media_engine.create_job(self.root, self.request('then the fox waves', engine='vids', vids_mode='extend',
+                                                                 source_video='clip.mp4'))
+        self.assertTrue(media_engine.load_job(self.root, extend['job_id'])['resolved_source']['path'].endswith('clip.mp4'))
+        for bad, message in ((dict(vids_mode='animate'), 'exactly one image'), (dict(duration=11), '3 to 10'),
+                             (dict(references=['a.png'] * 4), 'at most 3'), (dict(vids_mode='edit'), 'source_video'),
+                             (dict(aspect_ratio='1:1'), '16:9 or 9:16'), (dict(type='image'), 'type=video'),
+                             (dict(vids_mode='extend', source_video='a.png'), 'MP4')):
+            with self.assertRaisesRegex(ValueError, message):
+                media_engine.create_job(self.root, {**self.request('x', engine='vids'), **bad})
+
+    def test_lost_vids_clip_is_queued_again(self):
+        job = media_engine.create_job(self.root, self.request('lost', engine='vids'))
+        media_engine.update_job_state(self.root, job['job_id'], 'failed', 'generation_failure: lost',
+                                      extra={'failure': {'category': 'vids_tab_lost'}})
+        plan = media_engine.recovery_plan(media_engine.load_job(self.root, job['job_id']))
+        self.assertEqual(plan['action'], 'requeue')
+
     def test_restart_recovery_leaves_a_live_workers_jobs_alone(self):
         job_id = self.claimed()
         media_engine.append_job_metadata(self.root, job_id, {'submission_phase': 'preparing'})

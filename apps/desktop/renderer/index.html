@@ -202,6 +202,9 @@
         <textarea id="bulkPrompts" maxlength="200000" placeholder="One prompt per line.&#10;For prompts that span several lines, put a line with --- between them."></textarea>
       </label>
       <div class="bulk-grid">
+        <label class="bulk-field" id="bulkEngineField"><span>Engine</span><select id="bulkEngine">
+          <option value="flow">Google Flow</option><option value="vids">Google Vids</option>
+        </select></label>
         <label class="bulk-field"><span>Copies each</span><input id="bulkCopies" type="number" min="1" max="10" value="1" /></label>
         <label class="bulk-field" id="bulkAspectField"><span>Aspect</span><select id="bulkAspect"></select></label>
         <label class="bulk-field" id="bulkDurationField"><span>Duration</span><select id="bulkDuration">

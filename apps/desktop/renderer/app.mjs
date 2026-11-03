@@ -1022,6 +1022,8 @@ function setBulkType(type) {
   $('#bulkAspectField').hidden = !options.aspects.length;
   $('#bulkQualityField').hidden = !options.qualities.length;
   $('#bulkDurationField').hidden = !options.duration;
+  // Google Vids makes videos only (same accounts, no Flow credits, native 1080p).
+  $('#bulkEngineField').hidden = bulkState.type !== 'video';
   updateBulkSummary();
 }
 
@@ -1107,6 +1109,11 @@ async function submitBulkMedia(event) {
   if (options.aspects.length) shared.aspect_ratio = $('#bulkAspect').value;
   if (options.qualities.length) shared.download_quality = $('#bulkQuality').value;
   if (options.duration && $('#bulkDuration').value) shared.duration = Number($('#bulkDuration').value);
+  if (bulkState.type === 'video' && $('#bulkEngine').value === 'vids') {
+    shared.engine = 'vids';
+    shared.generation_resolution = shared.download_quality === 'source' ? '720p' : '1080p';
+    delete shared.download_quality;
+  }
   const requests = [];
   for (const prompt of prompts) for (let copy = 0; copy < copies; copy += 1) requests.push({ ...shared, prompt });
   storageSet('teamyra-bulk-aspect-' + bulkState.type, shared.aspect_ratio || '');

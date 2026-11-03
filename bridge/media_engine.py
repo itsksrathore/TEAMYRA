@@ -122,6 +122,9 @@ def recovery_plan(job):
                     instruction="Flow produced results but TEAMYRA could not attribute them to this job. Do not resubmit or "
                                 "reword: credits were already used. Call teamyra.media_report_issue (a helper/maintenance "
                                 "delivers it) or teamyra.media_recover to retry matching and download.")
+    elif category == "vids_tab_lost":
+        plan.update(action="requeue", can_recover=False, automatic=False,
+                    instruction="Google Vids lost this unfinished clip when TEAMYRA restarted. Queue the same request again with media_generate or media_batch (engine=vids).")
     elif category == "provider_no_result":
         plan.update(action="revise_request", can_recover=submitted, automatic=False,
                     instruction="Flow accepted the generation but no result appeared and a full project search found none; this is usually a silent moderation refusal. Reword the prompt and queue a new job. teamyra.media_recover only waits for the same submission again.")
@@ -536,6 +539,11 @@ def normalize_generate_request(root, request):
         raise ValueError("prompt is required")
     if len(prompt) > MAX_PROMPT:
         raise ValueError("prompt is too long")
+    engine = str(request.get("engine") or "flow").strip().lower()
+    if engine in {"vids", "google-vids", "google_vids"}:
+        return _normalize_vids_request(root, request, media_type, project, prompt)
+    if engine not in {"flow", "google-flow", "google_flow"}:
+        raise ValueError("engine must be flow (Google Flow) or vids (Google Vids)")
 
     default_model = "Lyria 3.5" if media_type in MUSIC_TYPES else (
         "Gemini Omni Flash" if media_type in {"video", "sound_effect"} else "auto"
@@ -646,6 +654,73 @@ def normalize_generate_request(root, request):
     if result.get("first_frame"):
         result["reference_note"] = "Omni treats first_frame as a prompt image ingredient; it does not guarantee the exact opening frame. Prefer references."
     result["generation_settings"] = defaults
+    ensure_project_folders(root, project)
+    return result
+
+
+VIDS_MODES = {"create", "extend", "edit", "animate"}
+VIDS_MAX_REFERENCES = 3
+
+
+def _normalize_vids_request(root, request, media_type, project, prompt):
+    """A Google Vids (Omni) clip: create from text and up to 3 images, animate
+    one image, extend or edit a video. 3-10 s, 16:9 or 9:16, 720p or 1080p."""
+    if media_type != "video":
+        raise ValueError("Google Vids makes videos: use type=video with engine=vids")
+    mode = str(request.get("vids_mode") or "create").strip().lower()
+    if mode not in VIDS_MODES:
+        raise ValueError("vids_mode must be create, animate, extend or edit")
+    refs = _normalize_references(request.get("references"))
+    source = str(request.get("source_video") or "").strip() or None
+    if mode in {"extend", "edit"} and not source:
+        raise ValueError(f"vids_mode={mode} needs source_video (a video file in the project or a TEAMYRA video asset id)")
+    if mode in {"create", "animate"} and source:
+        raise ValueError("source_video is only for vids_mode=extend or edit")
+    if mode == "extend" and refs:
+        raise ValueError("vids_mode=extend takes no reference images")
+    if mode == "animate" and len(refs) != 1:
+        raise ValueError("vids_mode=animate needs exactly one image in references")
+    if len(refs) > VIDS_MAX_REFERENCES:
+        raise ValueError(f"Google Vids takes at most {VIDS_MAX_REFERENCES} reference images")
+    aspect = str(request.get("aspect_ratio") or "16:9").strip()
+    if aspect not in {"16:9", "9:16"}:
+        raise ValueError("Google Vids aspect_ratio must be 16:9 or 9:16")
+    duration = request.get("duration")
+    if duration is not None:
+        duration = float(duration)
+        if not 3 <= duration <= 10:
+            raise ValueError("Google Vids clips are 3 to 10 seconds long")
+        duration = int(round(duration))
+    settings = request.get("generation_settings") if isinstance(request.get("generation_settings"), dict) else {}
+    resolution = str(request.get("generation_resolution") or settings.get("generation_resolution") or "1080p").lower()
+    if resolution not in {"720p", "1080p"}:
+        raise ValueError("Google Vids generation_resolution must be 720p or 1080p")
+    result = {
+        "type": "video",
+        "prompt": prompt,
+        "provider_prompt": prompt,
+        "project_path": str(project),
+        "surface": "vids",
+        "engine": "vids",
+        "vids_mode": mode,
+        "aspect_ratio": aspect,
+        "duration": duration,
+        "format": _normalize_format("video", request.get("format")),
+        "references": refs,
+        "source_video": source,
+        "output_count": 1,
+        "instrumental": False,
+        "vocals": False,
+        "lyrics": None,
+        "model_preference": "Omni",
+        "reference_mode": "ingredients",
+        "generation_settings": {"generation_model": "Omni", "generation_resolution": resolution,
+                                "download_quality": "source", "wait_for_upscale": False, "engine": "google-vids"},
+    }
+    if request.get("max_parallel") is not None:
+        result["max_parallel"] = max(1, min(int(request.get("max_parallel")), MAX_PARALLEL))
+    if request.get("accounts"):
+        result["accounts"] = resolve_google_accounts(root, request.get("accounts"))
     ensure_project_folders(root, project)
     return result
 
@@ -803,6 +878,13 @@ def _prepare_job(root, request, *, operation=None, source_asset=None):
     normalized = normalize_generate_request(root, request)
     refs = resolve_request_references(root, normalized)
     parent_ids = [item["asset_id"] for item in refs if item.get("asset_id")]
+    if normalized.get("source_video"):
+        source = _resolve_reference(root, Path(normalized["project_path"]).resolve(), normalized["source_video"])
+        if Path(source["path"]).suffix.lower() not in {".mp4", ".mov", ".webm", ".m4v"}:
+            raise ValueError("source_video must be an MP4, MOV or WebM video")
+        normalized["resolved_source"] = source
+        if source.get("asset_id") and source["asset_id"] not in parent_ids:
+            parent_ids.insert(0, source["asset_id"])
     if source_asset and source_asset.get("asset_id") not in parent_ids:
         parent_ids.insert(0, source_asset["asset_id"])
     return normalized, refs, parent_ids
@@ -827,11 +909,12 @@ def create_job(root, request, *, operation=None, source_asset=None, batch_id=Non
         "operation": operation,
         # An edit runs in the Google account whose Flow project holds its source.
         "source_profile_id": ((source_asset or {}).get("metadata") or {}).get("google_profile_id") if operation else None,
+        "resolved_source": normalized.pop("resolved_source", None),
         "request": normalized,
         "resolved_references": refs,
         "parent_asset_ids": parent_ids,
         "provider": None,
-        "provider_surface": "google-flow-music" if normalized["surface"] == "music" else "google-flow",
+        "provider_surface": {"music": "google-flow-music", "vids": "google-vids"}.get(normalized["surface"], "google-flow"),
         "provider_submission": {},
         "planned_output": None,
         "asset_id": None,
@@ -1375,8 +1458,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
     if main is None:
         main = profile == DEFAULT_PROFILE
     surface = str(surface or "").strip().lower()
-    if surface not in {"visual", "music"}:
-        raise ValueError("surface must be visual or music")
+    if surface not in {"visual", "music", "vids"}:
+        raise ValueError("surface must be visual, music or vids")
     try:
         lane = max(0, int(lane or 0))
         lanes = max(1, int(lanes or 1))

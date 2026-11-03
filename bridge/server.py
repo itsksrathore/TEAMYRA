@@ -1103,6 +1103,10 @@ def desktop_control(action, payload=None, timeout_seconds=20):
         try: response_file.unlink(missing_ok=True)
         except Exception: pass
 
+def media_wake_surface(provider_surface):
+    return {"google-flow-music": "music", "google-vids": "vids"}.get(provider_surface, "visual")
+
+
 def wake_media_surface(surface):
     try:
         response = desktop_control("media.wake", {"surface": surface}, 5)
@@ -1170,7 +1174,7 @@ MEDIA_REQUEST_PROPERTIES = {
     "model_preference": {"type": "string"},
     "download_quality": {"type": "string", "enum": ["auto", "source", "2x", "4x", "prefer_4x_then_2x", "1080p", "4k"],
                          "description": "Video defaults to 1080p: generate at 720p, then select 1080p Upscaled in Download and wait for the real file. source opts out. Sound effects always download the 360p original and extract audio; no upscale."},
-    "generation_resolution": {"type": "string", "enum": ["auto", "360p", "720p"],
+    "generation_resolution": {"type": "string", "enum": ["auto", "360p", "720p", "1080p"],
                               "description": "Native Flow generation resolution, separate from download quality. Video defaults to 720p; 1080p is a download upscale. Sound effects are always generated at 360p regardless of overrides."},
     "wait_for_upscale": {"type": "boolean"},
     "audio_only": {"type": "boolean"},
@@ -1184,6 +1188,11 @@ MEDIA_REQUEST_PROPERTIES = {
                      "description": "Bulk throughput: how many Flow generations this job may share with other queued jobs at once. The desktop worker submits jobs back to back, waits on all of them together and adapts downward if Flow reports it is busy. Default 10."},
     "accounts": {"type": "array", "items": {"type": "string"},
                  "description": "Google Media accounts this job may run in (ids or unique names from media_accounts). Omitted: every enabled account (single jobs: the main account). Each must be enabled."},
+    "engine": {"type": "string", "enum": ["flow", "vids"], "default": "flow",
+               "description": "flow: Google Flow (default). vids: Google Vids (Omni, same Google accounts, no Flow credits): type=video, 3-10 s clips, 16:9 or 9:16, 720p or native 1080p, up to 3 reference images, vids_mode create/animate/extend/edit."},
+    "vids_mode": {"type": "string", "enum": ["create", "animate", "extend", "edit"], "default": "create",
+                  "description": "engine=vids only. create: text + up to 3 reference images. animate: one image in references. extend: continue source_video (the result holds the original plus the new part). edit: change source_video, optionally with up to 3 reference images."},
+    "source_video": {"type": "string", "description": "engine=vids, vids_mode extend/edit: a video file in the project or a TEAMYRA video asset id."},
 }
 TOOLS = [
     {"name": "provider_list", "description": "List TEAMYRA providers/accounts as seen by the desktop app, including ChatGPT, Codex, Claude and Antigravity profiles.",
@@ -1719,8 +1728,7 @@ def tool_call(name, a):
         return desktop_control("chatgpt." + action, payload)
     if name == "media_generate":
         result = media_engine.create_job(ROOT, a)
-        surface = "music" if result.get("provider_surface") == "google-flow-music" else "visual"
-        result["runtime"] = wake_media_surface(surface)
+        result["runtime"] = wake_media_surface(media_wake_surface(result.get("provider_surface")))
         return result
     if name == "media_guide":
         return media_guide.guide(ROOT)
@@ -1736,10 +1744,7 @@ def tool_call(name, a):
     if name == "media_batch":
         result = media_engine.create_batch(ROOT, a["requests"], max_parallel=a.get("max_parallel"),
                                            accounts=a.get("accounts"))
-        surfaces = {
-            "music" if item.get("provider_surface") == "google-flow-music" else "visual"
-            for item in result["jobs"]
-        }
+        surfaces = {media_wake_surface(item.get("provider_surface")) for item in result["jobs"]}
         for surface in surfaces:
             result.setdefault("runtime", {})[surface] = wake_media_surface(surface)
         return result

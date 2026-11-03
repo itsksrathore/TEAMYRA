@@ -7,6 +7,15 @@ const { MediaDownloadManager } = require('./media-download-manager');
 const { GoogleFlowProvider } = require('./google-flow-provider');
 const { GoogleFlowMusicProvider } = require('./google-flow-music-provider');
 const { MediaJobConsumer } = require('./media-job-consumer');
+const { GoogleVidsProvider } = require('./google-vids-provider');
+const { VidsJobConsumer, WorkspaceStore } = require('./vids-job-consumer');
+
+// Google Vids tabs per account (TEAMYRA_VIDS_TABS, 1-4). Each tab runs several
+// clips at once; Vids uses no Flow credits.
+function vidsTabCount(value = globalThis.process?.env?.TEAMYRA_VIDS_TABS) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number >= 1 ? Math.min(4, number) : 2;
+}
 
 const HUNG_RELOAD_GAP_MS = 3 * 60 * 1000;
 // Bulk work runs in several hidden Flow tabs ("lanes"), each with its own
@@ -128,6 +137,21 @@ class GoogleMediaProfileRuntime {
         })
       });
     }
+    // Google Vids: same session (login) as this account's Flow tabs.
+    const vidsTabs = vidsTabCount();
+    const workspaces = new WorkspaceStore(path.join(profileRoot('google-media'), 'vids-workspaces.json'));
+    this.vidsTabs = [];
+    for (let lane = 0; lane < vidsTabs; lane += 1) {
+      const provider = new GoogleVidsProvider({ window, sessionManager: this.sessionManager,
+        bounds: { x: 0, y: 0, width: 1600, height: 1300 } });
+      this.vidsTabs.push({ provider, consumer: new VidsJobConsumer({
+        workerName: 'google-media-' + this.profileId + '-vids-tab' + (lane + 1),
+        provider, profileId: this.profileId, lane, lanes: vidsTabs, ready, workspaces,
+        onActivity: () => this.touch(),
+        isMain: accountHooks.isMain,
+        mayClaim: () => this.vidsWorking()
+      }) });
+    }
     this.musicConsumer = new MediaJobConsumer({
       surface: 'music',
       workerName: 'google-media-' + this.profileId + '-music',
@@ -175,13 +199,23 @@ class GoogleMediaProfileRuntime {
     return [this.visualConsumer, ...this.extraLanes.map(lane => lane.consumer)];
   }
 
+  vidsConsumers() {
+    return this.vidsTabs.map(tab => tab.consumer);
+  }
+
+  // Vids needs the account signed in and enabled; Flow's credit pause does not apply.
+  vidsWorking() {
+    return this.visualConsumerStarted && this.lastStatus.connected === true &&
+      this.lastStatus.challenged !== true && this.engine?.isEnabled(this.profileId) !== false;
+  }
+
   setConsumerState(kind, enabled) {
     if (kind === 'visual') {
       if (enabled && !this.visualConsumerStarted) {
-        for (const consumer of this.visualConsumers()) consumer.start();
+        for (const consumer of [...this.visualConsumers(), ...this.vidsConsumers()]) consumer.start();
         this.visualConsumerStarted = true;
       } else if (!enabled && this.visualConsumerStarted) {
-        for (const consumer of this.visualConsumers()) consumer.stop();
+        for (const consumer of [...this.visualConsumers(), ...this.vidsConsumers()]) consumer.stop();
         this.visualConsumerStarted = false;
       }
       return;
@@ -217,7 +251,9 @@ class GoogleMediaProfileRuntime {
       this.unloadTimer = null;
       // An idle extra tab is released even while other tabs keep working.
       for (const lane of this.extraLanes) if (!lane.consumer.busy) lane.provider.destroy();
-      if (this.visualConsumers().some(consumer => consumer.busy) || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
+      // An idle Vids tab is closed; a busy one keeps its unfinished clips.
+      for (const tab of this.vidsTabs) if (!tab.consumer.busy) tab.provider.destroy();
+      if (this.visualConsumers().some(consumer => consumer.busy) || this.vidsConsumers().some(consumer => consumer.busy) || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
         this.scheduleUnload(BROWSER_IDLE_MS);
         return;
       }
@@ -299,7 +335,7 @@ class GoogleMediaProfileRuntime {
   }
 
   snapshot() {
-    const visualBusy = this.visualConsumers().some(consumer => consumer.busy);
+    const visualBusy = this.visualConsumers().some(consumer => consumer.busy) || this.vidsConsumers().some(consumer => consumer.busy);
     return {
       ...this.lastStatus,
       visible: this.visual.visible || this.music.visible,
@@ -307,6 +343,7 @@ class GoogleMediaProfileRuntime {
       visual_busy: visualBusy,
       music_busy: this.musicConsumer.busy,
       visual_pipeline: this.pipelineSnapshot(),
+      vids_tabs: this.vidsConsumers().map(consumer => consumer.status()),
       working: this.working(),
       parked_until: this.parkedUntil > Date.now() ? this.parkedUntil / 1000 : null,
       park_reason: this.parkedUntil > Date.now() || !this.lastStatus.connected ? this.parkReason : '',
@@ -589,6 +626,7 @@ class GoogleMediaProfileRuntime {
     this.stopConsumers();
     this.visual.destroy();
     for (const lane of this.extraLanes) lane.provider.destroy();
+    for (const tab of this.vidsTabs) tab.provider.destroy();
     this.music.destroy();
     this.started = false;
   }
@@ -767,6 +805,8 @@ class GoogleMediaEngine {
   // only once a probe confirms it, unless no account is known to work (then
   // the active one starts as before, so jobs report that sign-in is needed).
   wakeAll(surface = 'visual') {
+    // Vids runs beside Flow in the same accounts: waking checks sign-in the same way.
+    if (surface === 'vids') return { ...this.wakeAll('visual'), wake_surface: 'vids', vids_tabs_per_account: vidsTabCount() };
     if (surface === 'music') {
       this.enabledCache = null;
       const id = this.musicProfileId();
@@ -843,4 +883,4 @@ class GoogleMediaEngine {
   }
 }
 
-module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount, mediaProfiles };
+module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount, vidsTabCount, mediaProfiles };
