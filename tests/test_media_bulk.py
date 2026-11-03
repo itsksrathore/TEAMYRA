@@ -378,6 +378,55 @@ class MediaBulkTests(unittest.TestCase):
         media_engine.get_asset(self.root, 'TYR-IMG-000001')['type'] = 'changed'
         self.assertEqual(media_engine.get_asset(self.root, 'TYR-IMG-000001')['type'], 'video', 'callers get copies')
 
+    def google_profiles(self, **enabled):
+        import json as _json
+        folder = self.root / 'profiles' / 'google-media'
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'builtin-google.json').write_text(_json.dumps({'enabled': enabled.pop('google', True)}), encoding='utf-8')
+        names = {'acct-a': 'Alpha', 'acct-b': 'Beta', 'acct-c': 'Beta'}
+        for profile, on in enabled.items():
+            (folder / profile).mkdir(exist_ok=True)
+            (folder / profile / 'teamyra-profile.json').write_text(
+                _json.dumps({'name': names.get(profile, profile), 'enabled': on}), encoding='utf-8')
+
+    def test_job_accounts_resolve_ids_and_unique_names(self):
+        self.google_profiles(**{'acct-a': True, 'acct-b': True, 'acct-c': False})
+        self.assertEqual(media_engine.resolve_google_accounts(self.root, ['Alpha', 'google']), ['acct-a', 'google'])
+        with self.assertRaisesRegex(ValueError, 'several'):
+            media_engine.resolve_google_accounts(self.root, ['Beta'])
+        with self.assertRaisesRegex(ValueError, 'disabled'):
+            media_engine.resolve_google_accounts(self.root, ['acct-c'])
+        with self.assertRaisesRegex(ValueError, 'unknown'):
+            media_engine.resolve_google_accounts(self.root, ['nope'])
+
+    def test_batch_runs_only_in_the_chosen_accounts(self):
+        self.google_profiles(**{'acct-a': True, 'acct-b': True})
+        batch = media_engine.create_batch(self.root, [self.request('a'), self.request('b')], accounts=['acct-b'])
+        stored = media_engine.load_job(self.root, batch['jobs'][0]['job_id'])
+        self.assertEqual(stored['request']['accounts'], ['acct-b'])
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'main', profile_id='google'))
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'a', profile_id='acct-a'))
+        self.assertIsNotNone(media_engine.claim_next_job(self.root, 'visual', 'b', profile_id='acct-b', lane=1, lanes=3))
+
+    def test_single_job_runs_in_a_chosen_non_main_account(self):
+        self.google_profiles(**{'acct-a': True})
+        media_engine.create_job(self.root, self.request('solo', accounts=['acct-a']))
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'main', profile_id='google'))
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'a2', profile_id='acct-a', lane=1, lanes=3),
+                          'a single job stays in the first tab')
+        self.assertIsNotNone(media_engine.claim_next_job(self.root, 'visual', 'a1', profile_id='acct-a', lane=0, lanes=3))
+
+    def test_media_accounts_tool_enables_through_the_desktop(self):
+        self.google_profiles(**{'acct-a': False, 'acct-b': True})
+        calls = []
+        with patch.object(server, 'ROOT', self.root),                 patch.object(server, 'desktop_control', lambda action, payload, timeout=20: calls.append(payload) or {'ok': True}):
+            listing = server.tool_call('media_accounts', {})
+            self.assertEqual(listing['enabled'], ['google', 'acct-b'])
+            server.tool_call('media_accounts', {'action': 'enable', 'accounts': ['Alpha']})
+            server.tool_call('media_accounts', {'action': 'disable', 'accounts': ['all']})
+        self.assertEqual(calls[0], {'provider': 'google-media', 'profile_id': 'acct-a', 'patch': {'enabled': True}})
+        self.assertEqual([call['profile_id'] for call in calls[1:]], ['google', 'acct-a', 'acct-b'])
+
     def test_restart_recovery_leaves_a_live_workers_jobs_alone(self):
         job_id = self.claimed()
         media_engine.append_job_metadata(self.root, job_id, {'submission_phase': 'preparing'})

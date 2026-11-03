@@ -1182,6 +1182,8 @@ MEDIA_REQUEST_PROPERTIES = {
     "generation_settings": {"type": "object"},
     "max_parallel": {"type": "integer", "minimum": 1, "maximum": 30,
                      "description": "Bulk throughput: how many Flow generations this job may share with other queued jobs at once. The desktop worker submits jobs back to back, waits on all of them together and adapts downward if Flow reports it is busy. Default 10."},
+    "accounts": {"type": "array", "items": {"type": "string"},
+                 "description": "Google Media accounts this job may run in (ids or unique names from media_accounts). Omitted: every enabled account (single jobs: the main account). Each must be enabled."},
 }
 TOOLS = [
     {"name": "provider_list", "description": "List TEAMYRA providers/accounts as seen by the desktop app, including ChatGPT, Codex, Claude and Antigravity profiles.",
@@ -1191,9 +1193,9 @@ TOOLS = [
          "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
-    {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode.",
+    {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity", "google-media"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},
@@ -1219,9 +1221,17 @@ TOOLS = [
          "requests": {"type": "array", "minItems": 1, "maxItems": 50,
                       "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
                                 "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
+         "accounts": {"type": "array", "items": {"type": "string"},
+                      "description": "Google Media accounts for every request without its own accounts (ids or unique names from media_accounts)."},
          "max_parallel": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10,
                           "description": "Concurrent Flow generations for this batch; adapts downward automatically when Flow is busy."}},
          "required": ["requests"], "additionalProperties": False}},
+    {"name": "media_accounts", "description": "Google Media (Flow) accounts: list them with id, name, enabled, signed-in and challenged state, or enable/disable some. Enabled accounts take bulk work in parallel; a job can be limited to chosen accounts with its accounts option. Disabling only stops new work: an account still finishes what it already submitted.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["list", "enable", "disable"], "default": "list"},
+         "accounts": {"type": "array", "items": {"type": "string"}, "description": "Account ids or unique names (for enable/disable); [\"all\"] for every account."},
+         "music": {"type": "boolean", "description": "With enable/disable: also switch Flow Music for these accounts."}},
+         "additionalProperties": False}},
     {"name": "media_guide", "description": "Read first before generating media or images: which TEAMYRA tool to use (Flow media_batch, Codex codex_image_batch), how to batch, poll and recover, plus live capacity (Flow tabs, Google connection, Codex image accounts).",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "codex_image_batch", "description": "Generate up to 50 images with Codex's built-in image tool (gpt-image) in parallel and save each to its own file. Each image is its own short Codex run with the reference images attached directly, the usual model and reasoning effort and full image quality (Codex checks the result once and retries once if it clearly misses); several run at once across the signed-in Codex accounts (codex1, codex2), about 1-2 minutes per image instead of a long worker job. Use this instead of a worker job that generates images one by one. Returns a batch_id at once; poll codex_image_status.",
@@ -1714,6 +1724,8 @@ def tool_call(name, a):
         return result
     if name == "media_guide":
         return media_guide.guide(ROOT)
+    if name == "media_accounts":
+        return media_accounts(a.get("action") or "list", a.get("accounts") or [], a.get("music"))
     if name == "codex_image_batch":
         return codex_images.create_batch(ROOT, a["requests"], a["project_path"], max_parallel=a.get("max_parallel"),
                                          accounts=a.get("accounts"))
@@ -1722,7 +1734,8 @@ def tool_call(name, a):
     if name == "codex_image_cancel":
         return codex_images.cancel_batch(ROOT, a["batch_id"])
     if name == "media_batch":
-        result = media_engine.create_batch(ROOT, a["requests"], max_parallel=a.get("max_parallel"))
+        result = media_engine.create_batch(ROOT, a["requests"], max_parallel=a.get("max_parallel"),
+                                           accounts=a.get("accounts"))
         surfaces = {
             "music" if item.get("provider_surface") == "google-flow-music" else "visual"
             for item in result["jobs"]
@@ -2243,6 +2256,37 @@ def heartbeat(token, done, every=60):
         n += 1
         send({"jsonrpc": "2.0", "method": "notifications/progress",
               "params": {"progressToken": token, "progress": n, "message": f"waiting ({n} min)"}})
+
+
+def media_accounts(action, names, music=None):
+    """List Google Media accounts, or enable/disable some through the desktop app."""
+    accounts = media_engine.google_accounts(ROOT)
+    if action == "list":
+        return {"accounts": accounts, "enabled": [item["profile_id"] for item in accounts if item["enabled"]]}
+    if action not in {"enable", "disable"}:
+        raise ValueError("action must be list, enable or disable")
+    if not names:
+        raise ValueError("name the accounts to " + action + ' (ids, unique names or ["all"])')
+    if [str(name).strip().lower() for name in names] == ["all"]:
+        ids = [item["profile_id"] for item in accounts]
+    else:
+        ids = []
+        for name in names:
+            text = str(name or "").strip()
+            match = [item for item in accounts if item["profile_id"] == text] or                 [item for item in accounts if item["name"].lower() == text.lower()]
+            if len(match) != 1:
+                raise ValueError(f"{'unknown' if not match else 'ambiguous'} Google Media account {text!r}; known: " +
+                                 ", ".join(f"{item['profile_id']} ({item['name']})" for item in accounts))
+            ids.append(match[0]["profile_id"])
+    patch = {"enabled": action == "enable"}
+    if music is not None:
+        patch["music"] = music is True
+    changed = []
+    for profile_id in dict.fromkeys(ids):
+        desktop_control("account.update", {"provider": "google-media", "profile_id": profile_id, "patch": patch}, 20)
+        changed.append(profile_id)
+    accounts = media_engine.google_accounts(ROOT)
+    return {"changed": changed, "accounts": accounts, "enabled": [item["profile_id"] for item in accounts if item["enabled"]]}
 
 
 def handle(msg):

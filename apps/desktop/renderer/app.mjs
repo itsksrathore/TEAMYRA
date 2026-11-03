@@ -320,7 +320,7 @@ function agentCardHtml(provider) {
         <div class="profile-row">
           <div class="profile-name">
             <strong>${escapeHtml(profile.name || profile.id)}</strong>
-            <span>${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
+            <span>${provider.id === 'google-media' && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
           </div>
           <div class="profile-actions">
             <button class="profile-action" type="button"
@@ -331,6 +331,9 @@ function agentCardHtml(provider) {
             ${provider.id === 'google-media' && profile.signedIn
               ? `<button class="profile-action" type="button" data-google-bulk="${escapeHtml(profile.id)}" title="Generate many images, videos or sound effects at once">Bulk</button>
                  <button class="profile-action" type="button" data-google-music="${escapeHtml(profile.id)}" title="${profile.musicSignedIn ? 'Open Flow Music' : 'Authorize Flow Music with Google'}">${profile.musicSignedIn ? 'Music' : 'Connect Music'}</button>`
+              : ''}
+            ${provider.id === 'google-media'
+              ? `<button class="profile-action google-enable ${profile.enabled === false ? '' : 'connected'}" type="button" data-google-enabled="${escapeHtml(profile.id)}" data-enabled="${profile.enabled === false ? '0' : '1'}" title="${profile.enabled === false ? 'Off: this account takes no new Flow work. Turn it on to use it for bulk generation.' : 'On: this account takes Flow work in parallel with the other enabled accounts. Turn it off to stop new work here.'}">${profile.enabled === false ? 'Off' : 'On'}</button>`
               : ''}
           </div>
         </div>
@@ -429,6 +432,20 @@ async function refreshAgents(force = false) {
     });
   });
 
+  $('#agentGrid').querySelectorAll('[data-google-enabled]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const enable = button.dataset.enabled !== '1';
+      button.disabled = true;
+      try {
+        await window.teamyra.updateAccount('google-media', button.dataset.googleEnabled, { enabled: enable });
+        await refreshAgents(true);
+      } catch (error) {
+        alert('Could not ' + (enable ? 'enable' : 'disable') + ' this Google account: ' + String(error?.message || error));
+      } finally {
+        if (button.isConnected) button.disabled = false;
+      }
+    });
+  });
   $('#agentGrid').querySelectorAll('[data-google-bulk]').forEach(button => {
     button.addEventListener('click', () => openBulkMedia(button.dataset.googleBulk || 'google').catch(error => alert(String(error?.message || error))));
   });

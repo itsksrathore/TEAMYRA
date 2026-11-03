@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 
 INSTRUCTIONS = """TEAMYRA media and image generation: use the fast paths.
-- Google Flow videos, images and sound effects: media_generate for one, media_batch for two or more (up to 50, run across every signed-in Google account, several Flow tabs each). Poll media_status({batch_id}) every 20-30 s.
+- Google Flow videos, images and sound effects: media_generate for one, media_batch for two or more (up to 50, run across every enabled Google account, several Flow tabs each). Poll media_status({batch_id}) every 20-30 s.
+- Google accounts: media_accounts lists them and enables/disables them; pass accounts=[ids or names] to media_generate/media_batch to run a job only in the accounts you choose.
 - Codex/gpt-image stills (character sheets, look frames, photoreal or illustrated images): codex_image_batch with every image of the job in one call (prompt, output file, reference files, size); poll codex_image_status. Do not start a Codex worker job (start_task/run_ai_worker) to draw images: it makes them one at a time, 2-5 min each.
 - Images that build on earlier images: generate the base images first, then a second batch that lists them as references.
 - Call media_guide for the full rules and current capacity."""
@@ -29,6 +30,11 @@ Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_
 ## Google Flow (`media_batch`)
 - Put every prompt of the job in one `media_batch` call with `project_path`; leave `max_parallel` at 10 unless you must limit it (it caps running jobs per Google account).
 - `media_status` shows which account and tab handles each job (`handled_by`); a submitted job always finishes in the account that submitted it.
+
+## Google accounts (`media_accounts`)
+- `media_accounts` (action `list`) shows every Google Media account: id, name, enabled, signed in, challenged.
+- `media_accounts` with action `enable` / `disable` and `accounts` (ids, unique names or `["all"]`) switches accounts on or off. Enabled accounts share bulk work in parallel; a disabled account takes no new work but finishes what it already submitted.
+- To run a job or batch only in some accounts, pass `accounts: ["google-media-3-3207", ...]` to `media_generate`, to `media_batch` (the whole batch) or to a single request. The named accounts must be enabled. Without `accounts`, batches use every enabled account and single jobs use the main account.
 - Reference images: list TEAMYRA asset ids or project files in `references`; refer to them in the prompt.
 - Poll `media_status({batch_id})` every 20-30 s. Do not cancel or resubmit while jobs are still running.
 - Failed jobs: read `recovery_plan`. `policy_refusal` / `provider_no_result` = Flow refused or made nothing: reword and queue a new job. `result_match_failed` or download failures: `media_recover` / `media_resume_download` (no new credits), or `media_report_issue` to hand them to a helper agent.

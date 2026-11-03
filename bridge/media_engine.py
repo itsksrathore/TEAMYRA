@@ -279,7 +279,7 @@ def _summarize(job):
         "claimed_lane": job.get("claimed_lane"), "claimed_at": job.get("claimed_at"),
         "possible_submission": _possible_submission(job),
         "request": {"surface": request.get("surface"), "max_parallel": request.get("max_parallel"),
-                    "project_path": request.get("project_path")},
+                    "project_path": request.get("project_path"), "accounts": request.get("accounts")},
         "provider_submission": {key: submission.get(key) for key in (
             "submitted_at", "provider_url", "profile_id", "lane", "result_key") if submission.get(key) is not None},
         "resolved_references": [{"asset_id": item.get("asset_id"), "path": item.get("path")}
@@ -297,7 +297,7 @@ def _job_summaries(root):
     folder = _jobs_dir(root)
     cache_path = _index_file(root)
     cache = _read_json(cache_path, {})
-    entries = cache.get("jobs") if isinstance(cache, dict) and cache.get("version") == 1 else None
+    entries = cache.get("jobs") if isinstance(cache, dict) and cache.get("version") == 2 else None
     entries = entries if isinstance(entries, dict) else {}
     fresh, changed = {}, False
     try:
@@ -325,7 +325,7 @@ def _job_summaries(root):
     if changed or len(fresh) != len(entries):
         tmp = cache_path.with_name(cache_path.name + f".tmp-{os.getpid()}-{uuid.uuid4().hex[:6]}")
         try:
-            tmp.write_text(json.dumps({"version": 1, "jobs": fresh}, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(json.dumps({"version": 2, "jobs": fresh}, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, cache_path)
         except OSError:
             pass
@@ -467,6 +467,46 @@ def _normalize_references(values):
     return normalized
 
 
+def google_accounts(root):
+    """Every Google Media account: id, name, enabled, last seen sign-in state."""
+    import media_guide
+    try:
+        saved = json.loads((_media_root(root) / "connection.json").read_text(encoding="utf-8"))
+    except Exception:
+        saved = {}
+    return media_guide._flow_accounts(root, saved if isinstance(saved, dict) else {})
+
+
+def resolve_google_accounts(root, values):
+    """Account ids for a job's `accounts` choice (ids or unique names).
+
+    The job runs only in these accounts; each must exist and be enabled."""
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list) or not values:
+        raise ValueError("accounts must be a non-empty array of Google Media account ids or names")
+    accounts = google_accounts(root)
+    chosen = []
+    for value in values:
+        text = str(value or "").strip()
+        match = [item for item in accounts if item["profile_id"] == text]
+        if not match:
+            match = [item for item in accounts if item["name"].lower() == text.lower()]
+        if not match:
+            raise ValueError(f"unknown Google Media account: {text}; known: " +
+                             ", ".join(f"{item['profile_id']} ({item['name']})" for item in accounts))
+        if len(match) > 1:
+            raise ValueError(f"several Google Media accounts are named {text!r}; use an id: " +
+                             ", ".join(item["profile_id"] for item in match))
+        item = match[0]
+        if not item["enabled"]:
+            raise ValueError(f"Google Media account {item['profile_id']} ({item['name']}) is disabled; "
+                             "enable it with media_accounts first")
+        if item["profile_id"] not in chosen:
+            chosen.append(item["profile_id"])
+    return chosen
+
+
 def _sfx_prompt(prompt, vocals=False):
     base = str(prompt or "").strip()
     lowered = base.lower()
@@ -519,6 +559,8 @@ def normalize_generate_request(root, request):
     }
     if request.get("max_parallel") is not None:
         result["max_parallel"] = max(1, min(int(request.get("max_parallel")), MAX_PARALLEL))
+    if request.get("accounts"):
+        result["accounts"] = resolve_google_accounts(root, request.get("accounts"))
     if request.get("duration") is not None:
         duration = float(request.get("duration"))
         if duration <= 0 or duration > 1800:
@@ -804,7 +846,7 @@ def _new_batch_id():
     return "batch-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
 
 
-def create_batch(root, requests, *, max_parallel=None):
+def create_batch(root, requests, *, max_parallel=None, accounts=None):
     """Queue many independent jobs under one batch id.
 
     Every request is validated before any job is written, so an invalid entry
@@ -823,6 +865,8 @@ def create_batch(root, requests, *, max_parallel=None):
         item = dict(item)
         if max_parallel is not None and item.get("max_parallel") is None:
             item["max_parallel"] = max_parallel
+        if accounts and not item.get("accounts"):
+            item["accounts"] = accounts
         try:
             prepared.append((item, _prepare_job(root, item)))
         except (ValueError, PermissionError) as exc:
@@ -934,6 +978,7 @@ def public_job(job):
         "type": job.get("request", {}).get("type"),
         "prompt_preview": str(job.get("request", {}).get("prompt") or "")[:160],
         "max_parallel": job.get("request", {}).get("max_parallel"),
+        "accounts": job.get("request", {}).get("accounts"),
         "lane": (job.get("provider_submission") or {}).get("lane"),
         "profile_id": _handler(job)[0],
         "handled_by": _handled_by(job),
@@ -1373,6 +1418,10 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
             submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))
             if resume_only and not submitted:
                 continue
+            # The caller chose the accounts this job may run in.
+            wanted = (job.get("request") or {}).get("accounts")
+            if not submitted and wanted and profile not in wanted:
+                continue
             if submitted:
                 # Only the submitting account can see, match and download it.
                 if _job_profile(job) != profile:
@@ -1385,8 +1434,9 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
                 if lane > 0 or _profile_id(job.get("source_profile_id")) != profile:
                     continue
             elif not job.get("batch_id"):
-                # A single job stays in the folder's main Flow project.
-                if lane > 0 or not main:
+                # A single job stays in the folder's main Flow project (of the
+                # main account, or of the first account the caller chose).
+                if lane > 0 or (not main and not wanted):
                     continue
             else:
                 limit = (job.get("request") or {}).get("max_parallel")
