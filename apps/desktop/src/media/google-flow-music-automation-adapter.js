@@ -241,6 +241,8 @@ class GoogleFlowMusicAutomationAdapter {
     if (!cls.signedIn) return { state: 'needs_user_auth', reason: 'login_required' };
     if (cls.rateLimited) return { state: 'rate_limited', reason: 'rate_limited' };
     if (cls.creditsExhausted) return { state: 'failed', reason: 'credits_exhausted' };
+    // On the song's own page (see reconcile) the song is the page.
+    if (this.onSongPage(probe, job)) return { state: 'ready_to_download', result_label: 'song page', result_key: job.provider_submission.result_key };
     const body = lower(probe.text);
     if (/policy|couldn.?t generate|can.?t generate|not allowed/.test(body)) return { state: 'failed', reason: 'policy_refusal' };
     const newResult = this.newResultLabel(probe, job);
@@ -253,14 +255,30 @@ class GoogleFlowMusicAutomationAdapter {
     return { state: 'generating' };
   }
 
+  // The page of a song already identified for this job (/song/<id>).
+  songUrl(job) {
+    const key = String(job?.provider_submission?.result_key || '');
+    return /^\/song\/[\w-]+$/.test(key) ? new URL(key, FLOW_MUSIC_HOME).href : null;
+  }
+
+  onSongPage(probe, job) {
+    const url = this.songUrl(job);
+    return Boolean(url) && String(probe?.url || '').split(/[?#]/)[0] === url;
+  }
+
   async startDownload(job = null) {
     const probe = await this.probe();
-    const label = this.newResultLabel(probe, job);
+    const songPage = this.onSongPage(probe, job);
+    const label = songPage ? 'song page' : this.newResultLabel(probe, job);
     if (!label) throw new Error('download_failure: no new result belonging to this music session');
     const opened = await this.webContents.executeJavaScript(`(() => {
       const wanted = ${JSON.stringify(label)};
       const key = ${JSON.stringify(job.provider_submission?.result_key || '')};
-      const button = [...document.querySelectorAll('button[aria-haspopup="menu"]')].find(el => {
+      // A song page's own menu is the unlabeled one in its main content (the
+      // labeled one in the player bar belongs to whatever is playing).
+      const button = ${songPage} ? [...(document.querySelector('main') || document).querySelectorAll('button[aria-haspopup="menu"]')]
+        .find(el => el.getBoundingClientRect().width > 0 && !el.getAttribute('aria-label') && !el.closest('footer'))
+        : [...document.querySelectorAll('button[aria-haspopup="menu"]')].find(el => {
         if (((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')).trim() !== wanted) return false;
         return !key || el.closest('[role="button"]')?.querySelector('a[href^="/song/"]')?.getAttribute('href') === key;
       });
@@ -320,7 +338,14 @@ class GoogleFlowMusicAutomationAdapter {
     const url = job.provider_submission?.provider_url;
     if (!url || !/\/session\/[^/]+/.test(url)) return { reconciled: false, reason: 'provider_session_identity_missing' };
     await this.webContents.loadURL(url);
-    const state = await this.generationState(job);
+    let state = await this.generationState(job);
+    // Flow Music can drop a finished song from its session's list; a song
+    // already identified for this job is still on its own page.
+    const song = this.songUrl(job);
+    if (state.state === 'generating' && song) {
+      await this.webContents.loadURL(song);
+      state = await this.generationState(job);
+    }
     return { reconciled: true, state };
   }
 }

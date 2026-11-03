@@ -209,6 +209,13 @@ class GoogleVidsAdapter {
         const percent = Number((text.match(/(\\d{1,3})%/) || [])[1]);
         out.push({ kind: 'running', percent: Number.isFinite(percent) ? percent : null, label: text.replace(/^\\d{1,3}%\\s*/, '') });
       }
+      // Failed cards ("That request looks like it goes against our terms") do
+      // not show the prompt; only the page's element id tells them apart.
+      for (const card of document.querySelectorAll('[class*="FailedvideogenerationthumbnailContainer"]')) {
+        if (!card.getBoundingClientRect().width) continue;
+        const message = card.querySelector('[class*="ErrorMessage"]:not([class*="Container"])');
+        out.push({ kind: 'failed', id: card.id || '', label: (message?.innerText || card.innerText || '').trim().slice(0, 300) });
+      }
       return out;
     })()`);
   }

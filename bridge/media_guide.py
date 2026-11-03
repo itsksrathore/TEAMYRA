@@ -46,6 +46,7 @@ Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_
 - `vids_mode`: `create` (prompt + up to 3 `references` images), `animate` (exactly one image in `references`), `extend` (`source_video`: the result holds the original plus the new part, e.g. 10 s + 10 s = 20 s), `edit` (`source_video` + changes, optionally up to 3 images).
 - `duration` 3-10 s (default 10), `aspect_ratio` `16:9` or `9:16`, `generation_resolution` `1080p` (default, native) or `720p`. Refer to reference images in the prompt as Image1, Image2, Image3.
 - `source_video` is a project video file or a TEAMYRA video asset id.
+- A Vids refusal ("goes against our terms") ends the job `policy_refusal` about a minute after submission: reword the prompt and queue it again.
 - Vids keeps an unfinished clip only in its open tab: if TEAMYRA restarts mid-generation the job ends `vids_tab_lost`; queue it again (no credits are lost).
 - Use Flow for features Vids lacks (Flow projects, sound effects, images, music); use Vids when Flow credits are short or native 1080p matters.
 

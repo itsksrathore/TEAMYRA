@@ -474,6 +474,24 @@ class MediaBulkTests(unittest.TestCase):
             recovery.recover_all(self.root, Path(media_engine.__file__).parent, sys.executable)
         self.assertTrue(spy.call_args.kwargs['worker_alive'])
 
+    def test_restart_recovery_ends_jobs_cancelled_while_running(self):
+        # Cancelled mid-submit, then the desktop restarted: requeued with the
+        # cancel flag, no worker would ever claim it again.
+        waiting = self.claimed()
+        media_engine.update_job_state(self.root, waiting, 'submitting')
+        media_engine.cancel_job(self.root, waiting)
+        media_engine.update_job_state(self.root, waiting, 'waiting_for_browser')
+        running = media_engine.create_job(self.root, self.request('running'))['job_id']
+        media_engine.update_job_state(self.root, running, 'generating')
+        media_engine.cancel_job(self.root, running)
+        report = media_engine.recover_incomplete_jobs(self.root, worker_alive=True)
+        self.assertEqual(report['cancelled'], [waiting])
+        self.assertEqual(media_engine.load_job(self.root, waiting)['state'], 'cancelled')
+        self.assertEqual(media_engine.load_job(self.root, running)['state'], 'generating',
+                         'a live worker still owns its running job and ends it itself')
+        media_engine.recover_incomplete_jobs(self.root)
+        self.assertEqual(media_engine.load_job(self.root, running)['state'], 'cancelled')
+
     def test_status_many(self):
         job = media_engine.create_job(self.root, self.request())
         media_engine.cancel_job(self.root, job['job_id'])

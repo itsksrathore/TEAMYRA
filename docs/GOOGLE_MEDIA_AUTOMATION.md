@@ -304,6 +304,13 @@ assets, maintenance issues) is shared with Flow.
   (oldest job first for copies), saves it with the account's session (no
   timeline export), checks it with FFmpeg (resolution, aspect) and registers
   the asset (`provider: google-vids`).
+- **Refusals:** a refused clip's card reads "That request looks like it goes
+  against our terms. Try asking something else." and does not show the prompt
+  (Vids puts the prompt back in the composer). TEAMYRA notes the failure cards
+  already in the feed at each submission; once a job's card is gone for 45 s it
+  takes a new failure card as `policy_refusal`, but only when there are new
+  cards for every such job in the tab. Otherwise it waits and ends
+  `provider_no_result` after 12 minutes.
 - **Restarts:** Vids keeps unfinished clips only in the open tab. A job running
   when TEAMYRA restarts ends `vids_tab_lost` with recovery action `requeue`.
 - **Automation notes (learned live):** buttons respond to `element.click()`,
@@ -485,7 +492,10 @@ registration for all four lanes:
 - SFX: Omni 1.1 Flash at 360p, original-source download and audio-only WAV
   extraction; source cleanup after registration.
 - Music: generated instrumental WAV, exact song overflow/audio download,
-  FFmpeg verification and registration. A second request completed automatically
+  FFmpeg verification and registration. Flow Music's own WAV export can fail
+  ("Download failed"); TEAMYRA then downloads the MP3 and converts it to the
+  requested format. A finished song can drop out of its session's list; once
+  its `/song/<id>` is known, recovery downloads it from the song's own page. A second request completed automatically
   after stable song identity was added.
 
 The music UI did not expose its actual generation model. Lyria 3.5 remains the

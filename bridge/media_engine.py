@@ -1794,25 +1794,35 @@ def recover_incomplete_jobs(root, *, worker_alive=False):
     touched (a core/MCP restart used to requeue jobs the live worker was
     submitting, inviting a second claim and a second paid Generate).
     """
-    report = {"requeued": [], "reconcile_required": [], "unchanged": [], "errors": [],
+    report = {"requeued": [], "reconcile_required": [], "cancelled": [], "unchanged": [], "errors": [],
               "skipped_live_worker": bool(worker_alive)}
-    if worker_alive:
-        return report
     for path in _jobs_dir(root).glob("media-*.json"):
         try:
             with _state_lock(root):
-                _recover_one(root, path, report)
+                _recover_one(root, path, report, worker_alive=worker_alive)
         except Exception as exc:
             report["errors"].append({"path": str(path), "error": str(exc)[:1000]})
     return report
 
 
-def _recover_one(root, path, report):
+def _recover_one(root, path, report, *, worker_alive=False):
     job = _read_json(path, None)
     if not isinstance(job, dict):
         return
     state = job.get("state")
-    if state not in RUNTIME_IN_PROGRESS:
+    # A live worker never holds a cancelled job that is queued or waiting.
+    stale_cancel = state in {"queued", "waiting_for_browser"} or (not worker_alive and state not in TERMINAL_STATES)
+    if job.get("cancel_requested") and stale_cancel:
+        # A job cancelled while it ran ends here: no worker claims it again, so
+        # requeueing it would leave it waiting forever.
+        job["state"] = "cancelled"
+        job["claimed_by"] = None
+        job["reconcile_required"] = False
+        job.setdefault("history", []).append(_event("cancelled", "Cancellation requested before the restart"))
+        report["cancelled"].append(job["job_id"])
+        _save_job(root, job)
+        return
+    if worker_alive or state not in RUNTIME_IN_PROGRESS:
         report["unchanged"].append(job.get("job_id") or path.stem)
         return
     submitted = bool((job.get("provider_submission") or {}).get("submitted_at"))

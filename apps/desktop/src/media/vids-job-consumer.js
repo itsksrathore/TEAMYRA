@@ -75,6 +75,7 @@ class VidsJobConsumer {
     this.ui = new Mutex();
     this.inFlight = new Map();
     this.usedSources = new Set();
+    this.usedFailures = new Set();
     this.running = false;
     this.submitting = false;
     this.busy = false;
@@ -179,9 +180,12 @@ class VidsJobConsumer {
       const source = job.resolved_source?.path || null;
       await this.update(jobId, 'submitting', this.inFlight.size
         ? 'Submitting to Google Vids (' + (this.inFlight.size + 1) + ' running in this tab)' : 'Submitting to Google Vids');
+      let knownFailures = new Set();
       const submission = await this.ui.run(async () => {
         await this.workspace();
         const adapter = await this.adapter();
+        // Failure cards already in the feed belong to earlier clips.
+        knownFailures = new Set((await adapter.cards().catch(() => [])).filter(card => card.kind === 'failed').map(card => card.id));
         return adapter.submit({
           prompt: request.provider_prompt || request.prompt,
           images,
@@ -198,7 +202,7 @@ class VidsJobConsumer {
       } });
       await this.update(jobId, 'generating', 'Google Vids is generating the clip');
       this.inFlight.set(jobId, { jobId, job, planned, prompt: request.provider_prompt || request.prompt,
-        submittedAt: Date.now(), submission: providerSubmission, seenRunning: true });
+        submittedAt: Date.now(), submission: providerSubmission, seenRunning: true, knownFailures });
       this.refreshBusy();
       this.ensureMonitor();
     } catch (error) {
@@ -241,6 +245,16 @@ class VidsJobConsumer {
     const adapter = await this.adapter();
     const cards = await this.ui.run(() => adapter.cards(), 60000);
     const statuses = (await this.core('media.status-many', { job_ids: live.map(ctx => ctx.jobId) }, { timeout: 15000 }))?.jobs || {};
+    // Jobs whose card is gone (neither running nor done) past the grace
+    // period. New failure cards go to them only when there are enough for all
+    // of them: a failure card does not say which prompt failed.
+    const missing = live.filter(ctx => !statuses[ctx.jobId]?.cancel_requested &&
+      !cards.some(card => (card.kind === 'running' || (card.kind === 'done' && !this.usedSources.has(card.src))) && samePrompt(card.label, ctx.prompt)) &&
+      Date.now() - ctx.submittedAt >= MISSING_GRACE_MS && Date.now() - (ctx.lastRunningAt || ctx.submittedAt) >= MISSING_GRACE_MS);
+    const newFailures = cards.filter(card => card.kind === 'failed' && card.id && !this.usedFailures.has(card.id) &&
+      missing.every(ctx => !ctx.knownFailures?.has(card.id)));
+    const refusals = new Map(missing.length && newFailures.length >= missing.length
+      ? missing.map((ctx, index) => [ctx.jobId, newFailures[index]]) : []);
     for (const ctx of live) {
       if (statuses[ctx.jobId]?.cancel_requested) {
         this.finish(ctx);
@@ -259,11 +273,13 @@ class VidsJobConsumer {
       const age = Date.now() - ctx.submittedAt;
       if (running) { ctx.lastRunningAt = Date.now(); continue; }
       if (age < MISSING_GRACE_MS || Date.now() - (ctx.lastRunningAt || ctx.submittedAt) < MISSING_GRACE_MS) continue;
-      const failure = await this.ui.run(() => adapter.failureFor(ctx.prompt), 60000).catch(() => null);
+      const refusal = refusals.get(ctx.jobId);
+      if (refusal) this.usedFailures.add(refusal.id);
+      const failure = refusal?.label || await this.ui.run(() => adapter.failureFor(ctx.prompt), 60000).catch(() => null);
       if (failure) {
         this.finish(ctx);
         await this.fail(ctx.jobId, new Error('Google Vids did not make this clip: ' + failure),
-          /violat|policy|not allowed|different prompt/i.test(failure) ? 'policy_refusal' : 'generation_failure');
+          /violat|policy|not allowed|different prompt|against our terms|asking something else/i.test(failure) ? 'policy_refusal' : 'generation_failure');
       } else if (age > NO_RESULT_MS) {
         this.finish(ctx);
         await this.fail(ctx.jobId, new Error('provider_no_result: Google Vids showed no result after ' + Math.round(age / 1000) + ' s'));

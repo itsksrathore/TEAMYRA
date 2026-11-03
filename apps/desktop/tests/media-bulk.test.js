@@ -901,8 +901,11 @@ async function musicFallbackTests(temp) {
   const jobs = [{ job_id: 'song-1', created_at: 0, request: { type: 'instrumental', prompt: 'battle drums', format: 'wav' } }];
   const { core, records } = fakeCore(temp, jobs);
   const music = (await core('media.claim', {}));
-  const loaded = loadConsumer(async (name, args) => name === 'media.prepare-output'
-    ? { path: path.join(temp, 'song-1.wav'), format: 'wav' } : core(name, args));
+  const registered = [];
+  const loaded = loadConsumer(async (name, args) => {
+    if (name === 'media.register-asset') registered.push(args);
+    return name === 'media.prepare-output' ? { path: path.join(temp, 'song-1.wav'), format: 'wav' } : core(name, args);
+  });
   const consumer = new loaded.MediaJobConsumer({ surface: 'music', downloadManager: {
     expect: ({ destination }) => { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, 'mp3 bytes');
       return Promise.resolve({ path: destination, bytes: 9, attribution: 'single' }); }, cancelJob() {} },
@@ -913,9 +916,35 @@ async function musicFallbackTests(temp) {
   assert.equal(globalThis.__extractCalls[0][2], 'wav');
   assert.equal(fs.readFileSync(path.join(temp, 'song-1.wav'), 'utf8'), 'converted', 'the job gets the converted WAV');
   assert.equal(records.get('song-1').state, 'completed');
+  assert.equal(registered[0].metadata.mime, 'audio/wav', 'the asset is labeled with the converted format');
 }
 
 // Flow says "Upscaling failed!": ask once more, then deliver the 720p original.
+// Flow Music can drop a finished song from its session's list; a song already
+// identified for the job is reconciled from its own page.
+async function musicSongPageTests() {
+  const { GoogleFlowMusicAutomationAdapter } = require('../src/media/google-flow-music-automation-adapter');
+  const loaded = [];
+  let url = '';
+  const music = new GoogleFlowMusicAutomationAdapter({ loadURL: async next => { loaded.push(next); url = next; }, getURL: () => url });
+  // A song page's footer says "policy"; that is no refusal.
+  music.probe = async () => ({ url, text: /\/song\//.test(url) ? 'Privacy policy' : '', resultEntries: [], resultLabels: [] });
+  music.classifyProbe = () => ({ signedIn: true });
+  const job = { request: { type: 'music' }, provider_submission: { provider_url: 'https://www.flowmusic.app/session/s1',
+    baseline_result_labels: [], baseline_result_keys: [], result_key: '/song/a71769af-ca63' } };
+  const { state } = await music.reconcile(job);
+  assert.deepEqual(loaded, ['https://www.flowmusic.app/session/s1', 'https://www.flowmusic.app/song/a71769af-ca63']);
+  assert.equal(state.state, 'ready_to_download');
+  assert.equal(state.result_key, '/song/a71769af-ca63');
+  // Without an identified song it keeps waiting on the session page.
+  loaded.length = 0;
+  const unknown = { ...job, provider_submission: { ...job.provider_submission, result_key: undefined } };
+  url = '';
+  music.probe = async () => ({ url, text: '', resultEntries: [], resultLabels: [] });
+  assert.equal((await music.reconcile(unknown)).state.state, 'generating');
+  assert.deepEqual(loaded, ['https://www.flowmusic.app/session/s1']);
+}
+
 async function upscaleFailureTests(temp) {
   const jobs = [{ job_id: 'up-1', created_at: 0, request: { type: 'video', prompt: 'a paid clip',
     generation_settings: { download_quality: '1080p' } } }];
@@ -953,6 +982,7 @@ async function main() {
     await pipelineTests(temp);
     await laneTests(temp);
     await musicFallbackTests(temp);
+    await musicSongPageTests();
     await upscaleFailureTests(temp);
     await referenceRetryTests();
     await accountTests(temp);

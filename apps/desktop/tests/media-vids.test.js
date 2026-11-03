@@ -98,6 +98,24 @@ async function consumerTests(temp) {
   assert.equal(records.get('v3').failure.category, 'policy_refusal');
   assert.equal(consumer.busy, false);
 
+  // A refusal card shows no prompt: jobs whose card vanished take new refusal
+  // cards only when there is one for each of them.
+  const terms = 'That request looks like it goes against our terms. Try asking something else.';
+  const refused = fakeCore(temp, [{ job_id: 'r1', request: { type: 'video', prompt: 'x' } }, { job_id: 'r2', request: { type: 'video', prompt: 'y' } }]);
+  let feed = [{ kind: 'failed', id: 'old', label: terms }, { kind: 'failed', id: 'f1', label: terms }];
+  const tab = new VidsJobConsumer({ workerName: 'vids-test', provider: {}, core: refused.core, pollMs: 20 });
+  tab.adapter = async () => ({ cards: async () => feed, failureFor: async () => null });
+  for (const [jobId, prompt] of [['r1', 'A knight rides over a dune crest at dawn'], ['r2', 'Riders fan out across the sand at full gallop']]) {
+    tab.inFlight.set(jobId, { jobId, prompt, submittedAt: Date.now() - 120000, knownFailures: new Set(['old']) });
+  }
+  await tab.pollOnce();
+  assert.equal(refused.records.get('r1').state, 'queued', 'one new refusal card cannot be pinned on one of two jobs');
+  feed = [...feed, { kind: 'failed', id: 'f2', label: terms }];
+  await tab.pollOnce();
+  assert.equal(refused.records.get('r1').failure.category, 'policy_refusal');
+  assert.equal(refused.records.get('r2').failure.category, 'policy_refusal');
+  assert.match(refused.records.get('r2').detail, /against our terms/);
+
   // A job submitted before a restart cannot be found again in a new tab.
   const lost = fakeCore(temp, [{ job_id: 'lost', request: { type: 'video', prompt: 'x' }, provider_submission: { submitted_at: 1 } }]);
   const restarted = new VidsJobConsumer({ workerName: 'vids-test', provider: {}, core: lost.core, pollMs: 20 });
