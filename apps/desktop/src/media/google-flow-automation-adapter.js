@@ -1478,6 +1478,18 @@ class GoogleFlowAutomationAdapter {
     return { scanned: seen.size, found };
   }
 
+  // Flow's "Upscaling failed!" notice (dismissed once seen).
+  async upscaleFailedShown() {
+    return this.executePageScript(`(() => {
+      const notice = [...document.querySelectorAll('[role=alert],[role=status],[aria-live]')]
+        .find(el => el.getBoundingClientRect().width > 0 && /upscaling failed/i.test(el.innerText || ''));
+      if (!notice) return false;
+      const dismiss = [...notice.querySelectorAll('button')].find(button => /dismiss/i.test(button.innerText || button.getAttribute('aria-label') || ''));
+      if (dismiss) dismiss.click();
+      return true;
+    })()`);
+  }
+
   async revealResult(key) {
     if (!key) return false;
     if ((await this.resultSnapshot()).some(result => result.key === key)) return true;

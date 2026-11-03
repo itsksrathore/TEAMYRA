@@ -290,11 +290,30 @@ class GoogleFlowMusicAutomationAdapter {
         if (direct) { direct.click(); return 'download'; }
         return 'waiting';
       })()`, true);
-      if (state === 'download') return { ok: true, result_label: label, format: format.toLowerCase(), audio_only: true };
+      if (state === 'download') {
+        // Flow Music's WAV export can fail on its side ("Download failed").
+        // Then take MP3 (TEAMYRA converts it to the requested format).
+        if (format !== 'MP3' && await this.downloadFailedShown(45000)) {
+          return { ...await this.startDownload({ ...job, request: { ...job.request, format: 'mp3' } }), fallback_from: format.toLowerCase() };
+        }
+        return { ok: true, result_label: label, format: format.toLowerCase(), audio_only: true };
+      }
       if (state === 'submenu') submenuOpened = true;
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     throw new Error('selector_failure: Flow Music audio download menu unavailable; submenu=' + submenuOpened);
+  }
+
+  // True when Flow Music shows its "Download failed" notice within timeoutMs.
+  async downloadFailedShown(timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const failed = await this.webContents.executeJavaScript(`[...document.querySelectorAll('*')].some(el =>
+        el.childElementCount === 0 && el.getBoundingClientRect().width > 0 && /^download failed$/i.test(el.textContent.trim()))`, true).catch(() => false);
+      if (failed) return true;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return false;
   }
 
   async reconcile(job) {

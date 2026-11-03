@@ -64,12 +64,21 @@ class GoogleVidsProvider {
     return view.webContents.getURL();
   }
 
-  destroy() {
+  // Closing a tab while a DevTools command or page load is still pending
+  // crashed the whole desktop (twice, after a Vids page hung). Detach and
+  // stop first, and keep a tab whose page calls have not returned yet.
+  destroy({ force = false } = {}) {
+    if (!force && this.adapter?.pending > 0) return false;
     if (this.view && !this.view.webContents.isDestroyed()) {
+      const wc = this.view.webContents;
+      try { if (wc.debugger.isAttached()) wc.debugger.detach(); } catch {}
+      try { wc.stop(); } catch {}
       try { this.window.contentView.removeChildView(this.view); } catch {}
-      try { this.view.webContents.close(); } catch {}
+      try { wc.close(); } catch {}
     }
     this.view = null;
+    this.adapter = null;
+    return true;
   }
 }
 

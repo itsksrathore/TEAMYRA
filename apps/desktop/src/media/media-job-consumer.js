@@ -489,6 +489,7 @@ class MediaJobConsumer {
     const waitsForUpscale = request.type === 'image' || request.type === 'video';
     let downloaded;
     let downloadAction;
+    let upscaleFallback = false;
     const savedDownload = job.download;
     if (savedDownload?.completed && savedDownload.path === downloadPath &&
         fs.existsSync(downloadPath) && fs.statSync(downloadPath).size === savedDownload.bytes) {
@@ -508,15 +509,36 @@ class MediaJobConsumer {
         });
         // Observe rejection immediately while the adapter waits on an upscale.
         downloadPromise.catch(() => {});
+        let watching = true;
         try {
           // Only the menu activation holds the page; the upscale wait does not.
           downloadAction = await this.ui.run(() => adapter.startDownload(targetJob, { excludeKeys }));
-          return await downloadPromise;
+          // Flow says "Upscaling failed!" within seconds when it cannot upscale a
+          // result; the file then never comes. The notice names no result, so it
+          // only counts while this is the tab's only download.
+          const upscaleFailed = new Promise((_, reject) => {
+            const wanted = targetJob.request?.generation_settings?.download_quality;
+            if (!waitsForUpscale || wanted === 'source' || !adapter.upscaleFailedShown) return;
+            const poll = async () => {
+              if (!watching) return;
+              if (this.activeDownloads.size <= 1 && await adapter.upscaleFailedShown().catch(() => false)) {
+                reject(new Error('download_failure: upscale_failed: Google Flow could not upscale this result'));
+                return;
+              }
+              setTimeout(poll, 3000);
+            };
+            setTimeout(poll, 3000);
+          });
+          upscaleFailed.catch(() => {});
+          return await Promise.race([downloadPromise, upscaleFailed]);
         } catch (error) {
           this.downloadManager.cancelJob(jobId);
           throw error;
+        } finally {
+          watching = false;
         }
       };
+      const lost = error => /timed out waiting for google media download|upscale_failed/i.test(String(error?.message || error));
       try { downloaded = await attemptDownload(downloadJob); }
       catch (error) {
         if ((await callCore('media.status', { job_id: jobId })).cancel_requested) return this.update(jobId, 'cancelled', 'Cancelled during download');
@@ -526,9 +548,20 @@ class MediaJobConsumer {
           downloaded = await attemptDownload({ ...downloadJob, request: { ...request,
             generation_settings: { ...request.generation_settings, download_quality: '2x' }
           } });
-        } else if (waitsForUpscale && /timed out waiting for google media download/i.test(String(error?.message || error))) {
-          await this.update(jobId, 'downloading', 'Download did not arrive; requesting it again');
-          downloaded = await attemptDownload({ ...downloadJob, downloadRetry: true });
+        } else if (waitsForUpscale && lost(error)) {
+          await this.update(jobId, 'downloading', /upscale_failed/.test(String(error?.message))
+            ? 'Flow could not upscale this result; asking again' : 'Download did not arrive; requesting it again');
+          try {
+            downloaded = await attemptDownload({ ...downloadJob, downloadRetry: true });
+          } catch (retryError) {
+            // The clip is paid for: when Flow will not upscale it, deliver the
+            // original (720p video) and say so, instead of failing again and again.
+            if (request.type !== 'video' || !lost(retryError)) throw retryError;
+            await this.update(jobId, 'downloading', 'Flow could not upscale this result; downloading the original 720p video');
+            downloaded = await attemptDownload({ ...downloadJob, request: { ...request,
+              generation_settings: { ...request.generation_settings, download_quality: 'source' } } });
+            upscaleFallback = true;
+          }
         } else {
           throw error;
         }
@@ -540,7 +573,14 @@ class MediaJobConsumer {
 
     let stagedPath = downloaded.path;
     if ((await callCore('media.status', { job_id: jobId })).cancel_requested) return this.update(jobId, 'cancelled', 'Cancelled after download');
-    if (isImage || isSfx) stagedPath = path.join(path.dirname(downloadPath), 'output.' + planned.format);
+    // Flow Music handed over another format (its WAV export failed): convert.
+    const musicFallback = this.surface === 'music' && downloadAction?.fallback_from && downloadAction.format !== planned.format;
+    if (isImage || isSfx || musicFallback) stagedPath = path.join(path.dirname(downloadPath), 'output.' + planned.format);
+    if (musicFallback) {
+      await this.update(jobId, 'extracting_audio', 'Flow Music ' + downloadAction.fallback_from.toUpperCase() +
+        ' export failed; converting its ' + downloadAction.format.toUpperCase() + ' to ' + planned.format.toUpperCase());
+      await extractAudio(downloaded.path, stagedPath, planned.format);
+    }
     if (isImage) await convertImage(downloaded.path, stagedPath, planned.format);
     if (isSfx) {
       await this.update(jobId, 'extracting_audio', 'Extracting sound effect audio');
@@ -563,7 +603,7 @@ class MediaJobConsumer {
       provider_project_id: providerSubmission.provider_project_id || providerSubmission.provider_url?.match(/\/project\/([^/?#]+)/)?.[1],
       provider_url: providerSubmission.provider_url,
       generation_settings: request.generation_settings || {},
-      metadata: { reference_attachments: providerSubmission.reference_attachments || [], reference_mode: providerSubmission.reference_mode || 'ingredients', mime: isImage ? 'image/' + (['jpg', 'jpeg'].includes(planned.format) ? 'jpeg' : planned.format) : isSfx ? (planned.format === 'wav' ? 'audio/wav' : 'audio/' + planned.format) : downloaded.mime || '', bytes: fs.statSync(finalPath).size, google_profile_id: this.profileId, download_action: downloadAction || null, download_attribution: downloaded.attribution || null, verified_output: outputInfo, selected_settings: providerSubmission.selected_settings || null, actual_model: providerSubmission.actual_model || null, batch_id: job.batch_id || null }
+      metadata: { ...(upscaleFallback ? { upscale_failed: true, delivered_quality: '720p original (Flow could not upscale)' } : {}), reference_attachments: providerSubmission.reference_attachments || [], reference_mode: providerSubmission.reference_mode || 'ingredients', mime: isImage ? 'image/' + (['jpg', 'jpeg'].includes(planned.format) ? 'jpeg' : planned.format) : isSfx ? (planned.format === 'wav' ? 'audio/wav' : 'audio/' + planned.format) : downloaded.mime || '', bytes: fs.statSync(finalPath).size, google_profile_id: this.profileId, download_action: downloadAction || null, download_attribution: downloaded.attribution || null, verified_output: outputInfo, selected_settings: providerSubmission.selected_settings || null, actual_model: providerSubmission.actual_model || null, batch_id: job.batch_id || null }
     }, { timeout: 20000 });
     if (isSfx) await callCore('media.cleanup-staging', { job_id: jobId });
     else { try { fs.unlinkSync(downloadPath); } catch {} }

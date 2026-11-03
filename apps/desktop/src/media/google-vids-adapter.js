@@ -40,16 +40,20 @@ class GoogleVidsAdapter {
     this.webContents = webContents;
     this.chooserFiles = null;
     this.step = 'idle';
+    // Page and DevTools calls still waiting for an answer (the tab must not be
+    // closed under them).
+    this.pending = 0;
   }
 
   async exec(source, timeoutMs = SCRIPT_TIMEOUT_MS) {
     let timer;
+    this.pending += 1;
     try {
       return await Promise.race([
         this.webContents.executeJavaScript(source, true),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('browser_failure: Vids page script timed out')), timeoutMs); })
       ]);
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); this.pending -= 1; }
   }
 
   async wait(read, label, timeoutMs = 20000, everyMs = 300) {
@@ -114,11 +118,12 @@ class GoogleVidsAdapter {
     const wc = this.webContents;
     if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
     let timer;
+    this.pending += 1;
     try {
       return await Promise.race([wc.debugger.sendCommand(method, params), new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error('browser_failure: DevTools ' + method + ' did not answer (step: ' + this.step + ')')), timeoutMs);
       })]);
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); this.pending -= 1; }
   }
 
   // A hidden view only hit-tests input against a drawn frame: a tiny capture

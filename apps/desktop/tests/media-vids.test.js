@@ -110,10 +110,35 @@ async function consumerTests(temp) {
   assert.equal(new WorkspaceStore(path.join(temp, 'ws.json')).get('google:tab1'), 'https://docs.google.com/videos/d/one/edit');
 }
 
+// Closing a Vids tab under a pending page call crashed the desktop.
+function providerCloseTests() {
+  const Module = require('node:module');
+  const original = Module._load;
+  Module._load = function (request, ...rest) {
+    if (request === 'electron') return { WebContentsView: class {} };
+    return original.call(this, request, ...rest);
+  };
+  delete require.cache[require.resolve('../src/media/google-vids-provider')];
+  const { GoogleVidsProvider } = require('../src/media/google-vids-provider');
+  Module._load = original;
+  const calls = [];
+  const wc = { isDestroyed: () => false, stop: () => calls.push('stop'), close: () => calls.push('close'),
+    debugger: { isAttached: () => true, detach: () => calls.push('detach') } };
+  const provider = new GoogleVidsProvider({ window: { contentView: { removeChildView: () => calls.push('remove') } }, sessionManager: {} });
+  provider.view = { webContents: wc };
+  provider.adapter = { pending: 1 };
+  assert.equal(provider.destroy(), false, 'a tab with a pending call is kept');
+  assert.deepEqual(calls, []);
+  assert.equal(provider.destroy({ force: true }), true, 'shutdown still closes it');
+  assert.deepEqual(calls, ['detach', 'stop', 'remove', 'close'], 'DevTools detached and loading stopped before close');
+  assert.equal(provider.view, null);
+}
+
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-vids-'));
   try {
     labelTests();
+    providerCloseTests();
     await consumerTests(temp);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });

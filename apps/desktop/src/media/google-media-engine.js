@@ -626,7 +626,7 @@ class GoogleMediaProfileRuntime {
     this.stopConsumers();
     this.visual.destroy();
     for (const lane of this.extraLanes) lane.provider.destroy();
-    for (const tab of this.vidsTabs) tab.provider.destroy();
+    for (const tab of this.vidsTabs) tab.provider.destroy({ force: true });
     this.music.destroy();
     this.started = false;
   }

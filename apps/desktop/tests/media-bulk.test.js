@@ -358,7 +358,7 @@ function loadConsumer(core) {
   const stubs = {
     '../core-api': { callCore: core },
     './media-output-validator': { verifyMediaOutput: async () => ({ decoded: true }), convertImage: async () => {}, hammingDistance },
-    './media-audio-processor': { extractAudio: async () => {} }
+    './media-audio-processor': { extractAudio: async (...args) => { (globalThis.__extractCalls ||= []).push(args); fs.writeFileSync(args[1], 'converted'); } }
   };
   vm.runInNewContext(source, { module, require: name => stubs[name] || localRequire(name), setTimeout, clearTimeout, console, Date, Promise });
   return module.exports;
@@ -896,6 +896,55 @@ async function referenceRetryTests() {
   await assert.rejects(strict.prepare([{ path: 'a.png' }]), /upload_terms_required/, 'other failures are not retried');
 }
 
+// Flow Music's WAV export failed and it handed over MP3: the job still gets WAV.
+async function musicFallbackTests(temp) {
+  const jobs = [{ job_id: 'song-1', created_at: 0, request: { type: 'instrumental', prompt: 'battle drums', format: 'wav' } }];
+  const { core, records } = fakeCore(temp, jobs);
+  const music = (await core('media.claim', {}));
+  const loaded = loadConsumer(async (name, args) => name === 'media.prepare-output'
+    ? { path: path.join(temp, 'song-1.wav'), format: 'wav' } : core(name, args));
+  const consumer = new loaded.MediaJobConsumer({ surface: 'music', downloadManager: {
+    expect: ({ destination }) => { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, 'mp3 bytes');
+      return Promise.resolve({ path: destination, bytes: 9, attribution: 'single' }); }, cancelJob() {} },
+    provider: { view: { webContents: { id: 40 } }, adapter: { startDownload: async () => ({ ok: true, format: 'mp3', fallback_from: 'wav', audio_only: true }) } } });
+  globalThis.__extractCalls = [];
+  await consumer.downloadAndRegister({ job: music, jobId: 'song-1', planned: { path: path.join(temp, 'song-1.wav'), format: 'wav' } });
+  assert.equal(globalThis.__extractCalls.length, 1, 'the MP3 is converted');
+  assert.equal(globalThis.__extractCalls[0][2], 'wav');
+  assert.equal(fs.readFileSync(path.join(temp, 'song-1.wav'), 'utf8'), 'converted', 'the job gets the converted WAV');
+  assert.equal(records.get('song-1').state, 'completed');
+}
+
+// Flow says "Upscaling failed!": ask once more, then deliver the 720p original.
+async function upscaleFailureTests(temp) {
+  const jobs = [{ job_id: 'up-1', created_at: 0, request: { type: 'video', prompt: 'a paid clip',
+    generation_settings: { download_quality: '1080p' } } }];
+  const { core: base, records } = fakeCore(temp, jobs);
+  const registered = [];
+  const core = async (name, args) => { if (name === 'media.register-asset') registered.push(args); return base(name, args); };
+  const loaded = loadConsumer(core);
+  const requested = [];
+  const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager: {
+    expect: ({ destination }) => new Promise(resolve => {
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      consumer.__resolve = () => { fs.writeFileSync(destination, 'original'); resolve({ path: destination, bytes: 8, attribution: 'single' }); };
+    }), cancelJob() {} },
+    provider: { view: { webContents: { id: 50 } }, adapter: {
+      startDownload: async job => {
+        const quality = job.request.generation_settings.download_quality;
+        requested.push(quality);
+        if (quality === 'source') setTimeout(() => consumer.__resolve(), 10);
+        return { quality };
+      },
+      upscaleFailedShown: async () => requested[requested.length - 1] !== 'source'
+    } } });
+  await consumer.downloadAndRegister({ job: records.get('up-1'), jobId: 'up-1', resultKey: 'k',
+    planned: { path: path.join(temp, 'up-1.mp4'), format: 'mp4' } });
+  assert.deepEqual(requested, ['1080p', '1080p', 'source'], 'one more try, then the original');
+  assert.equal(records.get('up-1').state, 'completed');
+  assert.equal(registered[0].metadata.upscale_failed, true, 'the asset says it is the 720p original');
+}
+
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-media-bulk-'));
   try {
@@ -903,6 +952,8 @@ async function main() {
     await adapterTests();
     await pipelineTests(temp);
     await laneTests(temp);
+    await musicFallbackTests(temp);
+    await upscaleFailureTests(temp);
     await referenceRetryTests();
     await accountTests(temp);
   } finally {

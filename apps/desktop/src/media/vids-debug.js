@@ -36,7 +36,18 @@ async function vidsDebug(engine, window, payload = {}) {
   if (process.env.TEAMYRA_DEV_DEBUG !== '1' && !fs.existsSync(flag)) throw new Error('vids.debug needs TEAMYRA_DEV_DEBUG=1');
   globalThis.__teamyraVidsActiveAt = Date.now();
   // vids_tab: inspect a worker's own Vids tab instead of the debug tab.
-  const current = payload.vids_tab
+  // music: inspect the account's Flow Music tab (read and screenshot only).
+  const flowProvider = runtime => {
+    const lane = Number(payload.flow_tab) - 1;
+    const target = lane > 0 ? runtime.extraLanes[lane - 1].provider : runtime.visual;
+    return { ensureView: () => target.ensureView(), get view() { return target.view; } };
+  };
+  const current = payload.flow_tab
+    ? (() => { const runtime = engine.ensureProfile(payload.profile_id || 'google'); return { runtime, provider: flowProvider(runtime) }; })()
+    : payload.music
+    ? (() => { const runtime = engine.ensureProfile(payload.profile_id || 'google');
+      return { runtime, provider: { ensureView: () => runtime.music.ensureView(), get view() { return runtime.music.view; } } }; })()
+    : payload.vids_tab
     ? (() => { const runtime = engine.ensureProfile(payload.profile_id || 'google');
       return { runtime, provider: runtime.vidsTabs[Number(payload.vids_tab) - 1].provider }; })()
     : tab(engine, window, payload.profile_id, payload.tab || 'debug');
@@ -150,6 +161,24 @@ async function vidsDebug(engine, window, payload = {}) {
       } catch (error) {
         return { ok: false, ms: Date.now() - started, error: String(error?.message || error) };
       }
+    }
+    case 'watch_downloads': {
+      // Record every download this account's session starts (and how it ends).
+      const manager = runtime.downloadManager;
+      store.downloadEvents = store.downloadEvents || [];
+      if (!manager.__watched) {
+        const original = manager.handleDownload.bind(manager);
+        manager.handleDownload = (event, item, webContents) => {
+          const record = { at: new Date().toISOString(), url: String(item.getURL?.() || '').slice(0, 160),
+            file: item.getFilename?.(), mime: item.getMimeType?.(), webContentsId: webContents?.id,
+            expected: manager.pendingFor(Number(webContents?.id)).map(entry => entry.jobId) };
+          store.downloadEvents.push(record);
+          item.once?.('done', (_e, state) => { record.state = state; record.bytes = item.getReceivedBytes?.(); });
+          return original(event, item, webContents);
+        };
+        manager.__watched = true;
+      }
+      return { watching: true, events: store.downloadEvents.slice(-20), musicWebContents: runtime.music.view?.webContents?.id };
     }
     case 'download_status': return [...downloads.values()];
     case 'fetch': {

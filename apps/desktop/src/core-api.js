@@ -81,7 +81,23 @@ async function resolvePython() {
   throw new Error('Python 3 was not found. Set TEAMYRA_PYTHON to the Python executable.');
 }
 
+// "media state is busy" means the job-state lock could not be taken: nothing
+// was done, so the call is safe to repeat. Under heavy bulk load (many Flow and
+// Vids tabs) a single wait of 15 s sometimes failed a job before Generate.
+const BUSY_RETRIES = 3;
+
 async function callCore(action, payload = {}, options = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await callCoreOnce(action, payload, options);
+    } catch (error) {
+      if (attempt >= BUSY_RETRIES || !/media state is busy/i.test(String(error?.message || error))) throw error;
+      await new Promise(resolve => setTimeout(resolve, 500 + attempt * 1000 + Math.random() * 500));
+    }
+  }
+}
+
+async function callCoreOnce(action, payload = {}, options = {}) {
   if (!/^[a-z0-9.-]+$/i.test(String(action || ''))) {
     throw new Error('Invalid core action');
   }
