@@ -298,3 +298,23 @@ test('status refresh restores existing pooled connections after a desktop restar
   assert.equal(service.getState('account-3').state, 'not_connected');
   assert.deepEqual(calls.map(c => c.name), ['mcp_pool_list']);
 });
+
+test('a saved login survives a restart and opening it does not start a new sign-in', async t => {
+  // After a restart the adapter is not running, but the profile's OAuth store
+  // still holds its login. Treating that as signed out made every launch start
+  // a new store and a browser sign-in.
+  const { service, root, calls } = fixture(t, async name => name === 'mcp_pool_list' ? { servers: [] }
+    : name === 'mcp_pool_tools' ? { tools: [{ name: 'text_to_speech', inputSchema: { type: 'object' } }] } : {});
+  const store = path.join(service.spec('account-1').env.MCP_REMOTE_CONFIG_DIR, 'mcp-remote-v1');
+  fs.mkdirSync(store, { recursive: true });
+  fs.writeFileSync(path.join(store, 'abc_tokens.json'), JSON.stringify({ access_token: 'saved', refresh_token: 'r' }));
+  await service.syncStatuses(['account-1', 'account-2']);
+  assert.equal(service.getState('account-1').savedLogin, true);
+  assert.equal(service.getState('account-2').savedLogin, false);
+  const before = JSON.parse(fs.readFileSync(path.join(root, 'profiles', 'elevenlabs', 'account-1', 'teamyra-profile.json'), 'utf8'));
+  await service.connect('account-1');
+  const after = JSON.parse(fs.readFileSync(path.join(root, 'profiles', 'elevenlabs', 'account-1', 'teamyra-profile.json'), 'utf8'));
+  assert.equal(after.oauth_login_revision, before.oauth_login_revision, 'the saved login store is kept');
+  assert.equal(service.getState('account-1').state, 'connected');
+  assert.ok(calls.some(c => c.name === 'mcp_pool_register' && c.args.env.MCP_REMOTE_CONFIG_DIR === path.dirname(store)));
+});

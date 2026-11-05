@@ -31,6 +31,7 @@ export async function openElevenLabsMcp(profile, onChange = () => {}, { startLog
   const $ = selector => dialog.querySelector(selector);
   let tools = [];
   let busy = false;
+  let loggedIn = false;
   function showState(state) {
     $('[data-state]').textContent = state.state === 'connected'
       ? `MCP connected · ${state.toolCount} tools · server: ${state.server}`
@@ -38,7 +39,8 @@ export async function openElevenLabsMcp(profile, onChange = () => {}, { startLog
         ? 'Browser authorization received. Loading ElevenLabs MCP tools…'
         : 'Complete ElevenLabs sign-in in the browser. This window will update automatically…'
       : `MCP ${state.state.replaceAll('_', ' ')} · server: ${state.server}`;
-    $('[data-connect]').textContent = state.state === 'connected' ? 'Switch account' : 'Connect / Login';
+    loggedIn = state.state === 'connected' || state.savedLogin === true;
+    $('[data-connect]').textContent = loggedIn ? 'Switch account' : 'Connect / Login';
   }
   async function run(fn) {
     if (busy) return;
@@ -81,7 +83,9 @@ export async function openElevenLabsMcp(profile, onChange = () => {}, { startLog
     $('[data-refresh]').textContent = 'Refresh tools';
     showState(result);
   });
-  $('[data-connect]').onclick = () => connect(true);
+  // Switch account starts a new sign-in; Connect / Login uses this profile's
+  // own store (the browser opens only when it holds no login).
+  $('[data-connect]').onclick = () => connect(loggedIn);
   $('[data-refresh]').onclick = () => connect(false);
   $('[data-form]').onsubmit = event => {
     event.preventDefault();
@@ -95,10 +99,11 @@ export async function openElevenLabsMcp(profile, onChange = () => {}, { startLog
     });
   };
   dialog.showModal();
-  if (startLogin) await connect(true);
+  if (startLogin) await connect(false);
   else {
     const state = await window.teamyra.elevenLabsMcpStatus(profile.id);
     showState(state);
-    if (state.state === 'connected' || state.state === 'connecting') await connect(false);
+    // A saved login loads its tools without a new browser sign-in.
+    if (state.state === 'connected' || state.state === 'connecting' || state.savedLogin === true) await connect(false);
   }
 }

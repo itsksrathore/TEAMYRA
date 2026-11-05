@@ -251,8 +251,17 @@ class ElevenLabsMcp {
       if (this.pending.has(id)) continue;
       const entry = result.servers?.find(item => item.name === serverName(id));
       this.setState(id, { state: entry?.running && entry.initialized_at ? 'connected' : entry ? 'configured' : 'not_connected',
-        phase: null, toolCount: entry?.tool_count || 0, checkedAt: new Date().toISOString(), error: null });
+        phase: null, toolCount: entry?.tool_count || 0, checkedAt: new Date().toISOString(), error: null,
+        savedLogin: this.hasSavedLogin(id) });
     }
+  }
+
+  // A profile whose OAuth store holds a login. After a restart its adapter is
+  // not running yet, but opening it reuses (and refreshes) that login; only
+  // Switch account starts a new sign-in.
+  hasSavedLogin(id) {
+    try { return Boolean(this.credentialVersion(this.spec(id))); }
+    catch { return false; }
   }
 
   async call(id, toolName, args) {

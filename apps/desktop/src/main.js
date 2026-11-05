@@ -282,7 +282,8 @@ async function providersCached(force = false) {
       if (elevenLabs && elevenLabsMcp) {
         await elevenLabsMcp.syncStatuses(elevenLabs.profiles.map(profile => profile.id)).catch(() => {});
         elevenLabs.profiles = elevenLabs.profiles.map(profile => ({
-          ...profile, signedIn: elevenLabsMcp.getState(profile.id).state === 'connected',
+          // A saved login counts: after a restart the adapter starts on first use.
+          ...profile, signedIn: elevenLabsMcp.getState(profile.id).state === 'connected' || elevenLabsMcp.getState(profile.id).savedLogin === true,
           mcpState: elevenLabsMcp.getState(profile.id).state
         }));
         elevenLabs.signedIn = elevenLabs.profiles.some(profile => profile.signedIn);
