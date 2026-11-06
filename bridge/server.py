@@ -172,6 +172,11 @@ def _probe_worker_auth(info, now):
             detail = str(profile_detail or (
                 f"embedded {site} session ready" if ready else f"open this {site} account in TEAMYRA and sign in"
             ))
+            if age > 20 and profile_status.get("session_present") is True:
+                # TEAMYRA Desktop idle-exited (its workers say "closed"), but
+                # this account is signed in and start_task starts the desktop.
+                ready = True
+                detail = f"signed in; TEAMYRA Desktop starts the {site} worker when a job arrives"
         else:
             ready, detail = False, "unsupported provider"
         return ready, detail, False
@@ -632,6 +637,9 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     ready, auth_detail = worker_auth_status(worker_info)
     if not ready and provider in scheduler.DESKTOP_PROVIDERS:
         ready, auth_detail = wake_chatgpt_worker(worker_info)
+    elif provider in scheduler.DESKTOP_PROVIDERS and not desktop_runtime.desktop_ready(ROOT):
+        # Signed in while the desktop is closed: start it now for this job.
+        _wake_desktop_async(ROOT)
     if not ready:
         raise ValueError(f"{worker} is not authenticated/ready: {clip(auth_detail, 300)}")
     settings = worker_settings(worker_info)

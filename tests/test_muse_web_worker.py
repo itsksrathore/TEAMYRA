@@ -65,6 +65,25 @@ class MuseWorkerTests(unittest.TestCase):
             self.assertTrue(ready)
             self.assertIn("Muse", detail)
 
+    def test_signed_in_accounts_stay_ready_while_the_desktop_is_closed(self):
+        # After an idle exit every web worker said "worker is closed" and was
+        # not ready, so callers that check worker_status gave it no jobs, though
+        # start_task starts the desktop.
+        with tempfile.TemporaryDirectory() as td:
+            for folder, provider, worker in (("chatgpt", "chatgpt-web", "chatgpt-normal"), ("muse", "muse-web", "muse-normal")):
+                path = Path(td) / folder / "status.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"heartbeat_at": time.time() - 600, "active_profile_id": "web", "detail": "closed",
+                                            "profiles": {"web": {"session_present": True, "automation_ready": False},
+                                                         "other": {"session_present": False}}}), encoding="utf-8")
+                with patch.object(server, "ROOT", Path(td)):
+                    ready, detail = server.worker_auth_status({"id": worker, "provider": provider, "profile_id": "web"}, use_cache=False)
+                    self.assertTrue(ready, detail)
+                    self.assertIn("starts the", detail)
+                    signed_out, _ = server.worker_auth_status({"id": worker + "-x", "provider": provider, "profile_id": "other"},
+                                                              use_cache=False)
+                    self.assertFalse(signed_out, "a signed-out account is never reported ready")
+
     def test_muse_jobs_wake_the_desktop_and_keep_the_core_alive(self):
         with tempfile.TemporaryDirectory() as td:
             old = time.time() - 6 * 3600

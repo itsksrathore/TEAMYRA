@@ -185,6 +185,10 @@ class ChatGPTWebProvider {
     this.profileSessionStatus(this.activeProfileId).then(profile => {
       this.writeStatus({
         session_present: profile.signedIn === true,
+        // Replaces "worker is closed" left by the previous desktop's exit.
+        detail: profile.signedIn === true
+          ? `${this.site.name} account signed in; its worker view loads when a job arrives.`
+          : `Open this ${this.site.name} account in TEAMYRA and sign in.`,
         profile_update: true
       });
     }).catch(() => {});
