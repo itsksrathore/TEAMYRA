@@ -1652,8 +1652,15 @@ class ChatGPTWebProvider {
           }
           const conversation = await this.getCurrentConversation();
           this.saveWorkerConversation(conversation);
-          fs.writeFileSync(path.join(jobDir, 'final.txt'), reply.text || '', 'utf8');
-          this.appendJobEvent(jobDir, 'message', reply.text || '');
+          // The report as written: the page text also carries labels such as a
+          // code block's "Copy" / "Download" buttons and rendered Markdown.
+          let finalText = reply.text || '';
+          if (reply.messageId && typeof this.automation.rawReplyText === 'function') {
+            const raw = await this.automation.rawReplyText(reply.messageId).catch(() => '');
+            if (raw && raw.trim()) finalText = raw.trim();
+          }
+          fs.writeFileSync(path.join(jobDir, 'final.txt'), finalText, 'utf8');
+          this.appendJobEvent(jobDir, 'message', finalText);
           this.writeJobMeta(jobDir, {
             state: 'done',
             reason: null,
