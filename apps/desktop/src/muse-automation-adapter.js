@@ -41,6 +41,30 @@ const CHALLENGE_DETECT_JS = `(() => {
 class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
   get siteName() { return 'Muse'; }
 
+  // Muse sizes its chat column from code that runs when a frame is drawn, and
+  // the worker's background view draws none: the message box stays 0 px wide
+  // and the Send button never appears. A 1x1 DevTools capture draws a frame.
+  async drawFrame() {
+    const api = this.webContents?.debugger;
+    if (!api || this.webContents.isDestroyed?.()) return;
+    try {
+      if (!api.isAttached()) api.attach('1.3');
+      // Best effort with its own short limit: a slow capture is not a hung page.
+      let timer;
+      await Promise.race([
+        api.sendCommand('Page.captureScreenshot', {
+          format: 'png', fromSurface: true, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 }
+        }),
+        new Promise(resolve => { timer = setTimeout(resolve, 3000); })
+      ]).finally(() => clearTimeout(timer));
+    } catch {}
+  }
+
+  async evaluate(source) {
+    await this.drawFrame();
+    return super.evaluate(source);
+  }
+
   async probe() {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
@@ -69,28 +93,68 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
   }
 
   async sendTask(text) {
-    const payload = JSON.stringify(String(text || ''));
-    const filled = await this.evaluate(`(() => {
+    const value = String(text || '');
+    const payload = JSON.stringify(value);
+    // Fill the box the way React reads it (its onChange takes the native
+    // value setter plus an input event). Right after a new side chat opens
+    // the page re-renders the box, so keep filling until the value stays.
+    // Electron's insertText is not used: in the hidden worker view it never
+    // returned, which looked like a hung page.
+    const fill = `(() => {
       const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
       if (!prompt) return { ok: false, reason: 'prompt-not-found' };
-      prompt.focus();
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-      setter.call(prompt, ${payload});
-      prompt.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${payload} }));
-      return { ok: prompt.value.length > 0 };
-    })()`);
+      if (prompt.value !== ${payload}) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(prompt, ${payload});
+        prompt.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${payload} }));
+      }
+      return { ok: prompt.value === ${payload} };
+    })()`;
+    let filled = null;
+    for (let attempt = 0, steady = 0; attempt < 12 && steady < 2; attempt += 1) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 400));
+      filled = await this.evaluate(fill);
+      steady = filled?.ok ? steady + 1 : 0;
+    }
     if (!filled?.ok) throw new Error(filled?.reason || 'Could not populate the Muse message box');
-    // The Send button appears once the box has text.
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const clicked = await this.evaluate(`(() => {
-        const send = [...document.querySelectorAll('button[aria-label="Send"]')]
-          .find(button => !button.disabled && button.getBoundingClientRect().width > 0);
-        if (!send) return false;
-        send.click();
-        return true;
-      })()`);
-      if (clicked) return { ok: true, method: 'button' };
-      await new Promise(resolve => setTimeout(resolve, 100));
+    // The Send button animates in about 1.5 s after the box gets text, and a
+    // hidden view pauses that animation, so the button may never look
+    // visible. Click it as soon as it exists; otherwise press Enter in the box
+    // (the page submits on Enter). Sent means the box emptied.
+    const submit = `(() => {
+      const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
+      if (!prompt) return 'gone';
+      if (!prompt.value.trim()) return 'sent';
+      const send = [...document.querySelectorAll('button[aria-label="Send"]')].find(button => !button.disabled);
+      if (send) { send.click(); return 'clicked'; }
+      return 'waiting';
+    })()`;
+    const pressEnter = `(() => {
+      const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
+      if (!prompt || !prompt.value.trim()) return false;
+      prompt.focus();
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        prompt.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      }
+      return true;
+    })()`;
+    let method = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const state = await this.evaluate(submit);
+      if (state === 'sent') return { ok: true, method: method || 'button' };
+      if (state === 'gone') throw new Error('prompt-not-found');
+      let pause = 100;
+      if (state === 'clicked') {
+        method ||= 'button';
+        // Give the page time to take the message before looking again, so
+        // a slow clear is never answered with a second click.
+        pause = 1500;
+      } else if ((attempt === 20 || attempt === 30) && await this.evaluate(pressEnter)) {
+        // No button after 2 s, or a click that did not send: try Enter.
+        method = 'keyboard';
+        pause = 1500;
+      }
+      await new Promise(resolve => setTimeout(resolve, pause));
     }
     throw new Error('send-button-unavailable');
   }

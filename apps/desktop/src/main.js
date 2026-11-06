@@ -1563,6 +1563,15 @@ async function dispatchDesktopControl(action, payload = {}) {
   const profileId = String(payload.profile_id || 'web');
   const provider = await ensureChatgptProvider(profileId);
   if (cmd === 'status') return provider.getStatus();
+  // Developer only (TEAMYRA_DEV_DEBUG=1 or .teamyra-desktop/dev-debug): run a
+  // script in the account's page to learn a site's layout.
+  if (cmd === 'debug_eval') {
+    if (process.env.TEAMYRA_DEV_DEBUG !== '1' && !fs.existsSync(path.join(ROOT, '.teamyra-desktop', 'dev-debug'))) {
+      throw new Error('chatgpt.debug_eval needs TEAMYRA_DEV_DEBUG=1');
+    }
+    provider.ensureView();
+    return provider.automation.evaluate(String(payload.script || 'null'));
+  }
   if (cmd === 'open') {
     activeChatgptProfileId = profileId;
     for (const [id, other] of chatgptProviders) other.setVisible(id === profileId);

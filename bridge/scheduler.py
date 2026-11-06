@@ -393,7 +393,8 @@ def _dispatch_job(root, meta, spawn):
     waited = int(now - float(fresh.get("queued_at") or fresh.get("created") or now))
     common = dict(queue_position=None, dispatched_at=now, queue_wait_s=waited)
     if provider in DESKTOP_PROVIDERS:
-        fresh.update(state="waiting_for_desktop", last_event="queued for embedded ChatGPT", runner_pid=None,
+        site = "Muse" if provider == "muse-web" else "ChatGPT"
+        fresh.update(state="waiting_for_desktop", last_event="queued for embedded " + site, runner_pid=None,
                      **common)
         _write_meta(job_dir, fresh)
         _append_event(job_dir, "info", f"dispatched from queue after {waited} s; waiting for TEAMYRA Desktop")

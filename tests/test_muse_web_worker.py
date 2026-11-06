@@ -14,6 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
 
+import runner
 import scheduler
 import server
 import wake_gateway
@@ -71,6 +72,18 @@ class MuseWorkerTests(unittest.TestCase):
             ids = {m["id"] for m in scheduler.chatgpt_jobs_needing_desktop(scheduler.load_jobs(td))}
             self.assertEqual(ids, {"waiting"})
             self.assertTrue(wake_gateway.active_jobs(td, max_age=60))
+
+    def test_runner_hands_desktop_jobs_to_the_desktop(self):
+        # An older core process dispatched a Muse job to a CLI runner, which
+        # crashed with WinError 87 on the empty command (1106-105430).
+        with tempfile.TemporaryDirectory() as td:
+            job = write_job(td, "dispatched", state="starting")
+            (job / "transcript.md").write_text("", encoding="utf-8")
+            runner.Job(str(job)).run()
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["state"], "waiting_for_desktop")
+            self.assertEqual(meta["last_event"], "queued for embedded Muse")
+            self.assertFalse((job / "DONE").exists())
 
 
 if __name__ == "__main__":

@@ -35,6 +35,27 @@ function siteTests() {
   assert.match(MuseWebProvider.prototype.userActions.sign_in.message, /^This Muse account is signed out/);
 }
 
+async function frameTests() {
+  // A background view draws no frames, so Muse's message box stayed 0 px wide
+  // and Send never appeared: every page call first draws a 1x1 frame.
+  const calls = [];
+  const webContents = {
+    isDestroyed: () => false,
+    executeJavaScript: async () => { calls.push('script'); return 1; },
+    debugger: { isAttached: () => calls.includes('attach'), attach: () => calls.push('attach'),
+      sendCommand: async (method, params) => { calls.push(method + ':' + params.clip.width + 'x' + params.clip.height); return {}; } }
+  };
+  const adapter = new MuseAutomationAdapter(webContents, { timeoutMs: 1000 });
+  await adapter.evaluate('1');
+  await adapter.evaluate('2');
+  assert.deepEqual(calls, ['attach', 'Page.captureScreenshot:1x1', 'script', 'Page.captureScreenshot:1x1', 'script']);
+  // A capture that never answers does not hold up the page call.
+  webContents.debugger.sendCommand = () => new Promise(() => {});
+  const started = Date.now();
+  assert.equal(await adapter.evaluate('3'), 1);
+  assert.ok(Date.now() - started < 4500);
+}
+
 async function adapterTests() {
   const adapter = new MuseAutomationAdapter({ getURL: () => 'https://muse.ai/thread/e1314c4b-a0bf-4eaa-8422-fedcdc5e4e20', getTitle: () => 'Muse' });
   assert.deepEqual(await adapter.getCurrentConversation(), {
@@ -126,6 +147,7 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-muse-'));
   try {
     siteTests();
+    await frameTests();
     await adapterTests();
     await jobLoopTests(root);
   } finally {
