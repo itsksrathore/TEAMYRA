@@ -135,7 +135,8 @@ class MuseWorkerTests(unittest.TestCase):
             path.write_text(json.dumps({"heartbeat_at": time.time(), "active_profile_id": "web", "profiles": {
                 "web": {"session_present": True, "automation_ready": True, "lanes": 2},
                 "two": {"session_present": True, "automation_ready": False, "login_visible": True,
-                        "detail": "ChatGPT sign-in is required in the embedded view."}}}), encoding="utf-8")
+                        # Written by an older desktop from the cookies alone.
+                        "detail": "ChatGPT account signed in; its worker view loads when a job arrives."}}}), encoding="utf-8")
             one = {"id": "chatgpt-normal", "provider": "chatgpt-web", "profile_id": "web"}
             two = {"id": "chatgpt-two", "provider": "chatgpt-web", "profile_id": "two"}
             self.assertTrue(scheduler.chatgpt_ready(td, one))
@@ -143,7 +144,8 @@ class MuseWorkerTests(unittest.TestCase):
             with patch.object(server, "ROOT", Path(td)):
                 ready, detail = server.worker_auth_status(two, use_cache=False)
             self.assertFalse(ready)
-            self.assertIn("sign-in", detail)
+            self.assertIn("sign-in is required", detail)
+            self.assertNotIn("signed in", detail)
             old = time.time() - 300
             write_job(td, "parked", state="waiting_for_desktop", provider="chatgpt-web", worker="chatgpt-two",
                       dispatched_at=old, created=old, profile_id="two")

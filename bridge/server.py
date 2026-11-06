@@ -176,7 +176,11 @@ def _probe_worker_auth(info, now):
                 # Cookies can outlive the login: the page itself showed a
                 # sign-in form or a human check.
                 ready = False
-                detail = str(profile_status.get("detail") or f"{site} sign-in is required in TEAMYRA Desktop")
+                # Not the saved detail: an older desktop wrote "signed in"
+                # from the cookies alone.
+                detail = (f"{site} requires user verification: open this account in TEAMYRA Desktop"
+                          if profile_status.get("challenged") is True and profile_status.get("login_visible") is not True
+                          else f"{site} sign-in is required: open this account in TEAMYRA Desktop and sign in")
             elif age > 20 and profile_status.get("session_present") is True:
                 # TEAMYRA Desktop idle-exited (its workers say "closed"), but
                 # this account is signed in and start_task starts the desktop.

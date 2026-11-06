@@ -250,12 +250,20 @@ class ChatGPTWebProvider {
     if (this.lane === 0) this.recoverInterruptedJobs();
     this.sessionManager.initialize();
     this.profileSessionStatus(this.activeProfileId).then(profile => {
+      // Cookies can outlive the login: if the page last showed a sign-in form
+      // or a human check, keep saying so (the core does not route jobs there).
+      let last = {};
+      try { last = JSON.parse(fs.readFileSync(this.statusFile, 'utf8')).profiles?.[this.activeProfileId] || {}; } catch {}
       this.writeStatus({
         session_present: profile.signedIn === true,
         // Replaces "worker is closed" left by the previous desktop's exit.
-        detail: profile.signedIn === true
-          ? `${this.site.name} account signed in; its worker view loads when a job arrives.`
-          : `Open this ${this.site.name} account in TEAMYRA and sign in.`,
+        detail: last.login_visible === true
+          ? `${this.site.name} sign-in is required: open this account in TEAMYRA and sign in.`
+          : last.challenged === true
+            ? `${this.site.name} requires user verification: open this account in TEAMYRA.`
+            : profile.signedIn === true
+              ? `${this.site.name} account signed in; its worker view loads when a job arrives.`
+              : `Open this ${this.site.name} account in TEAMYRA and sign in.`,
         profile_update: true
       });
     }).catch(() => {});
