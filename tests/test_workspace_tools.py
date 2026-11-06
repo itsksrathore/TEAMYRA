@@ -87,6 +87,34 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertFalse((workspace / "nested" / "c.txt").exists())
             self.assertTrue(Path(deleted["recoverable_at"]).is_file())
 
+    def test_long_running_programs_pass_the_safety_check(self):
+        # process.start runs a PowerShell command line outside the sandbox,
+        # so it needs Full PC access; system commands never run.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            (workspace / "web").mkdir(parents=True)
+            service = WorkspaceToolService(root)
+            full = {"terminal": True, "full_access": True}
+            with patch.object(service, "_effective_permissions", side_effect=lambda value: dict(value or {})):
+                with self.assertRaises(PermissionError):
+                    service.authorize_process(workspace, "npm run dev", ".", {"terminal": True}, trusted=True)
+                with patch.dict(os.environ, {"MY_API_KEY": "secret", "PLAIN_SETTING": "1"}):
+                    ok = service.authorize_process(workspace, "npm run dev", "web", full, trusted=True, actor="chatgpt-normal")
+                self.assertEqual(Path(ok["cwd"]), (workspace / "web").resolve())
+                self.assertNotIn("MY_API_KEY", ok["env"])
+                self.assertEqual(ok["env"].get("PLAIN_SETTING"), "1")
+                with self.assertRaises(PermissionError):
+                    service.authorize_process(workspace, "diskpart", ".", full, trusted=True)
+                with self.assertRaises(PermissionError):
+                    service.authorize_process(workspace, "Remove-Item -Recurse -Force src", ".", full, trusted=True)
+                service.authorize_process(workspace, "Remove-Item -Recurse -Force src", ".", full, trusted=True, confirm=True)
+                with self.assertRaises(WorkspaceToolError):
+                    service.authorize_process(workspace, "   ", ".", full, trusted=True)
+            audit = [json.loads(line) for line in service.audit_file.read_text(encoding="utf-8").splitlines()]
+            starts = [row for row in audit if row["tool"] == "process.start"]
+            self.assertEqual([row["result"] for row in starts], ["error", "success", "error", "error", "success", "error"])
+
     def test_web_chat_jobs_delete_workspace_files_into_the_trash(self):
         # ChatGPT could not remove files it replaced: every delete needed a
         # confirmation nobody could give during a job.

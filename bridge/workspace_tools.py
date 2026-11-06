@@ -573,14 +573,7 @@ class WorkspaceToolService:
         Desktop's web-chat jobs pass it; a delete outside the workspace, of a
         large folder, or git.restore still needs confirmation."""
         self._verify_token(token, trusted)
-        scoped = Path(str(workspace or "")).expanduser().resolve()
-        if not scoped.exists() or not scoped.is_dir():
-            raise WorkspaceToolError("workspace must be an existing directory")
-        if scoped == Path(scoped.anchor).resolve() or scoped == Path.home().resolve():
-            raise PermissionError("workspace is too broad; assign a project directory")
-        for blocked in self._sensitive_roots():
-            if scoped == blocked or _is_relative_to(scoped, blocked):
-                raise PermissionError("system or credential directories cannot be assigned as workspaces")
+        scoped = self._scoped_workspace(workspace)
         try:
             scoped_permissions = self._effective_permissions(permissions)
         except PermissionError as exc:
@@ -592,6 +585,59 @@ class WorkspaceToolService:
         return self._execute_scoped(
             tool, args, scoped, scoped_permissions, actor, confirm
         )
+
+    def _scoped_workspace(self, workspace):
+        scoped = Path(str(workspace or "")).expanduser().resolve()
+        if not scoped.exists() or not scoped.is_dir():
+            raise WorkspaceToolError("workspace must be an existing directory")
+        if scoped == Path(scoped.anchor).resolve() or scoped == Path.home().resolve():
+            raise PermissionError("workspace is too broad; assign a project directory")
+        for blocked in self._sensitive_roots():
+            if scoped == blocked or _is_relative_to(scoped, blocked):
+                raise PermissionError("system or credential directories cannot be assigned as workspaces")
+        return scoped
+
+    def authorize_process(
+        self, workspace, command, cwd=".", permissions=None, *,
+        token=None, trusted=False, actor="teamyra", confirm=False,
+    ):
+        """Check a long-running command (dev server, app, watcher, interactive
+        program) that TEAMYRA Desktop will start and keep running for a job.
+
+        It runs in PowerShell and is not sandboxed, so it needs Full PC access
+        and the terminal permission. System-management commands are refused,
+        and destructive ones need the same confirmation as terminal.run. The
+        check is audited as ``process.start``. Returns the working directory
+        and the environment (secrets removed) to start it with."""
+        self._verify_token(token, trusted)
+        scoped = self._scoped_workspace(workspace)
+        command = str(command or "")
+        target = str(scoped)
+        extra = {"mode": "full_access", "confirm": bool(confirm), "argv": command[:1000]}
+        try:
+            perms = self._effective_permissions(permissions)
+            if not perms.get("terminal"):
+                raise PermissionError("terminal permission is disabled")
+            if not perms.get("full_access"):
+                raise PermissionError("process tools need Full PC access (TEAMYRA Desktop > workspace access)")
+            if not command.strip() or len(command) > 8000 or "\x00" in command:
+                raise WorkspaceToolError("command must be a non-empty PowerShell command of at most 8000 characters")
+            run_cwd = self._path(cwd or ".", scoped, perms, must_exist=True)
+            if not run_cwd.is_dir():
+                raise WorkspaceToolError("cwd is not a directory")
+            target = str(run_cwd)
+            tags = self._command_tags(["powershell", "-NoProfile", "-Command", command])
+            if "hard" in tags:
+                raise PermissionError("command is blocked by TEAMYRA safety policy")
+            destructive_ok = bool(perms.get("destructive_without_confirmation")) or confirm
+            if "destructive" in tags and not destructive_ok:
+                raise PermissionError("destructive command requires explicit confirmation; use filesystem.delete for workspace files")
+            result = {"ok": True, "cwd": str(run_cwd), "env": self._scrubbed_env()}
+            self._audit(actor, "process.start", target, True, extra=extra)
+            return result
+        except Exception as exc:
+            self._audit(actor, "process.start", target, False, exc, extra=extra)
+            raise
 
     RECOVERABLE_DELETE_MAX_ENTRIES = 2000
 

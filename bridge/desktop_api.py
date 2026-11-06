@@ -265,6 +265,16 @@ def handle(action, payload):
             # without asking (ChatGPT could not remove files it replaced).
             recoverable_deletes=True,
         )
+    if action == "chatgpt.process.authorize":
+        return workspace_tools.WorkspaceToolService(ROOT).authorize_process(
+            payload.get("workspace"),
+            payload.get("command"),
+            payload.get("cwd") or ".",
+            permissions=payload.get("permissions"),
+            token=_bridge_token(payload),
+            actor=str(payload.get("actor") or "chatgpt-normal")[:100],
+            confirm=payload.get("confirm") is True,
+        )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)
     if action == "worktree.status":

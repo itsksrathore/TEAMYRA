@@ -1767,6 +1767,8 @@ process.on('exit', code => { try { startupLog('process-exit', { code }); } catch
 app.on('before-quit', () => {
   startupLog('before-quit', { idle: !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() });
   isQuitting = true;
+  // Programs ChatGPT/Muse jobs started (dev servers, apps) end with the desktop.
+  try { require('./job-processes').jobProcesses.stopAll(); } catch {}
   if (gotSingleInstanceLock) { try { publishDesktopState(false); } catch {} }
   clearDesktopIdleExit();
   desktopControlPoller?.stop();

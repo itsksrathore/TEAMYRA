@@ -51,6 +51,17 @@ The default worker ID is `chatgpt-normal`, provider `chatgpt-web`. Extra account
 
 A signed-in account is reported ready even while TEAMYRA Desktop is closed: a job starts the desktop. An account whose page last showed a sign-in form or a human check is never ready, even if its browser profile still holds cookies (`session_present`). An unpinned job that was handed to such an account and has not started goes back to the queue after a minute, for another signed-in account.
 
+**Programs that keep running, and looking at the result.** `terminal.run` waits for its command to finish. For a dev server, the app itself, a watcher or an interactive program, jobs use process sessions (`apps/desktop/src/job-processes.js`):
+- `process.start {command, cwd, wait_for, wait_seconds}` runs a PowerShell command line. It returns a `session_id` and the output so far (up to the `wait_for` regex, the program's exit, or `wait_seconds`), and the program keeps running.
+- `process.read`, `process.write {input}`, `process.stop` and `process.list` work on the job's own sessions. Output is also written to `jobs/<id>/processes/<session>.log`.
+- Each start passes the core's check (`chatgpt.process.authorize`, audited as `process.start`). It needs Full PC access and the terminal permission. System commands are refused; destructive ones need confirmation. The program gets an environment without secrets.
+- TEAMYRA Desktop owns the programs. They stop when the job ends, or when the desktop quits. A job runs at most 6 at once.
+
+To see what it built (`apps/desktop/src/job-inspect.js`):
+- `page.check {url, wait_for}` opens a local page (localhost, `*.localhost` or a workspace file) in a hidden window with an empty temporary profile. It reports the title, visible text, controls, console errors, failed requests and a screenshot.
+- `screen.capture {window}` takes a screenshot of an open window.
+- Screenshots are saved in `jobs/<id>/screens/`. TEAMYRA attaches them to the next message when the page shows the upload; if it does not, the result says where the file is.
+
 **Keeping jobs on track** (failures seen on 2026-11-06):
 - **Tool requests are parsed from the reply as written.** The page shows rendered Markdown: `$...$` turns into math, a backslash before `\` or `"` disappears, `*x*` loses its stars. TEAMYRA reads the reply's original text from the conversation data the page loads (`/backend-api/conversation/<id>`, by message id) and falls back to the page text only when that fails. Muse has no such data and keeps the page text.
 - **A tool result is at most about 40,000 characters.** ChatGPT never answered messages of 120,000–132,000 characters, and those jobs hung until the page-recovery limit failed them. Long text fields (file content, command output) are shortened, and the result says what was cut and how to ask for less.

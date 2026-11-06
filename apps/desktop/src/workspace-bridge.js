@@ -87,6 +87,19 @@ class WorkspaceBridge {
     }));
   }
 
+  // Safety check and audit for a long-running command a job starts; returns
+  // { cwd, env } to start it with, or throws the reason it is refused.
+  authorizeProcess(workspace, command, cwd = '.', permissions = null, actor = 'chatgpt-normal', confirm = false) {
+    return callCore('chatgpt.process.authorize', {
+      workspace: String(workspace || ''),
+      command: String(command || ''),
+      cwd: String(cwd || '.'),
+      permissions: permissions && typeof permissions === 'object' ? permissions : undefined,
+      actor: String(actor || 'chatgpt-normal'),
+      confirm: confirm === true
+    }, this.coreOptions({ timeout: 45000 }));
+  }
+
   toolTimeout(tool, args) {
     if (tool !== 'terminal.run') return 45000;
     const seconds = Number(args?.timeout_seconds);

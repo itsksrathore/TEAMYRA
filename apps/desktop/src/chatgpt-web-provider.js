@@ -4,6 +4,8 @@ const { WebContentsView, Notification } = require('electron');
 const { ChatGPTSessionManager, DEFAULT_CHATGPT_PROFILE_ID } = require('./chatgpt-session-manager');
 const { ChatGPTAutomationAdapter, teamyraError, boundedPageCall, pageTimeoutMs } = require('./chatgpt-automation-adapter');
 const { WorkspaceBridge } = require('./workspace-bridge');
+const { JobProcesses, jobProcesses } = require('./job-processes');
+const { JobInspector } = require('./job-inspect');
 const { callCore } = require('./core-api');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
@@ -57,6 +59,7 @@ function userActions({ name, id }) {
 }
 const TOOL_ERROR_HINT = 'Reply with one line: TEAMYRA_TOOL_REQUEST {"tool":"<name>","args":{...}} using valid JSON and forward slashes in paths (D:/dir/file). If the task is complete, reply with the final answer without the TEAMYRA_TOOL_REQUEST marker.';
 const READ_ONLY_BLOCKED_TOOLS = new Set([
+  'process.start', 'process.write',
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
   'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore'
 ]);
@@ -827,6 +830,32 @@ class ChatGPTWebProvider {
     const approvedPath = fs.realpathSync.native
       ? fs.realpathSync.native(verified.path)
       : fs.realpathSync(verified.path);
+    return this.attachApprovedFile(approvedPath);
+  }
+
+  // A screenshot TEAMYRA took for the running job (inside its job folder).
+  // Waits until the page shows the image in the message box, so the next
+  // message carries it.
+  async attachScreenshot(filePath) {
+    const jobsRoot = path.resolve(this.runtimeRoot || '', 'jobs');
+    const resolved = path.resolve(String(filePath || ''));
+    if (!resolved.startsWith(jobsRoot + path.sep) || !fs.existsSync(resolved)) throw new Error('not a TEAMYRA job screenshot');
+    await this.attachApprovedFile(resolved);
+    const deadline = Date.now() + (this.attachWaitMs ?? 20000);
+    while (Date.now() < deadline) {
+      const ready = await this.automation.evaluate(`(() => {
+        const box = document.querySelector('form') || document;
+        const preview = box.querySelector('img[src^="blob:"], img[alt*="Uploaded"], [data-testid*="attachment"] img, [class*="attachment"] img');
+        const busy = box.querySelector('[role="progressbar"], [aria-busy="true"]');
+        return Boolean(preview && !busy);
+      })()`).catch(() => false);
+      if (ready) return { ok: true };
+      await sleep(500);
+    }
+    throw new Error(`${this.site.name} did not show the uploaded image`);
+  }
+
+  async attachApprovedFile(approvedPath) {
     const view = this.ensureView();
     await this.automation.evaluate(`(() => {
       const button = document.querySelector('button[aria-label*="Attach"], button[aria-label*="attach"], button[data-testid*="attach"]');
@@ -1109,6 +1138,7 @@ class ChatGPTWebProvider {
   }
 
   async sendJobMessage(job, text) {
+    let sendRetries = 0;
     for (;;) {
       this.checkJobActive(job);
       try {
@@ -1123,6 +1153,14 @@ class ChatGPTWebProvider {
         return snap;
       } catch (error) {
         const kind = userActionKind(error);
+        // The Send button can stay disabled for a while (an image still
+        // uploading): nothing was sent, so wait and send again.
+        if (!kind && /send-button-unavailable/.test(String(error?.message)) && sendRetries < 3) {
+          sendRetries += 1;
+          this.appendJobEvent(job.dir, 'info', `${this.site.name} Send button not available; sending again (${sendRetries}/3)`);
+          await sleep(this.sendRetryMs ?? 5000);
+          continue;
+        }
         if (!kind) throw error;
         await this.waitForChallengeResolution(job, kind);
       }
@@ -1438,7 +1476,9 @@ class ChatGPTWebProvider {
         'When you need a local tool, reply with exactly one line and nothing else (no code fence):',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Send one tool request per reply and wait for its TEAMYRA_TOOL_RESULT. The JSON must be valid; write paths with forward slashes (D:/project/file.txt), never backslashes.',
-        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
+        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, process.start, process.read, process.write, process.stop, process.list, page.check, screen.capture, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
+        'terminal.run waits for its command to finish. For a program that keeps running (dev server, the app, a watcher, an interactive program) use process.start {"command":"<PowerShell command>","cwd":"...","wait_for":"<regex of a ready line>","wait_seconds":30}: it returns a session_id and the output so far, and the program keeps running. Then process.read {"session_id","wait_for","wait_seconds"} for new output, process.write {"session_id","input"} to type into it, process.stop {"session_id"}; process.list shows them. They stop when the job ends.',
+        'To see what you built: page.check {"url":"http://localhost:<port>/","wait_for":"<text or CSS selector>"} opens a local page and returns its text, controls, console errors, failed requests and a screenshot; screen.capture {"window":"<part of a window title>"} screenshots an open window. A screenshot is attached to the next message when it can be. Test changes this way (start the server, check the page, read the errors) instead of guessing.',
         'filesystem.read is paged: use offset and max_bytes (at most 30000) for large files, then next_offset when clipped. Keep command output short (filter it); a tool result is cut to about 40000 characters.',
         fullAccess
           ? 'The user granted full PC access: absolute paths anywhere on this PC are allowed; relative paths resolve inside the workspace.'
@@ -1565,21 +1605,36 @@ class ChatGPTWebProvider {
           if (spec.write === false && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
             throw new Error('This delegated job is read-only; write, terminal, and mutating Git tools are disabled');
           }
-          toolResult = await this.workspaceBridge.executeInWorkspace(
-            assignedWorkspace,
-            request.tool,
-            request.args,
-            taskPermissions,
-            false
-          );
+          if (JobProcesses.handles(request.tool)) {
+            toolResult = await jobProcesses.call(jobDir, request.tool, request.args, {
+              authorize: (command, cwd) => this.workspaceBridge.authorizeProcess(
+                assignedWorkspace, command, cwd, taskPermissions, this.site.workerId(this.activeProfileId || 'web'))
+            });
+          } else if (JobInspector.handles(request.tool)) {
+            toolResult = await this.inspector.call(jobDir, request.tool, request.args, { workspace: assignedWorkspace });
+          } else {
+            toolResult = await this.workspaceBridge.executeInWorkspace(
+              assignedWorkspace,
+              request.tool,
+              request.args,
+              taskPermissions,
+              false
+            );
+          }
         } catch (error) {
           toolResult = { ok: false, error: String(error?.message || error) };
+        }
+        let attachNote = '';
+        if (toolResult?.screenshot && request.args?.attach !== false) {
+          attachNote = await this.attachScreenshot(toolResult.screenshot)
+            .then(() => '\nThe screenshot is attached to this message.')
+            .catch(error => `\nThe screenshot could not be attached (${String(error?.message || error).slice(0, 160)}); it is saved at ${toolResult.screenshot}.`);
         }
         if (toolResult?.ok !== false) successfulTools += 1;
         const rawToolResult = JSON.stringify(toolResult);
         const boundedToolResult = boundToolResult(toolResult);
         this.appendJobEvent(jobDir, 'result', rawToolResult.slice(0, 3000));
-        reply = await this.jobExchange(job, 'TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
+        reply = await this.jobExchange(job, 'TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + attachNote + '\nContinue the task.');
       }
       throw new Error(`${this.site.name} exceeded the maximum TEAMYRA tool-call loop`);
     } catch (error) {
@@ -1598,6 +1653,7 @@ class ChatGPTWebProvider {
       });
       fs.writeFileSync(path.join(jobDir, 'DONE'), state, 'utf8');
     } finally {
+      jobProcesses.stopJob(jobDir).catch(() => {});
       this.awaitingUser = false;
       this.activeJobDir = null;
       this.busy = false;
@@ -1643,6 +1699,8 @@ class ChatGPTWebProvider {
 ChatGPTWebProvider.prototype.site = CHATGPT_SITE;
 ChatGPTWebProvider.prototype.lane = 0;
 ChatGPTWebProvider.prototype.laneCount = 1;
+// One page checker for every tab: its checks run one at a time.
+ChatGPTWebProvider.prototype.inspector = new JobInspector();
 ChatGPTWebProvider.prototype.userActions = userActions(CHATGPT_SITE);
 
 module.exports = { boundToolResult, ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };
