@@ -89,6 +89,15 @@ def _write_spec(job_dir, spec):
         tmp.unlink(missing_ok=True)
 
 
+def web_account_blocked(account):
+    """The account's page last showed a sign-in form or a human check. Its
+    browser profile can still hold cookies (``session_present``), so those
+    alone must not count as ready: jobs would wait there until they time out."""
+    account = account or {}
+    return bool(account.get("login_visible") is True or account.get("signed_out") is True
+                or account.get("challenged") is True)
+
+
 def chatgpt_ready(root, info):
     """A pool recipient must have a fresh, ready desktop account."""
     folder = WEB_STATUS_DIRS.get(info.get("provider"), "chatgpt")
@@ -97,6 +106,8 @@ def chatgpt_ready(root, info):
         return False
     profile = str(info.get("profile_id") or "web")
     account = (status.get("profiles") or {}).get(profile) or {}
+    if web_account_blocked(account):
+        return False
     if profile == str(status.get("active_profile_id") or "web"):
         return bool(status.get("worker_ready") or account.get("automation_ready") or account.get("session_present"))
     return bool(account.get("automation_ready") or account.get("session_present"))
@@ -439,6 +450,49 @@ def _dispatch_job(root, meta, spawn):
     return {"job_id": meta["id"], "worker": fresh.get("worker"), "action": "spawned", "runner_pid": pid}
 
 
+RETURN_FROM_BLOCKED_SECONDS = 60
+
+
+def _web_account_status(root, info):
+    folder = WEB_STATUS_DIRS.get((info or {}).get("provider"))
+    if not folder:
+        return None
+    status = _read_json(Path(root) / folder / "status.json") or {}
+    return (status.get("profiles") or {}).get(str((info or {}).get("profile_id") or "web")) or {}
+
+
+def _return_jobs_from_blocked_accounts(root, metas, registry):
+    """A web job handed to an account whose page then showed a sign-in form
+    (or a human check) would wait there until it timed out. If that account
+    never started it and it is not pinned, put it back in the queue so a
+    signed-in account takes it."""
+    returned = []
+    now = time.time()
+    for meta in metas:
+        if (meta.get("_done") or meta.get("state") != "waiting_for_desktop" or meta.get("pin")
+                or meta.get("provider") not in DESKTOP_PROVIDERS):
+            continue
+        if now - float(meta.get("dispatched_at") or meta.get("created") or now) < RETURN_FROM_BLOCKED_SECONDS:
+            continue
+        info = registry.get(meta.get("worker")) or {}
+        if not web_account_blocked(_web_account_status(root, info)):
+            continue
+        job_dir = _jobs_dir(root) / meta["id"]
+        fresh = _read_json(job_dir / "meta.json")
+        spec = _read_json(job_dir / "spec.json") or {}
+        # chatgpt-state.json: the account already opened a chat for it.
+        if (not isinstance(fresh, dict) or fresh.get("state") != "waiting_for_desktop" or spec.get("pin")
+                or (job_dir / "DONE").exists() or (job_dir / "chatgpt-state.json").exists()):
+            continue
+        fresh.update(state=QUEUED, last_event=f"back in the queue: {meta.get('worker')} needs sign-in")
+        _write_meta(job_dir, fresh)
+        _append_event(job_dir, "info", f"{meta.get('worker')} shows a sign-in form or a human check; "
+                                        "returned to the queue for another account")
+        meta.update(fresh)
+        returned.append(meta["id"])
+    return returned
+
+
 def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None, workers=None,
                   lock_timeout=LOCK_WAIT_SECONDS, registry=None):
     """Start the oldest queued job of every free worker. Safe to call concurrently."""
@@ -454,6 +508,7 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
     try:
         metas = load_jobs(root)
         registry = build_worker_registry(root) if registry is None else registry
+        report["returned"] = _return_jobs_from_blocked_accounts(root, metas, registry)
         names = sorted({m.get("worker") for m in metas if is_queued(m) and m.get("worker")} |
                        {w for w, info in registry.items() if info.get("enabled", True)})
         if workers is not None:
@@ -492,6 +547,10 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
             elif borrowed:
                 if info.get("provider") in DESKTOP_PROVIDERS and not chatgpt_ready(root, info):
                     reason = "not_ready"
+            elif info.get("provider") in DESKTOP_PROVIDERS and web_account_blocked(_web_account_status(root, info)):
+                # Signed out: keep the jobs queued (unpinned ones go to
+                # another signed-in account) instead of parking them here.
+                reason = "signed_out"
             if reason is None:
                 if borrowed:
                     old_worker = rows[0]["worker"]

@@ -7,10 +7,19 @@ const { WorkspaceBridge } = require('./workspace-bridge');
 const { callCore } = require('./core-api');
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
-const MAX_TOOL_RESULT_CHARS = 120000;
+// One tool result per message. ChatGPT never answered messages of 120-132k
+// characters (four jobs hung on them on 2026-11-06), so results are kept
+// well below that.
+const MAX_TOOL_RESULT_CHARS = 40000;
 const MAX_TOOL_STEPS = 256;
 const MAX_TOOL_PARSE_FAILURES = 3;
 const MAX_PROTOCOL_RECOVERIES = 2;
+// A reply without a tool request while the job's output files are still
+// missing is not a result: ChatGPT stopped early ("the TEAMYRA bridge is not
+// available") or a status line was read while it was still thinking. It is
+// told what is missing and continues, at most this many times per job.
+const MAX_OUTPUT_NUDGES = 2;
+const SETTLE_RECHECK_MS = 6000;
 const CHALLENGE_POLL_MS = 3000;
 const PROGRESS_INTERVAL_MS = 30000;
 // A page recovery reloads the job conversation. A long job may need several
@@ -111,10 +120,53 @@ function missingExpectedOutputs(workspace, paths = []) {
   });
 }
 
+// Fits a tool result into `limit` characters of JSON by shortening its long
+// text fields (file content, command output), so what is kept stays readable
+// instead of becoming an escaped slice of the whole JSON. Says what was cut.
+function boundToolResult(result, limit = MAX_TOOL_RESULT_CHARS) {
+  const raw = JSON.stringify(result);
+  if (raw.length <= limit) return result;
+  const copy = JSON.parse(raw);
+  const fields = [];
+  const collect = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 4) return;
+    for (const key of Object.keys(node)) {
+      if (typeof node[key] === 'string' && node[key].length > 2000) fields.push([node, key, node[key].length]);
+      else collect(node[key], depth + 1);
+    }
+  };
+  collect(copy, 0);
+  const clippedFields = [];
+  for (let round = 0; round < 24 && JSON.stringify(copy).length > limit && fields.length; round += 1) {
+    fields.sort((a, b) => b[0][b[1]].length - a[0][a[1]].length);
+    const [node, key, original] = fields[0];
+    const keep = Math.max(1000, Math.floor(node[key].length / 2));
+    if (keep >= node[key].length) break;
+    node[key] = node[key].slice(0, keep);
+    if (!clippedFields.includes(key)) clippedFields.push(key);
+    node[key + '_clipped'] = `kept the first ${keep} of ${original} characters`;
+  }
+  const note = 'TEAMYRA clipped this tool result to fit one message. Ask for less: a narrower path/query, ' +
+    'filesystem.read with offset and a smaller max_bytes (about 30000), or a command that prints only the lines you need.';
+  if (copy && typeof copy === 'object' && !Array.isArray(copy) && JSON.stringify(copy).length <= limit) {
+    // A read's next_offset no longer matches what was kept.
+    if (clippedFields.includes('content') && 'next_offset' in copy) copy.next_offset = null;
+    return { ...copy, clipped: true, note };
+  }
+  // Quotes in the preview are escaped again, so shrink it until it fits.
+  let size = limit - 400;
+  let bounded = { clipped: true, preview: raw.slice(0, size), note };
+  while (JSON.stringify(bounded).length > limit && size > 1000) {
+    size = Math.floor(size * 0.8);
+    bounded = { clipped: true, preview: raw.slice(0, size), note };
+  }
+  return bounded;
+}
+
 function looksLikeProtocolLoss(text, successfulTools) {
   const reply = String(text || '').replace(/[’‘]/g, "'");
   const refusal = /\b(?:I|we)\s+(?:(?:do not|don't)\s+have\s+access|(?:can(?:not|'t)|am unable to|are unable to)\s+(?:directly\s+)?(?:access|read|write|edit|modify|inspect|open|use))\b[^.!?\n]*(?:files?|filesystem|workspace|repository|repo|local|tools?|TEAMYRA)/i.test(reply);
-  const unavailable = /\b(?:TEAMYRA(?:\s+tool)?\s+(?:interface|tools?)|local\s+tools?|tool\s+interface)\b[^.!?\n]*(?:not\s+(?:available|accessible|enabled)|unavailable|missing|disabled|don't\s+have|do\s+not\s+have)/i.test(reply) ||
+  const unavailable = /\b(?:TEAMYRA(?:\s+(?:local[- ])?tool)?\s+(?:interface|tools?|bridge)|TEAMYRA(?:\s+local)?[- ]tool[- ]bridge|local[- ]tools?(?:\s+bridge)?|tool\s+(?:interface|bridge))\b[^.!?\n]*(?:not\s+(?:available|accessible|enabled)|unavailable|missing|disabled|don't\s+have|do\s+not\s+have)/i.test(reply) ||
     /\b(?:don't|do not)\s+have\b[^.!?\n]*(?:TEAMYRA|local tools|tool interface)/i.test(reply);
   const paste = /\b(?:please\s+)?(?:paste|upload|provide|share)\b[^.!?\n]*(?:files?|file contents|source code|repository|repo|code here)/i.test(reply) &&
     !/\b(?:pasted|uploaded|provided|shared)\b/i.test(reply);
@@ -1153,6 +1205,34 @@ class ChatGPTWebProvider {
   // Sends one message and waits for its reply, surviving verification pauses
   // and page recoveries. With `resumeSnap` the message was already delivered
   // (desktop restart) and only its reply is awaited.
+  // A reply that would end the job early gets a second look: ChatGPT can show
+  // a short status line ("Checked shell readiness") that sits still for a few
+  // seconds while it is still thinking. Returns a newer reply, or `reply`.
+  async settleReply(job, reply) {
+    await sleep(this.settleRecheckMs ?? SETTLE_RECHECK_MS);
+    let snap = null;
+    try { snap = await this.automation.assistantSnapshot(); } catch { return reply; }
+    if (!snap || (!snap.generating && snap.text === reply.text)) return reply;
+    this.appendJobEvent(job.dir, 'info',
+      `${this.site.name} was still working after "${String(reply.text || '').slice(0, 80)}"; waiting for its reply`);
+    // Nothing is sent here, so a hang or error just keeps the first reply;
+    // the caller then asks to continue or ends the job as before.
+    try {
+      const next = await this.automation.waitForAssistantReply({
+        previousCount: snap.count, previousText: reply.text, previousMessageId: '',
+        deadline: job.deadline, shouldCancel: job.isCancelled, detectChallenge: false,
+        noProgressMs: this.noProgressMs ?? 300000, pollMs: this.replyPollMs
+      });
+      job.usage.chars_received += String(next.text || '').length;
+      this.recordJobUsage(job);
+      this.saveJobState(job, { phase: 'reply', reply: next.text || '', message: null, baseline: null });
+      return next;
+    } catch (error) {
+      if (error?.code === 'TEAMYRA_CANCELLED') throw error;
+      return reply;
+    }
+  }
+
   async jobExchange(job, text, resumeSnap = null) {
     let snap = resumeSnap;
     for (;;) {
@@ -1359,14 +1439,14 @@ class ChatGPTWebProvider {
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Send one tool request per reply and wait for its TEAMYRA_TOOL_RESULT. The JSON must be valid; write paths with forward slashes (D:/project/file.txt), never backslashes.',
         'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
-        'filesystem.read is paged: use offset and max_bytes for large files, then next_offset when clipped.',
+        'filesystem.read is paged: use offset and max_bytes (at most 30000) for large files, then next_offset when clipped. Keep command output short (filter it); a tool result is cut to about 40000 characters.',
         fullAccess
           ? 'The user granted full PC access: absolute paths anywhere on this PC are allowed; relative paths resolve inside the workspace.'
           : 'Use relative paths inside the workspace.',
         'git.diff supports base/head commit refs and stat:true. An unknown argument is an error that lists the allowed keys.',
         'If TEAMYRA answers TEAMYRA_TOOL_ERROR, your request could not be parsed: send a corrected request.',
         'This text bridge is your local tool interface: emit TEAMYRA_TOOL_REQUEST even if task files mention calling native tools.',
-        'Destructive operations may be denied pending explicit user confirmation. Never try to bypass that denial.',
+        'filesystem.delete of a workspace file or folder (recursive:true) moves it to TEAMYRA\'s trash, where it can be restored; use it instead of shell delete commands. Deletes outside the workspace and git.restore may be denied pending explicit user confirmation. Never try to bypass that denial.',
         'When the task is complete, reply normally with the final result and do not include the TEAMYRA_TOOL_REQUEST marker.',
         ...this.site.promptRules,
         '',
@@ -1379,9 +1459,11 @@ class ChatGPTWebProvider {
       let parseFailures = Number(resume?.parse_failures) || 0;
       let protocolRecoveries = Number(resume?.protocol_recoveries) || 0;
       let successfulTools = Number(resume?.successful_tools) || 0;
+      let outputNudges = Number(resume?.output_nudges) || 0;
       const firstStep = Number(resume?.step) || 0;
       const counters = step => ({
-        step, parse_failures: parseFailures, protocol_recoveries: protocolRecoveries, successful_tools: successfulTools
+        step, parse_failures: parseFailures, protocol_recoveries: protocolRecoveries, successful_tools: successfulTools,
+        output_nudges: outputNudges
       });
       let reply = resume?.phase
         ? await this.resumeExchange(job, resume, bootstrap)
@@ -1394,7 +1476,13 @@ class ChatGPTWebProvider {
           state = 'cancelled';
           throw new Error('TEAMYRA job cancelled');
         }
-        const parsed = this.automation.parseToolRequestDetailed(reply.text);
+        let parsed = this.automation.parseToolRequestDetailed(reply.text);
+        if (parsed.marker && typeof this.automation.rawReplyText === 'function') {
+          // Parse the reply as written, not as rendered on the page.
+          const raw = await this.automation.rawReplyText(reply.messageId).catch(() => '');
+          const exact = raw && raw.includes('TEAMYRA_TOOL_REQUEST') ? this.automation.parseToolRequestDetailed(raw) : null;
+          if (exact?.request) parsed = exact;
+        }
         if (!parsed.marker) {
           if (looksLikeProtocolLoss(reply.text, successfulTools)) {
             if (protocolRecoveries >= MAX_PROTOCOL_RECOVERIES) {
@@ -1408,7 +1496,28 @@ class ChatGPTWebProvider {
             continue;
           }
           this.checkJobActive(job);
-          const missing = missingExpectedOutputs(assignedWorkspace, spec.expect_files);
+          let missing = missingExpectedOutputs(assignedWorkspace, spec.expect_files);
+          if (missing.length || !successfulTools) {
+            const settled = await this.settleReply(job, reply);
+            if (settled !== reply) {
+              reply = settled;
+              continue;
+            }
+          }
+          if (missing.length && outputNudges < MAX_OUTPUT_NUDGES) {
+            outputNudges += 1;
+            this.appendJobEvent(jobDir, 'protocol_recovery',
+              `reply without the expected outputs (${missing.join(', ')}); asking ${this.site.name} to continue ` +
+              `${outputNudges}/${MAX_OUTPUT_NUDGES}: ${String(reply.text || '').slice(0, 500)}`);
+            this.writeJobMeta(jobDir, { output_nudges: outputNudges, last_event: 'expected outputs missing; asking to continue' });
+            reply = await this.jobExchange(job, [
+              'TEAMYRA: the task is not finished. These expected output files do not exist yet or are empty: ' + JSON.stringify(missing) + '.',
+              'The TEAMYRA tool bridge is available in this chat: send TEAMYRA_TOOL_REQUEST lines (one per reply) to read, run commands and write the files, then give the final result.',
+              'Reply now with your next TEAMYRA_TOOL_REQUEST.'
+            ].join('\n'));
+            continue;
+          }
+          missing = missingExpectedOutputs(assignedWorkspace, spec.expect_files);
           if (missing.length) {
             reason = 'missing_output';
             this.writeJobMeta(jobDir, { missing_outputs: missing });
@@ -1468,13 +1577,7 @@ class ChatGPTWebProvider {
         }
         if (toolResult?.ok !== false) successfulTools += 1;
         const rawToolResult = JSON.stringify(toolResult);
-        const boundedToolResult = rawToolResult.length <= MAX_TOOL_RESULT_CHARS
-          ? toolResult
-          : {
-              clipped: true,
-              preview: rawToolResult.slice(0, MAX_TOOL_RESULT_CHARS),
-              note: 'TEAMYRA clipped this tool result. Request a narrower path/query/range or use filesystem.read offset/next_offset.'
-            };
+        const boundedToolResult = boundToolResult(toolResult);
         this.appendJobEvent(jobDir, 'result', rawToolResult.slice(0, 3000));
         reply = await this.jobExchange(job, 'TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
       }
@@ -1542,4 +1645,4 @@ ChatGPTWebProvider.prototype.lane = 0;
 ChatGPTWebProvider.prototype.laneCount = 1;
 ChatGPTWebProvider.prototype.userActions = userActions(CHATGPT_SITE);
 
-module.exports = { ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };
+module.exports = { boundToolResult, ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };

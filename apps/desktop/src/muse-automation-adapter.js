@@ -192,6 +192,11 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
     })()`);
   }
 
+  // ChatGPT's conversation data is not available on muse.ai.
+  async rawReplyText() {
+    return '';
+  }
+
   // The thread URL appears as soon as the first message is sent, so there is
   // no sidebar to search for a conversation whose URL was never seen.
   async latestConversationUrl() {

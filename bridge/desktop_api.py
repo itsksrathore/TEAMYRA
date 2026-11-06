@@ -261,6 +261,9 @@ def handle(action, payload):
             token=_bridge_token(payload),
             actor="chatgpt-normal",
             confirm=payload.get("confirm") is True,
+            # Web-chat jobs delete workspace files into TEAMYRA's trash
+            # without asking (ChatGPT could not remove files it replaced).
+            recoverable_deletes=True,
         )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)

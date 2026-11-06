@@ -49,7 +49,13 @@ The default worker ID is `chatgpt-normal`, provider `chatgpt-web`. Extra account
 - The first tab is the one shown in the panel. It writes the account's status, including `lanes`, and reconciles jobs after a desktop restart. Extra tabs are hidden, take waiting jobs only through a shared claim set (never the same job twice), and unload after a minute idle.
 - The core's scheduler dispatches as many jobs to the account as its published `lanes`; further jobs queue. Other workers still run one job at a time.
 
-A signed-in account is reported ready even while TEAMYRA Desktop is closed: a job starts the desktop.
+A signed-in account is reported ready even while TEAMYRA Desktop is closed: a job starts the desktop. An account whose page last showed a sign-in form or a human check is never ready, even if its browser profile still holds cookies (`session_present`). An unpinned job that was handed to such an account and has not started goes back to the queue after a minute, for another signed-in account.
+
+**Keeping jobs on track** (failures seen on 2026-11-06):
+- **Tool requests are parsed from the reply as written.** The page shows rendered Markdown: `$...$` turns into math, a backslash before `\` or `"` disappears, `*x*` loses its stars. TEAMYRA reads the reply's original text from the conversation data the page loads (`/backend-api/conversation/<id>`, by message id) and falls back to the page text only when that fails. Muse has no such data and keeps the page text.
+- **A tool result is at most about 40,000 characters.** ChatGPT never answered messages of 120,000–132,000 characters, and those jobs hung until the page-recovery limit failed them. Long text fields (file content, command output) are shortened, and the result says what was cut and how to ask for less.
+- **A reply that would end the job early gets a second look.** If the job made no tool calls or its expected files are missing, TEAMYRA reads the page again after a few seconds: a status line ("Checked shell readiness") can sit still while ChatGPT is still thinking. If the expected files are still missing, ChatGPT is told which ones and asked to continue, at most twice, before the job fails with `missing_output`.
+- **Deletes inside the workspace need no confirmation.** `filesystem.delete` moves the file or folder (at most 2,000 entries) to TEAMYRA's trash, where it can be restored. Deletes outside the workspace and `git.restore` still need the user's confirmation. This applies only to web-chat jobs; MCP `workspace_tool` calls keep asking.
 
 Each profile writes its own readiness entry into shared runtime status. Core routing can queue work for any signed-in profile; its background view initializes on demand. The task's `project_path` is the assigned workspace for that job.
 

@@ -229,6 +229,42 @@ function validToolRequest(data) {
 // Parses the first TEAMYRA_TOOL_REQUEST in a reply. `marker` says whether the
 // reply contained the marker at all: a reply with the marker is never treated
 // as the final answer, even when its JSON cannot be parsed.
+const RAW_REPLY_JS = [
+  '(async () => {',
+  '  try {',
+  '    const wanted = __MESSAGE_ID__;',
+  '    const match = location.pathname.match(new RegExp("/c/([0-9a-f-]{36})", "i"));',
+  '    if (!match) return "";',
+  '    const cache = window.__teamyraAuth || {};',
+  '    if (!cache.token || Date.now() - cache.at > 300000) {',
+  '      const session = await fetch("/api/auth/session", { credentials: "include" }).then(r => r.ok ? r.json() : null);',
+  '      if (!session || !session.accessToken) return "";',
+  '      window.__teamyraAuth = { token: session.accessToken, at: Date.now() };',
+  '    }',
+  '    const response = await fetch("/backend-api/conversation/" + match[1], { credentials: "include",',
+  '      headers: { Authorization: "Bearer " + window.__teamyraAuth.token } });',
+  '    if (!response.ok) { if (response.status === 401) window.__teamyraAuth = null; return ""; }',
+  '    const data = await response.json();',
+  '    const mapping = (data && data.mapping) || {};',
+  '    const textOf = node => {',
+  '      const message = node && node.message;',
+  '      if (!message || !message.author || message.author.role !== "assistant") return null;',
+  '      const content = message.content || {};',
+  '      if (content.content_type !== "text") return null;',
+  '      return (content.parts || []).filter(part => typeof part === "string").join(String.fromCharCode(10));',
+  '    };',
+  // An id the data does not have yet: never fall back to an older reply.
+  '    if (wanted) return mapping[wanted] ? (textOf(mapping[wanted]) || "") : "";',
+  '    // No id from the page: the newest assistant text on the current branch.',
+  '    for (let id = data.current_node, hops = 0; id && mapping[id] && hops < 50; id = mapping[id].parent, hops += 1) {',
+  '      const text = textOf(mapping[id]);',
+  '      if (text) return text;',
+  '    }',
+  '    return "";',
+  '  } catch (error) { return ""; }',
+  '})()'
+].join('\n');
+
 function parseToolRequestDetailed(text) {
   const value = String(text || '');
   const markerAt = value.indexOf(TOOL_REQUEST_MARKER);
@@ -538,6 +574,16 @@ class ChatGPTAutomationAdapter {
     const error = teamyraError('Timed out waiting for ' + this.siteName + ' response', 'TEAMYRA_TIMEOUT', 'timeout');
     error.generating = Boolean(lastSnap?.generating);
     throw error;
+  }
+
+  // The reply exactly as ChatGPT wrote it, from the conversation data the
+  // page itself loads. The page text is rendered Markdown: `$...$` becomes
+  // math, a doubled backslash or `\"` loses a backslash, `*x*` loses its stars. Tool
+  // requests read from it broke as JSON (or, worse, wrote changed code), so
+  // they are parsed from this text. '' when it cannot be read.
+  async rawReplyText(messageId = '') {
+    const text = await this.evaluate(RAW_REPLY_JS.replace('__MESSAGE_ID__', JSON.stringify(String(messageId || ''))));
+    return typeof text === 'string' ? text : '';
   }
 
   parseToolRequestDetailed(text) {

@@ -563,10 +563,15 @@ class WorkspaceToolService:
 
     def execute_in_workspace(
         self, workspace, tool, args=None, permissions=None, *,
-        token=None, trusted=False, actor="teamyra", confirm=False,
+        token=None, trusted=False, actor="teamyra", confirm=False, recoverable_deletes=False,
     ):
         """Run the shared implementation against an explicit workspace without
-        mutating the persisted ChatGPT workspace selection."""
+        mutating the persisted ChatGPT workspace selection.
+
+        ``recoverable_deletes``: a filesystem.delete inside this workspace runs
+        without confirmation (it moves the file to TEAMYRA's trash). TEAMYRA
+        Desktop's web-chat jobs pass it; a delete outside the workspace, of a
+        large folder, or git.restore still needs confirmation."""
         self._verify_token(token, trusted)
         scoped = Path(str(workspace or "")).expanduser().resolve()
         if not scoped.exists() or not scoped.is_dir():
@@ -581,9 +586,32 @@ class WorkspaceToolService:
         except PermissionError as exc:
             self._audit(actor, tool, str(scoped), False, exc, extra={"attempt": "raise_user_only_permission"})
             raise
+        if (recoverable_deletes and not confirm and tool == "filesystem.delete"
+                and self._recoverable_delete(args, scoped, scoped_permissions)):
+            confirm = True
         return self._execute_scoped(
             tool, args, scoped, scoped_permissions, actor, confirm
         )
+
+    RECOVERABLE_DELETE_MAX_ENTRIES = 2000
+
+    def _recoverable_delete(self, args, workspace, permissions):
+        """A delete that only moves workspace files (at most a few thousand)
+        into TEAMYRA's trash, where they can be restored."""
+        args = args if isinstance(args, dict) else {}
+        try:
+            path = self._path(args.get("path"), workspace, permissions, must_exist=True)
+        except Exception:
+            return False
+        if path == workspace or self._is_protected_root(path) or not _is_relative_to(path, workspace):
+            return False
+        if path.is_dir():
+            if not args.get("recursive"):
+                return True  # the tool itself answers "requires recursive=true"
+            for count, _ in enumerate(path.rglob("*"), start=1):
+                if count > self.RECOVERABLE_DELETE_MAX_ENTRIES:
+                    return False
+        return True
 
     def _execute_scoped(self, tool, args, workspace, permissions, actor, confirm):
         args = args if isinstance(args, dict) else {}

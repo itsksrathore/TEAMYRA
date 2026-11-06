@@ -172,7 +172,12 @@ def _probe_worker_auth(info, now):
             detail = str(profile_detail or (
                 f"embedded {site} session ready" if ready else f"open this {site} account in TEAMYRA and sign in"
             ))
-            if age > 20 and profile_status.get("session_present") is True:
+            if scheduler.web_account_blocked(profile_status):
+                # Cookies can outlive the login: the page itself showed a
+                # sign-in form or a human check.
+                ready = False
+                detail = str(profile_status.get("detail") or f"{site} sign-in is required in TEAMYRA Desktop")
+            elif age > 20 and profile_status.get("session_present") is True:
                 # TEAMYRA Desktop idle-exited (its workers say "closed"), but
                 # this account is signed in and start_task starts the desktop.
                 ready = True

@@ -10,7 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bridge"))
 
-from workspace_tools import WorkspaceToolService
+from workspace_tools import WorkspaceToolError, WorkspaceToolService
 
 
 class WorkspaceToolTests(unittest.TestCase):
@@ -86,6 +86,35 @@ class WorkspaceToolTests(unittest.TestCase):
             deleted = service.execute("filesystem.delete", {"path": "nested/c.txt"}, token=token, confirm=True)
             self.assertFalse((workspace / "nested" / "c.txt").exists())
             self.assertTrue(Path(deleted["recoverable_at"]).is_file())
+
+    def test_web_chat_jobs_delete_workspace_files_into_the_trash(self):
+        # ChatGPT could not remove files it replaced: every delete needed a
+        # confirmation nobody could give during a job.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            (workspace / "old" / "deep").mkdir(parents=True)
+            (workspace / "a.txt").write_text("a", encoding="utf-8")
+            (workspace / "old" / "deep" / "b.txt").write_text("b", encoding="utf-8")
+            outside = Path(td) / "outside.txt"
+            outside.write_text("o", encoding="utf-8")
+            service = WorkspaceToolService(root)
+            perms = {"read": True, "write": True}
+            run = lambda tool, args, **kw: service.execute_in_workspace(
+                workspace, tool, args, perms, trusted=True, **kw)
+            with self.assertRaises(PermissionError):
+                run("filesystem.delete", {"path": "a.txt"})
+            moved = run("filesystem.delete", {"path": "a.txt"}, recoverable_deletes=True)
+            self.assertTrue(Path(moved["recoverable_at"]).is_file())
+            with self.assertRaises(WorkspaceToolError):
+                run("filesystem.delete", {"path": "old"}, recoverable_deletes=True)
+            run("filesystem.delete", {"path": "old", "recursive": True}, recoverable_deletes=True)
+            self.assertFalse((workspace / "old").exists())
+            with self.assertRaises(PermissionError):
+                run("filesystem.delete", {"path": "."}, recoverable_deletes=True)
+            with self.assertRaises(PermissionError):
+                run("git.restore", {"paths": ["a.txt"]}, recoverable_deletes=True)
+            self.assertTrue(outside.exists())
 
 
     def test_workspace_root_and_home_are_rejected(self):

@@ -19,7 +19,7 @@ vm.runInNewContext(fs.readFileSync(require.resolve('../src/chatgpt-web-provider'
     return require(name);
   }
 });
-const { ChatGPTWebProvider } = providerModule.exports;
+const { ChatGPTWebProvider, boundToolResult } = providerModule.exports;
 const { ChatGPTAutomationAdapter } = require('../src/chatgpt-automation-adapter');
 
 // DOM-free fake of the embedded ChatGPT page. Each sendTask() consumes one
@@ -87,7 +87,16 @@ class FakeChat extends ChatGPTAutomationAdapter {
       this.turn += 1;
       this.current = { count: this.turn, text: this.pending.text, messageId: 'turn-' + this.turn };
       this.genTicks = this.pending.generating || 0;
+      // `later`: the reply text changes after `laterAfter` more reads without
+      // a new message (a status line shown while the model still thinks).
+      this.later = this.pending.later ? { text: this.pending.later, after: this.pending.laterAfter ?? 2 } : null;
+      this.turnSnaps = 0;
       this.pending = null;
+    }
+    this.turnSnaps = (this.turnSnaps || 0) + 1;
+    if (this.later && this.turnSnaps > this.later.after) {
+      this.current = { ...this.current, text: this.later.text };
+      this.later = null;
     }
     if (this.genTicks > 0) {
       this.genTicks -= 1;
@@ -116,6 +125,7 @@ function makeProvider(fake, { permissions } = {}) {
   provider.view = { webContents: { isDestroyed: () => false } };
   provider.automation = fake;
   provider.replyPollMs = 1;
+  provider.settleRecheckMs = 1;
   provider.promptWaitMs = 5;
   provider.renderWaitMs = 200;
   provider.recoveryBackoffMs = 1;
@@ -286,13 +296,83 @@ async function testExpectedOutputFiles() {
     [['output-directory'], false], [['ready.txt', 'missing.txt'], false], [['../outside.txt'], false]
   ]) {
     const dir = makeJob({ expect_files: paths });
-    await makeProvider(new FakeChat(['Finished: created all requested outputs.'])).runDelegatedJob(dir);
+    const fake = new FakeChat(['Finished: created all requested outputs.', 'Done.', 'Done again.']);
+    await makeProvider(fake).runDelegatedJob(dir);
     const meta = readMeta(dir);
     assert.equal(meta.state, passed ? 'done' : 'failed');
     assert.equal(meta.reason, passed ? null : 'missing_output');
     assert.equal(meta.exit_code, passed ? 0 : 1);
-    if (!passed) assert.ok(meta.missing_outputs.length);
+    if (!passed) {
+      assert.ok(meta.missing_outputs.length);
+      // Asked twice to continue before the job fails.
+      assert.equal(meta.output_nudges, 2);
+      assert.equal(fake.sent.length, 3);
+      assert.ok(fake.sent[1].startsWith('TEAMYRA: the task is not finished.'));
+    }
   }
+  // ChatGPT said the bridge was unavailable and stopped (1106-141119): told
+  // what is missing, it writes the file and the job succeeds.
+  const target = path.join(root, 'nudged.md');
+  const fake = new FakeChat([
+    'I can work on QUA-02, but the TEAMYRA local-tool bridge is not available in this session.',
+    'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.write","args":{"path":"nudged.md","content":"x"}}',
+    'Finished: wrote nudged.md.'
+  ]);
+  const provider = makeProvider(fake);
+  const run = provider.workspaceBridge.executeInWorkspace;
+  provider.workspaceBridge.executeInWorkspace = async (...args) => { fs.writeFileSync(target, 'x'); return run(...args); };
+  const dir = makeJob({ expect_files: ['nudged.md'] });
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.equal(provider.toolCalls.length, 1);
+}
+
+function testLargeToolResultsFitOneMessage() {
+  // ChatGPT never answered tool results of 120-132k characters; the jobs
+  // hung until the page-recovery limit failed them.
+  const read = boundToolResult({ path: 'a', content: 'x"\\'.repeat(60000), offset: 0, next_offset: 90000 });
+  assert.ok(JSON.stringify(read).length <= 40000);
+  assert.ok(read.clipped && read.content.length >= 1000 && /of 180000 characters/.test(read.content_clipped));
+  assert.equal(read.next_offset, null, 'a clipped read has no valid next_offset');
+  const run = boundToolResult({ argv: ['x'], stdout: 'o'.repeat(200000), stderr: 'e'.repeat(50000), exit_code: 3 });
+  assert.ok(JSON.stringify(run).length <= 40000);
+  assert.equal(run.exit_code, 3);
+  assert.ok(run.stdout.startsWith('ooo') && run.stderr.startsWith('eee'));
+  const many = boundToolResult({ matches: Array.from({ length: 5000 }, (_, i) => ({ path: 'p' + i, line: i, text: 't'.repeat(30) })) });
+  assert.ok(JSON.stringify(many).length <= 40000 && many.preview && many.note);
+  const small = { ok: true, content: 'hi' };
+  assert.equal(boundToolResult(small), small);
+}
+
+async function testToolRequestsAreParsedFromTheReplyAsWritten() {
+  // The page shows rendered Markdown: `\"` lost its backslash and `$_.Line`
+  // turned into math, so the request broke as JSON (1106-141045). The reply
+  // as written comes from the conversation data instead.
+  const written = String.raw`TEAMYRA_TOOL_REQUEST {"tool":"terminal.run","args":{"argv":["powershell","-Command","'{0}' -f $_.Line; echo \"a\\b\""]}}`;
+  const rendered = 'TEAMYRA_TOOL_REQUEST {"tool":"terminal.run","args":{"argv":["powershell","-Command","\'{0}\' -f \n𝐿\n𝑖\n; echo "a\b""]}}';
+  const fake = new FakeChat([rendered, 'Finished: ran it.']);
+  fake.rawReplyText = async () => fake.turn === 1 ? written : '';
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.deepEqual(provider.toolCalls[0].args.argv, ['powershell', '-Command', String.raw`'{0}' -f $_.Line; echo "a\b"`]);
+}
+
+async function testStatusLineIsNotTakenAsTheFinalReply() {
+  // "Checked shell readiness" sat still while ChatGPT was still thinking and
+  // ended the job (1106-133637). A second look waits for the real reply.
+  const fake = new FakeChat([
+    { text: 'Checked shell readiness', later: 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"a.txt"}}' },
+    'Finished: the file says hello.'
+  ]);
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'done');
+  assert.equal(provider.toolCalls.length, 1);
+  assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: the file says hello.');
 }
 
 async function testChallengeWhileWaitingPausesAndResendsLostMessage() {
@@ -650,6 +730,9 @@ async function main() {
     await testProtocolLossRecoversAndRetriesAreBounded();
     await testProtocolRecoveryAfterToolsAndGenuineFinalAnswers();
     await testExpectedOutputFiles();
+    testLargeToolResultsFitOneMessage();
+    await testToolRequestsAreParsedFromTheReplyAsWritten();
+    await testStatusLineIsNotTakenAsTheFinalReply();
     await testChallengeWhileWaitingPausesAndResendsLostMessage();
     await testChallengeWithDeliveredMessageDoesNotResend();
     await testChallengeBeforeSending();

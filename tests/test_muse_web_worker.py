@@ -125,6 +125,39 @@ class MuseWorkerTests(unittest.TestCase):
             q2 = json.loads((Path(td) / "jobs" / "q2" / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(q2["state"], "waiting_for_desktop")
 
+    def test_a_signed_out_account_gets_no_jobs_and_hands_back_waiting_ones(self):
+        # ChatGPT Normal 2 kept its cookies (session_present) while its page
+        # showed the sign-in form; a pooled job went there and waited 2 h
+        # until it timed out (1106-141817).
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "chatgpt" / "status.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"heartbeat_at": time.time(), "active_profile_id": "web", "profiles": {
+                "web": {"session_present": True, "automation_ready": True, "lanes": 2},
+                "two": {"session_present": True, "automation_ready": False, "login_visible": True,
+                        "detail": "ChatGPT sign-in is required in the embedded view."}}}), encoding="utf-8")
+            one = {"id": "chatgpt-normal", "provider": "chatgpt-web", "profile_id": "web"}
+            two = {"id": "chatgpt-two", "provider": "chatgpt-web", "profile_id": "two"}
+            self.assertTrue(scheduler.chatgpt_ready(td, one))
+            self.assertFalse(scheduler.chatgpt_ready(td, two))
+            with patch.object(server, "ROOT", Path(td)):
+                ready, detail = server.worker_auth_status(two, use_cache=False)
+            self.assertFalse(ready)
+            self.assertIn("sign-in", detail)
+            old = time.time() - 300
+            write_job(td, "parked", state="waiting_for_desktop", provider="chatgpt-web", worker="chatgpt-two",
+                      dispatched_at=old, created=old, profile_id="two")
+            write_job(td, "pinned", state="waiting_for_desktop", provider="chatgpt-web", worker="chatgpt-two",
+                      dispatched_at=old, created=old, profile_id="two", pin=True)
+            registry = {"chatgpt-normal": {**one, "enabled": True}, "chatgpt-two": {**two, "enabled": True}}
+            report = scheduler.dispatch_once(td, spawn=lambda *a, **k: 1, registry=registry,
+                                             is_ready=lambda w: scheduler.chatgpt_ready(td, registry[w]))
+            self.assertEqual(report["returned"], ["parked"])
+            parked = json.loads((Path(td) / "jobs" / "parked" / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual((parked["worker"], parked["state"]), ("chatgpt-normal", "waiting_for_desktop"))
+            pinned = json.loads((Path(td) / "jobs" / "pinned" / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual((pinned["worker"], pinned["state"]), ("chatgpt-two", "waiting_for_desktop"))
+
     def test_other_workers_still_run_one_job_at_a_time(self):
         self.assertEqual(scheduler.worker_capacity(ROOT, {"provider": "codex", "profile_id": "native"}), 1)
         with tempfile.TemporaryDirectory() as td:
