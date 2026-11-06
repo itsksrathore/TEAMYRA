@@ -1302,12 +1302,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "codex", "claude", "antigravity"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "codex", "claude", "antigravity"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
     {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "codex", "claude", "antigravity", "google-media"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "codex", "claude", "antigravity", "google-media"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},

@@ -16,6 +16,8 @@ WEB_SITES = {
                      "label": "DeepSeek", "prefix": "deepseek-", "priority": 270},
     "grok-web": {"folder": "grok", "name": "Grok", "builtin": "grok-normal",
                  "label": "Grok", "prefix": "grok-", "priority": 280},
+    "qwen-web": {"folder": "qwen", "name": "Qwen", "builtin": "qwen-normal",
+                 "label": "Qwen", "prefix": "qwen-", "priority": 290},
 }
 
 WEB_PROVIDERS = tuple(WEB_SITES)

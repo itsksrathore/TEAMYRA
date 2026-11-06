@@ -47,6 +47,7 @@ const WORKER_META = {
   chatgpt: { code: 'GPT', icon: 'openai', cls: 'chatgpt', label: 'ChatGPT' },
   muse: { code: 'MU', icon: '', cls: 'antigravity', label: 'Muse' },
   deepseek: { code: 'DS', icon: '', cls: 'codex', label: 'DeepSeek' },
+  qwen: { code: 'QW', icon: '', cls: 'antigravity', label: 'Qwen' },
   googleMedia: { code: 'GM', icon: '', cls: 'antigravity', label: 'Google Media' },
   other: { code: 'AI', icon: '', cls: '', label: 'Agent' }
 };
@@ -56,7 +57,8 @@ const WORKER_META = {
 const WEB_CHAT_SITES = {
   'chatgpt-web': { prefix: '', name: 'ChatGPT', title: 'ChatGPT Normal', meta: 'chatgpt', builtin: 'chatgpt-normal', workerPrefix: 'chatgpt-' },
   'muse-web': { prefix: 'muse:', name: 'Muse', title: 'Muse', meta: 'muse', builtin: 'muse-normal', workerPrefix: 'muse-' },
-  'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', title: 'DeepSeek', meta: 'deepseek', builtin: 'deepseek-normal', workerPrefix: 'deepseek-' }
+  'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', title: 'DeepSeek', meta: 'deepseek', builtin: 'deepseek-normal', workerPrefix: 'deepseek-' },
+  'qwen-web': { prefix: 'qwen:', name: 'Qwen', title: 'Qwen', meta: 'qwen', builtin: 'qwen-normal', workerPrefix: 'qwen-' }
 };
 const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([id, site]) => [id, site.prefix]));
 const isWebChat = providerId => WEB_CHAT_PREFIX[providerId] !== undefined;
@@ -96,6 +98,7 @@ function workerMeta(worker) {
   if (value.includes('chatgpt')) return WORKER_META.chatgpt;
   if (value.startsWith('muse')) return WORKER_META.muse;
   if (value.startsWith('deepseek')) return WORKER_META.deepseek;
+  if (value.startsWith('qwen')) return WORKER_META.qwen;
   if (value.includes('claude')) return WORKER_META.claude;
   if (value.includes('codex')) return WORKER_META.codex;
   if (value.includes('antigravity') || value.includes('agy')) return WORKER_META.antigravity;

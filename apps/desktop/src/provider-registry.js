@@ -67,6 +67,16 @@ const PROVIDERS = [
     color: 'blue'
   },
   {
+    id: 'qwen-web',
+    name: 'Qwen',
+    kind: 'web',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'web' },
+    managed: { verified: true, env: null, webProfiles: true },
+    color: 'violet'
+  },
+  {
     id: 'google-media',
     name: 'Google Media',
     kind: 'media',
@@ -288,7 +298,7 @@ async function detectProviders() {
         managedProfileEnv: null,
         profiles: [{
           id: 'web',
-          name: 'Teamyra Worker — ' + ({ 'muse-web': 'Muse', 'deepseek-web': 'DeepSeek' }[provider.id] || 'ChatGPT'),
+          name: 'Teamyra Worker — ' + ({ 'muse-web': 'Muse', 'deepseek-web': 'DeepSeek', 'qwen-web': 'Qwen' }[provider.id] || 'ChatGPT'),
           kind: 'web',
           path: '',
           signedIn: false,
