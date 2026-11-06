@@ -126,6 +126,7 @@ function makeProvider(fake, { permissions } = {}) {
   provider.automation = fake;
   provider.replyPollMs = 1;
   provider.settleRecheckMs = 1;
+  provider.jobScanMaxAgeMs = 0;
   provider.promptWaitMs = 5;
   provider.renderWaitMs = 200;
   provider.recoveryBackoffMs = 1;

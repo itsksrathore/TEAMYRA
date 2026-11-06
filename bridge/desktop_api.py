@@ -4,6 +4,7 @@ This keeps destructive Git lifecycle logic in the tested Python core rather than
 duplicating it inside Electron. One invocation handles one action and prints one
 JSON response to stdout.
 """
+import contextvars
 import json
 import os
 import sys
@@ -26,8 +27,15 @@ import workspace_tools
 import media_engine
 
 
+# Per-request environment in --serve mode (one long-lived process answers
+# many desktop calls at once, each with its own token).
+_REQUEST_ENV = contextvars.ContextVar("teamyra_request_env", default=None)
+
+
 def _bridge_token(payload):
-    return os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN") or payload.get("bridge_token")
+    request_env = _REQUEST_ENV.get() or {}
+    return (request_env.get("TEAMYRA_LOCAL_AGENT_TOKEN") or os.environ.get("TEAMYRA_LOCAL_AGENT_TOKEN")
+            or payload.get("bridge_token"))
 
 
 def handle(action, payload):
@@ -337,9 +345,63 @@ def handle(action, payload):
     raise ValueError(f"unsupported desktop core action: {action}")
 
 
+SERVE_THREADS = 48
+
+
+def serve():
+    """Answer desktop calls over stdin/stdout, one JSON object per line:
+    {"id", "action", "payload", "env"} in, {"id", "ok", "result"|"error"} out.
+
+    TEAMYRA Desktop used to start a new Python process for every call. Its
+    media tabs ask for work every few seconds and its web-chat tabs check
+    their workspace, so several processes started each second even with no
+    work. One process now answers them all, several at a time; the desktop
+    falls back to a process per call if this one is not running.
+    """
+    import concurrent.futures
+    import threading
+
+    out = sys.stdout
+    # A stray print in an action must never corrupt the reply stream.
+    sys.stdout = sys.stderr
+    write_lock = threading.Lock()
+
+    def reply(message):
+        line = json.dumps(message, ensure_ascii=False)
+        with write_lock:
+            out.write(line + "\n")
+            out.flush()
+
+    def run(request):
+        request_id = request.get("id")
+        token = _REQUEST_ENV.set(request.get("env") if isinstance(request.get("env"), dict) else {})
+        try:
+            result = handle(str(request.get("action") or ""), request.get("payload"))
+            reply({"id": request_id, "ok": True, "result": result})
+        except BaseException as exc:  # SystemExit from an action must not end the server
+            reply({"id": request_id, "ok": False, "error": str(exc) or exc.__class__.__name__})
+        finally:
+            _REQUEST_ENV.reset(token)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=SERVE_THREADS, thread_name_prefix="desktop-api") as pool:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(request, dict):
+                continue
+            pool.submit(run, request)
+
+
 def main():
     if len(sys.argv) < 2:
-        raise SystemExit("usage: desktop_api.py <action> [json_payload]")
+        raise SystemExit("usage: desktop_api.py <action> [json_payload] | --serve")
+    if sys.argv[1] == "--serve":
+        return serve()
     action = sys.argv[1]
     payload = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
     try:

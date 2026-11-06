@@ -424,6 +424,21 @@ function mergeUsageProviderState(snapshot, providers) {
   return snapshot;
 }
 
+// Parsed meta.json per job, reused while the file is unchanged. The window
+// asks for the job list every few seconds, and reading and parsing every
+// job's meta (about a thousand) each time took ~200 ms on the main thread.
+const JOB_META_CACHE = new Map();
+
+function cachedJobMeta(file) {
+  const stat = fs.statSync(file);
+  const key = stat.ino + ':' + stat.mtimeMs + ':' + stat.size;
+  const hit = JOB_META_CACHE.get(file);
+  if (hit && hit.key === key) return hit.data;
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  JOB_META_CACHE.set(file, { key, data });
+  return data;
+}
+
 function listJobs(limit = 30) {
   if (!fs.existsSync(JOBS)) return [];
   return fs.readdirSync(JOBS, { withFileTypes: true })
@@ -431,7 +446,7 @@ function listJobs(limit = 30) {
     .map(entry => {
       const meta = path.join(JOBS, entry.name, 'meta.json');
       try {
-        const data = JSON.parse(fs.readFileSync(meta, 'utf8'));
+        const data = cachedJobMeta(meta);
         return {
           id: data.id || entry.name,
           label: data.label || entry.name,
@@ -536,10 +551,32 @@ function readTranscript(jobId, offset = 0) {
   if (!/^[A-Za-z0-9._-]+$/.test(jobId || '')) throw new Error('Invalid job id');
   const file = path.join(JOBS, jobId, 'transcript.md');
   if (!fs.existsSync(file)) return { text: '', next: 0 };
-  const data = fs.readFileSync(file, 'utf8');
-  const start = Math.max(0, Math.min(Number(offset) || 0, data.length));
-  const end = Math.min(data.length, start + 200000);
-  return { text: data.slice(start, end), next: end };
+  // Byte offsets, reading only the new part: the whole transcript (often
+  // megabytes) used to be read for every running job on every refresh. A
+  // first read starts near the end; the window keeps only the last part.
+  const size = fs.statSync(file).size;
+  let start = Number(offset) || 0;
+  if (!start || start > size) start = Math.max(0, size - 65536);
+  const length = Math.min(size - start, 200000);
+  if (length <= 0) return { text: '', next: size };
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(file, 'r');
+  try { fs.readSync(fd, buffer, 0, length, start); } finally { fs.closeSync(fd); }
+  // Never split a UTF-8 character: skip a partial one at the start, and
+  // leave one cut at the end for the next read.
+  let head = 0;
+  while (head < 4 && head < buffer.length && (buffer[head] & 0xC0) === 0x80) head += 1;
+  let end = buffer.length;
+  for (let index = buffer.length - 1; index >= Math.max(0, buffer.length - 4); index -= 1) {
+    const byte = buffer[index];
+    if ((byte & 0x80) === 0) break;
+    if ((byte & 0xC0) === 0xC0) {
+      const need = byte >= 0xF0 ? 4 : byte >= 0xE0 ? 3 : 2;
+      if (buffer.length - index < need) end = index;
+      break;
+    }
+  }
+  return { text: buffer.subarray(head, end).toString('utf8'), next: start + end };
 }
 
 function terminalShell() {
@@ -1769,6 +1806,7 @@ app.on('before-quit', () => {
   isQuitting = true;
   // Programs ChatGPT/Muse jobs started (dev servers, apps) end with the desktop.
   try { require('./job-processes').jobProcesses.stopAll(); } catch {}
+  try { require('./core-api').coreServer.stop(); } catch {}
   if (gotSingleInstanceLock) { try { publishDesktopState(false); } catch {} }
   clearDesktopIdleExit();
   desktopControlPoller?.stop();

@@ -179,20 +179,55 @@ def is_done(root, job_id):
     return (_jobs_dir(root) / job_id / "DONE").exists()
 
 
+# Parsed meta.json per job. The core and the desktop's core process are
+# long-lived, and every dispatch read and parsed all job metas (about a
+# thousand, 1.5-2 s on Windows). An unfinished job is re-read when its file
+# changes; a finished one (DONE is never removed) is checked once a minute.
+_META_CACHE = {}
+DONE_RECHECK_SECONDS = 60
+
+
+def _cached_meta(folder):
+    key_path = str(folder)
+    hit = _META_CACHE.get(key_path)
+    now = time.monotonic()
+    if hit and hit["done"] and now - hit["checked"] < DONE_RECHECK_SECONDS:
+        return (dict(hit["meta"]) if hit["meta"] is not None else None), True
+    path = Path(folder) / "meta.json"
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None, False
+    # The file id changes on every atomic replace, so two writes within one
+    # clock tick with the same size are still told apart.
+    key = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    done = hit["done"] if hit and hit["done"] else os.path.exists(os.path.join(folder, "DONE"))
+    if hit and hit["key"] == key:
+        hit.update(done=done, checked=now)
+        return (dict(hit["meta"]) if hit["meta"] is not None else None), done
+    meta = _read_json(path)
+    # An unreadable file (four old jobs hold only zero bytes) is remembered
+    # too: _read_json waits and retries, and did so on every scan.
+    meta = meta if isinstance(meta, dict) else None
+    _META_CACHE[key_path] = {"key": key, "meta": meta, "done": done, "checked": now}
+    return (dict(meta) if meta is not None else None), done
+
+
 def load_jobs(root):
     """All job metas (dicts with an ``id``), oldest first."""
     jobs = _jobs_dir(root)
     out = []
     if not jobs.exists():
         return out
-    for folder in jobs.iterdir():
-        if not folder.is_dir():
-            continue
-        meta = _read_json(folder / "meta.json")
-        if isinstance(meta, dict):
-            meta.setdefault("id", folder.name)
-            meta["_done"] = (folder / "DONE").exists()
-            out.append(meta)
+    with os.scandir(jobs) as entries:
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            meta, done = _cached_meta(entry.path)
+            if isinstance(meta, dict):
+                meta.setdefault("id", entry.name)
+                meta["_done"] = done
+                out.append(meta)
     out.sort(key=lambda m: (float(m.get("created") or 0), str(m.get("id"))))
     return out
 

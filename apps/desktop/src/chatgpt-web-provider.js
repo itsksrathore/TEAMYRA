@@ -91,6 +91,38 @@ const CHATGPT_SITE = {
 // here, synchronously, so two tabs never run one job.
 const CLAIMED_JOBS = new Set();
 
+// Unfinished jobs, read once for every tab of every account. Each tab used to
+// read every job's meta.json (about a thousand) every 2 s on the desktop's
+// main thread; with several accounts and five tabs each that was thousands
+// of file reads a second and froze the app. Finished jobs (DONE, which is
+// never removed) are remembered and skipped without touching the disk.
+const JOB_SCAN = { root: null, at: 0, jobs: [], done: new Set() };
+
+function unfinishedJobs(runtimeRoot, maxAgeMs = 1000) {
+  const now = Date.now();
+  if (JOB_SCAN.root === runtimeRoot && now - JOB_SCAN.at < maxAgeMs) return JOB_SCAN.jobs;
+  if (JOB_SCAN.root !== runtimeRoot) {
+    JOB_SCAN.root = runtimeRoot;
+    JOB_SCAN.done = new Set();
+  }
+  const jobsRoot = path.join(runtimeRoot, 'jobs');
+  const jobs = [];
+  let entries = [];
+  try { entries = fs.readdirSync(jobsRoot, { withFileTypes: true }); } catch {}
+  for (const entry of entries) {
+    if (!entry.isDirectory() || JOB_SCAN.done.has(entry.name)) continue;
+    const dir = path.join(jobsRoot, entry.name);
+    if (fs.existsSync(path.join(dir, 'DONE'))) {
+      JOB_SCAN.done.add(entry.name);
+      continue;
+    }
+    try { jobs.push({ dir, meta: JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')) }); } catch {}
+  }
+  JOB_SCAN.at = now;
+  JOB_SCAN.jobs = jobs;
+  return jobs;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -897,22 +929,15 @@ class ChatGPTWebProvider {
   // Jobs this profile owns and has not finished: { waiting, owned } plus
   // whether any ChatGPT job anywhere is still queued.
   scanJobs() {
-    const jobsRoot = path.join(this.runtimeRoot, 'jobs');
     const waiting = [];
     let owned = 0;
     let queued = 0;
-    if (!fs.existsSync(jobsRoot)) return { waiting, owned, queued };
-    for (const entry of fs.readdirSync(jobsRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const dir = path.join(jobsRoot, entry.name);
-      try {
-        const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
-        if (meta.provider !== this.site.provider || fs.existsSync(path.join(dir, 'DONE'))) continue;
-        if (meta.state === 'queued') { queued += 1; continue; }
-        if (String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId) continue;
-        if (['waiting_for_desktop', 'running', 'needs_user'].includes(meta.state)) owned += 1;
-        if (meta.state === 'waiting_for_desktop') waiting.push({ dir, meta });
-      } catch {}
+    for (const { dir, meta } of unfinishedJobs(this.runtimeRoot, this.jobScanMaxAgeMs ?? 1000)) {
+      if (meta.provider !== this.site.provider) continue;
+      if (meta.state === 'queued') { queued += 1; continue; }
+      if (String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId) continue;
+      if (['waiting_for_desktop', 'running', 'needs_user'].includes(meta.state)) owned += 1;
+      if (meta.state === 'waiting_for_desktop') waiting.push({ dir, meta });
     }
     // A job resumed after a desktop restart goes first; then oldest first.
     waiting.sort((a, b) => (b.meta.resume_requested ? 1 : 0) - (a.meta.resume_requested ? 1 : 0) ||

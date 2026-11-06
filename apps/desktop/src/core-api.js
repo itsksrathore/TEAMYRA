@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 
 const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const ROOT = path.resolve(process.env.TEAMYRA_ROOT || SOURCE_ROOT);
@@ -97,11 +97,157 @@ async function callCore(action, payload = {}, options = {}) {
   }
 }
 
+// One long-lived TEAMYRA Core process answers the desktop's calls (one JSON
+// line per request and reply). A new Python process per call cost 100-300 ms
+// of CPU each, and media tabs and web-chat tabs made several such calls a
+// second even with nothing to do. If this process cannot start, or stopped
+// just now, calls fall back to one process each.
+const SERVER_RECYCLE_CALLS = 5000;
+const SERVER_RETRY_MS = 30000;
+
+class CoreServer {
+  constructor() {
+    this.child = null;
+    this.pending = new Map();
+    this.seq = 0;
+    this.calls = 0;
+    this.failedAt = 0;
+    this.starting = null;
+  }
+
+  async ensure() {
+    if (this.child) return this.child;
+    if (process.env.TEAMYRA_CORE_PER_CALL === '1' || Date.now() - this.failedAt < SERVER_RETRY_MS) return null;
+    if (!this.starting) {
+      this.starting = this.start().catch(() => {
+        this.failedAt = Date.now();
+        return null;
+      }).finally(() => { this.starting = null; });
+    }
+    return this.starting;
+  }
+
+  async start() {
+    const { file, args } = await coreCommand();
+    const child = spawn(file, [...args, '--serve'], {
+      windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: coreEnv()
+    });
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => this.onData(child, chunk));
+    child.stderr.on('data', () => {});
+    child.stdin.on('error', () => {});
+    child.on('exit', () => this.onExit(child));
+    this.child = child;
+    this.calls = 0;
+    return child;
+  }
+
+  call(child, action, payload, options) {
+    const id = ++this.seq;
+    this.calls += 1;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`TEAMYRA Core did not answer ${action} in ${Math.round((options.timeout || 45000) / 1000)} s`));
+      }, options.timeout || 45000);
+      this.pending.set(id, { resolve, reject, timer, child });
+      const line = JSON.stringify({ id, action, payload: payload || {}, env: options.env || {} }) + '\n';
+      child.stdin.write(line, error => {
+        if (!error) return;
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      });
+    });
+  }
+
+  onData(child, chunk) {
+    // Each process has its own buffer: a recycled one still answers its
+    // last requests while the new one starts.
+    child.teamyraBuffer = (child.teamyraBuffer || '') + chunk;
+    let index;
+    while ((index = child.teamyraBuffer.indexOf('\n')) >= 0) {
+      const line = child.teamyraBuffer.slice(0, index);
+      child.teamyraBuffer = child.teamyraBuffer.slice(index + 1);
+      if (!line.trim()) continue;
+      let message;
+      try { message = JSON.parse(line); } catch { continue; }
+      const entry = this.pending.get(message.id);
+      if (!entry) continue;
+      this.pending.delete(message.id);
+      clearTimeout(entry.timer);
+      if (message.ok === true) entry.resolve(message.result);
+      else entry.reject(new Error(message.error || 'TEAMYRA Core request failed'));
+    }
+    this.maybeRecycle();
+  }
+
+  // Start a fresh process now and then; the old one ends once idle.
+  maybeRecycle() {
+    if (this.calls < SERVER_RECYCLE_CALLS || !this.child) return;
+    const old = this.child;
+    if ([...this.pending.values()].some(entry => entry.child === old)) return;
+    this.child = null;
+    try { old.stdin.end(); } catch {}
+  }
+
+  onExit(child) {
+    for (const [id, entry] of this.pending) {
+      if (entry.child !== child) continue;
+      this.pending.delete(id);
+      clearTimeout(entry.timer);
+      entry.reject(new Error('TEAMYRA Core stopped while answering this request'));
+    }
+    if (this.child === child) {
+      this.child = null;
+      this.failedAt = Date.now();
+    }
+  }
+
+  stop() {
+    const child = this.child;
+    this.child = null;
+    if (child) { try { child.stdin.end(); } catch {} }
+  }
+}
+
+const coreServer = new CoreServer();
+
+function coreEnv(extra = {}) {
+  return {
+    ...process.env,
+    TEAMYRA_ROOT: ROOT,
+    ...(PACKAGED_CORE && fs.existsSync(PACKAGED_CORE) ? { TEAMYRA_CORE_EXE: PACKAGED_CORE } : {}),
+    ...extra
+  };
+}
+
+async function coreCommand() {
+  if (process.env.TEAMYRA_CORE_EXE) {
+    if (!PACKAGED_CORE || !fs.existsSync(PACKAGED_CORE)) {
+      throw new Error('Bundled TEAMYRA Core is missing: ' + String(PACKAGED_CORE || process.env.TEAMYRA_CORE_EXE));
+    }
+    return { file: PACKAGED_CORE, args: ['__desktop-api'] };
+  }
+  if (PACKAGED_CORE && fs.existsSync(PACKAGED_CORE)) return { file: PACKAGED_CORE, args: ['__desktop-api'] };
+  const python = await resolvePython();
+  return { file: python.file, args: [...python.prefix, DESKTOP_API] };
+}
+
 async function callCoreOnce(action, payload = {}, options = {}) {
   if (!/^[a-z0-9.-]+$/i.test(String(action || ''))) {
     throw new Error('Invalid core action');
   }
+  const server = await coreServer.ensure().catch(() => null);
+  if (server) return coreServer.call(server, action, payload, options);
+  return callCoreProcess(action, payload, options);
+}
 
+async function callCoreProcess(action, payload = {}, options = {}) {
   let file;
   let args;
   if (process.env.TEAMYRA_CORE_EXE) {
@@ -147,4 +293,4 @@ async function callCoreOnce(action, payload = {}, options = {}) {
   return response.result;
 }
 
-module.exports = { ROOT, SOURCE_ROOT, PACKAGED_CORE, callCore, resolvePython };
+module.exports = { ROOT, SOURCE_ROOT, PACKAGED_CORE, callCore, resolvePython, coreServer, CoreServer };
