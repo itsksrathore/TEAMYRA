@@ -49,6 +49,7 @@ const WORKER_META = {
   deepseek: { code: 'DS', icon: '', cls: 'codex', label: 'DeepSeek' },
   qwen: { code: 'QW', icon: '', cls: 'antigravity', label: 'Qwen' },
   grok: { code: 'GK', icon: '', cls: 'codex', label: 'Grok' },
+  glm: { code: 'GLM', icon: '', cls: 'antigravity', label: 'GLM (Z.ai)' },
   googleMedia: { code: 'GM', icon: '', cls: 'antigravity', label: 'Google Media' },
   other: { code: 'AI', icon: '', cls: '', label: 'Agent' }
 };
@@ -60,7 +61,8 @@ const WEB_CHAT_SITES = {
   'muse-web': { prefix: 'muse:', name: 'Muse', title: 'Muse', meta: 'muse', builtin: 'muse-normal', workerPrefix: 'muse-' },
   'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', title: 'DeepSeek', meta: 'deepseek', builtin: 'deepseek-normal', workerPrefix: 'deepseek-' },
   'qwen-web': { prefix: 'qwen:', name: 'Qwen', title: 'Qwen', meta: 'qwen', builtin: 'qwen-normal', workerPrefix: 'qwen-' },
-  'grok-web': { prefix: 'grok:', name: 'Grok', title: 'Grok', meta: 'grok', builtin: 'grok-normal', workerPrefix: 'grok-' }
+  'grok-web': { prefix: 'grok:', name: 'Grok', title: 'Grok', meta: 'grok', builtin: 'grok-normal', workerPrefix: 'grok-' },
+  'glm-web': { prefix: 'glm:', name: 'GLM', title: 'GLM (Z.ai)', meta: 'glm', builtin: 'glm-normal', workerPrefix: 'glm-' }
 };
 const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([id, site]) => [id, site.prefix]));
 const isWebChat = providerId => WEB_CHAT_PREFIX[providerId] !== undefined;
@@ -102,6 +104,7 @@ function workerMeta(worker) {
   if (value.startsWith('deepseek')) return WORKER_META.deepseek;
   if (value.startsWith('qwen')) return WORKER_META.qwen;
   if (value.startsWith('grok')) return WORKER_META.grok;
+  if (value.startsWith('glm')) return WORKER_META.glm;
   if (value.includes('claude')) return WORKER_META.claude;
   if (value.includes('codex')) return WORKER_META.codex;
   if (value.includes('antigravity') || value.includes('agy')) return WORKER_META.antigravity;

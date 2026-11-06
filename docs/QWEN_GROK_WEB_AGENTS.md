@@ -43,11 +43,16 @@ A Continue button at a site's length limit is clicked automatically, and "busy" 
 - **Build behaviour:** in a test, Build Mode started a terminal in Grok's own cloud sandbox (`InitTerminalSession`, a grok-sandbox.com preview) instead of answering with a tool request, and then failed with "Service temporarily unavailable". The bootstrap prompt tells it to work only through TEAMYRA tools. If it keeps building in its sandbox, Expert is the mode to use for local projects.
 - **Hidden views:** the page draws nothing and its app does not start while its window is hidden or covered, so the adapter draws frames like the Muse one.
 
-## GLM (z.ai): not added as a web worker
+## GLM on Z.ai (`glm-web`, worker `glm-normal`)
 
-On chat.z.ai (checked 2026-11-06, free plan):
-- the models are GLM-5.3-Flash, **GLM-5.3** and GLM-5.2, with Effort up to Max;
-- GLM-5.3 was refused at peak hours ("Currently in peak hours … switch to GLM-5.3-Flash");
-- an Alibaba Cloud slider captcha came up for **every message, even within one chat**.
+`apps/desktop/src/glm-web-provider.js` (`GlmAutomationAdapter`). Page checked on 2026-11-06, free plan.
 
-A job sends tens of messages, so every one would wait for a person. TEAMYRA does not solve captchas. GLM should be added through Z.ai's official API instead (API key, no captcha).
+- **Model:** the strongest full model, which is the highest version that isn't Flash, Air, Lite or Mini (GLM-5.3 today).
+  - When Z.ai answers "Currently in peak hours" (a dialog that stops the message) or "Model is currently at capacity", that model is set aside for 30 minutes and the next one is used: GLM-5.2, then GLM-5.3-Flash.
+  - Effort stays at Max, the site's setting.
+- **Page:**
+  - `#chat-input`, `#send-message-button`; while GLM writes, the round button is a Stop square;
+  - user messages `.user-message`; replies `#message-<id>`;
+  - answer `#response-content-container > .markdown-prose` without `.thinking-chain-container` ("Thought Process"), or the red error box.
+- **Exact text:** none. Z.ai's chat data did not hold reply text, so tool requests are read from the page. The page drops a backslash before punctuation, so GLM is told to write backslashes, quotes and `*`, `_`, backtick and `$` inside tool-request JSON as JSON unicode escapes (backslash-u codes).
+- **Human check:** Z.ai shows an Alibaba Cloud slider captcha often; in the test it appeared for every message, even within one chat. Each time, the job pauses (`needs_user`), TEAMYRA notifies the user, and the job continues after the user solves it in TEAMYRA. TEAMYRA does not solve captchas. For work without these pauses, Z.ai's official API (API key) is the alternative.

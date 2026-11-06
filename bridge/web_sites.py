@@ -18,6 +18,8 @@ WEB_SITES = {
                  "label": "Grok", "prefix": "grok-", "priority": 280},
     "qwen-web": {"folder": "qwen", "name": "Qwen", "builtin": "qwen-normal",
                  "label": "Qwen", "prefix": "qwen-", "priority": 290},
+    "glm-web": {"folder": "glm", "name": "GLM", "builtin": "glm-normal",
+                "label": "GLM (Z.ai)", "prefix": "glm-", "priority": 300},
 }
 
 WEB_PROVIDERS = tuple(WEB_SITES)

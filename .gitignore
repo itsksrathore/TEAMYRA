@@ -41,6 +41,7 @@ muse/
 deepseek/
 grok/
 qwen/
+glm/
 backups/
 /.review-in/
 /.review-out/

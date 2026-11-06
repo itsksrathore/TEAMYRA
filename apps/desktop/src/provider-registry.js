@@ -87,6 +87,16 @@ const PROVIDERS = [
     color: 'blue'
   },
   {
+    id: 'glm-web',
+    name: 'GLM (Z.ai)',
+    kind: 'web',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'web' },
+    managed: { verified: true, env: null, webProfiles: true },
+    color: 'violet'
+  },
+  {
     id: 'google-media',
     name: 'Google Media',
     kind: 'media',
@@ -308,7 +318,7 @@ async function detectProviders() {
         managedProfileEnv: null,
         profiles: [{
           id: 'web',
-          name: 'Teamyra Worker — ' + ({ 'muse-web': 'Muse', 'deepseek-web': 'DeepSeek', 'qwen-web': 'Qwen', 'grok-web': 'Grok' }[provider.id] || 'ChatGPT'),
+          name: 'Teamyra Worker — ' + ({ 'muse-web': 'Muse', 'deepseek-web': 'DeepSeek', 'qwen-web': 'Qwen', 'grok-web': 'Grok', 'glm-web': 'GLM' }[provider.id] || 'ChatGPT'),
           kind: 'web',
           path: '',
           signedIn: false,

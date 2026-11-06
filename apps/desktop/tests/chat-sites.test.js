@@ -17,6 +17,7 @@ const { ChatSiteAdapter } = require('../src/chat-site-adapter');
 const { googleSignInHost } = require('../src/chatgpt-web-provider');
 const { MuseAutomationAdapter } = require('../src/muse-automation-adapter');
 const { GrokWebProvider, GROK_SITE, GROK_BUSY_PREFIX } = require('../src/grok-web-provider');
+const { GlmWebProvider, GLM_SITE } = require('../src/glm-web-provider');
 Module._load = originalLoad;
 
 function qwenSiteTests() {
@@ -235,6 +236,53 @@ async function reloadRuleTests(root) {
   assert.equal(provider.accountReady(), false, 'an old report does not count');
 }
 
+async function glmTests(root) {
+  assert.equal(GLM_SITE.provider, 'glm-web');
+  assert.equal(GLM_SITE.workerId('web'), 'glm-normal');
+  for (const host of ['chat.z.ai', 'z.ai', 'github.com']) assert.ok(GLM_SITE.hosts.has(host), host);
+  assert.ok(!GLM_SITE.hosts.has('evilz.ai'));
+  assert.equal(GLM_SITE.sessionFromPage, true);
+  assert.ok(GLM_SITE.promptRules.some(rule => rule.includes('\\u005c')), 'backslashes are written as \\u005c');
+  const adapter = GLM_SITE.adapter({ isDestroyed: () => false }, {});
+  adapter.drawFrame = async () => {};
+  // Best model first; a model set aside (peak hours, at capacity) is skipped.
+  assert.match(GLM_SITE.page.settingsJs(adapter), /const avoid = \[\]/);
+  adapter.lastSettings = { modelName: 'GLM-5.3' };
+  assert.ok(adapter.isTransientReply('Model is currently at capacity. Please try again later or switch to another model.'));
+  assert.deepEqual(adapter.avoidedModels(), ['GLM-5.3']);
+  assert.match(GLM_SITE.page.settingsJs(adapter), /const avoid = \["GLM-5\.3"\]/);
+  assert.ok(!adapter.isTransientReply('TEAMYRA_TOOL_REQUEST {}'));
+
+  // "Peak hours" stops the send: Cancel, next model, send again.
+  const fresh = GLM_SITE.adapter({ isDestroyed: () => false }, {});
+  fresh.drawFrame = async () => {};
+  let blockedOnce = true;
+  let picked = 0;
+  const events = [];
+  fresh.evaluate = async source => {
+    if (source.includes('const avoid =')) { picked += 1; return { model: 'on', modelName: picked === 1 ? 'GLM-5.3' : 'GLM-5.2' }; }
+    if (source.includes("'Cancel'") && source.includes('cancel.click()')) { events.push('cancel'); return true; }
+    if (source.includes('setter.call(prompt')) return { ok: true };
+    if (source.includes("return 'blocked'")) {
+      if (blockedOnce) { blockedOnce = false; return 'blocked'; }
+      return 'sent';
+    }
+    return null;
+  };
+  const sent = await fresh.sendTask('hello');
+  assert.equal(sent.ok, true);
+  assert.deepEqual(events, ['cancel']);
+  assert.deepEqual(fresh.avoidedModels(), ['GLM-5.3']);
+
+  // The answer leaves out the "Thought Process" block.
+  let asked = '';
+  fresh.evaluate = async source => { asked = source; return {}; };
+  await fresh.assistantSnapshot();
+  assert.ok(asked.includes('".thinking-chain-container"'));
+
+  await jobLoopTests(root, GlmWebProvider, GLM_SITE, 'glm-web');
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chat-sites-'));
   try {
@@ -244,10 +292,11 @@ async function main() {
     await grokTests(root);
     await signInAndFrameTests();
     await reloadRuleTests(root);
+    await glmTests(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-  console.log('chat site (Qwen, Grok) settings, send, exact reply, busy and job loop tests passed');
+  console.log('chat site (Qwen, Grok, GLM) settings, send, exact reply, busy, reload and job loop tests passed');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

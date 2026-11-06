@@ -64,8 +64,12 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
       const csPromptText = () => { const p = csPrompt(); return p ? (('value' in p) ? p.value : (p.innerText || '')) : ''; };
       const csReplies = () => [...document.querySelectorAll(${JSON.stringify(site.reply)})];
       const csUsers = () => [...document.querySelectorAll(${JSON.stringify(site.user)})];
+      const csExclude = ${JSON.stringify(site.answerExclude || '')};
+      const csPartText = part => csExclude
+        ? [...part.children].filter(child => !child.matches(csExclude)).map(child => (child.innerText || child.textContent || '').trim()).filter(Boolean).join('\\n')
+        : (part.innerText || part.textContent || '').trim();
       const csAnswer = node => [...node.querySelectorAll(${JSON.stringify(site.answer)})]
-        .map(part => (part.innerText || part.textContent || '').trim()).filter(Boolean).join('\\n\\n');
+        .map(csPartText).filter(Boolean).join('\\n\\n');
       const csReplyId = node => { try { return String(${site.replyId || "''"} || ''); } catch (error) { return ''; } };
       const csGenerating = () => [...document.querySelectorAll(${JSON.stringify(site.stop)})].some(csVisible);
       const csContinueButton = () => [...document.querySelectorAll('button, [role=button]')]
@@ -118,8 +122,9 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
   }
 
   async ensureSettings() {
-    if (!this.chatSite.settingsJs) return null;
-    return this.evaluate(this.chatSite.settingsJs);
+    const script = typeof this.chatSite.settingsJs === 'function' ? this.chatSite.settingsJs(this) : this.chatSite.settingsJs;
+    if (!script) return null;
+    return this.evaluate(script);
   }
 
   async sendTask(text) {
@@ -128,7 +133,8 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
     const payload = JSON.stringify(value);
     // Menus open and close between steps, so settings get two passes.
     let settings = await this.ensureSettings().catch(() => null);
-    if (settings && Object.values(settings).some(state => state !== 'on')) {
+    // Only a setting that did not take is retried (other fields are names).
+    if (settings && Object.values(settings).some(state => state === 'missing')) {
       await new Promise(resolve => setTimeout(resolve, 500));
       settings = await this.ensureSettings().catch(() => settings);
     }
@@ -171,6 +177,9 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
     }
     const submit = `(() => {${this.pageHelpers()}
       if (!csPrompt()) return 'gone';
+      let blocked = false;
+      try { blocked = Boolean(${site.blockedJs || 'false'}); } catch {}
+      if (blocked) return 'blocked';
       if (!csPromptText().trim()) return 'sent';
       const send = [...document.querySelectorAll(${JSON.stringify(site.send)})].find(node => !node.disabled && node.getAttribute('aria-disabled') !== 'true');
       if (send) { send.click(); return 'clicked'; }
@@ -190,6 +199,14 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
       const state = await this.evaluate(submit);
       if (state === 'sent') return { ok: true, method: method || 'button', settings };
       if (state === 'gone') throw teamyraError(`${this.siteName} message box disappeared`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+      if (state === 'blocked') {
+        if (typeof this.onBlocked !== 'function' || (this.blockedCount = (this.blockedCount || 0) + 1) > 4) {
+          throw teamyraError(`${this.siteName} refused the message`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+        }
+        await this.onBlocked();
+        await new Promise(resolve => setTimeout(resolve, 600));
+        continue;
+      }
       let pause = 100;
       if (state === 'clicked') {
         method ||= 'button';
