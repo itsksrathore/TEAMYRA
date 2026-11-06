@@ -35,6 +35,27 @@ function siteTests() {
   assert.match(MuseWebProvider.prototype.userActions.sign_in.message, /^This Muse account is signed out/);
 }
 
+// Ojas tasks are written on Windows (\r\n). The text box reads them back with
+// \n, so the "is the text in?" check never matched, the job failed and the
+// prompt sat unsent in the box.
+async function sendTests() {
+  const scripts = [];
+  const adapter = new MuseAutomationAdapter({ isDestroyed: () => false });
+  adapter.drawFrame = async () => {};
+  adapter.evaluate = async source => {
+    scripts.push(source);
+    return source.includes('setter.call(prompt') ? { ok: true } : 'sent';
+  };
+  await adapter.sendTask('line one\r\nline two\rline three');
+  assert.ok(scripts[0].includes(JSON.stringify('line one\nline two\nline three')), 'typed with plain \\n');
+  assert.ok(!scripts[0].includes('\\r'), 'no \\r reaches the box');
+
+  // A box that will not take the text is a page problem the job loop recovers
+  // from (reload, check delivery, resend), not a failed job.
+  adapter.evaluate = async () => ({ ok: false });
+  await assert.rejects(adapter.sendTask('x'), error => error.code === 'TEAMYRA_PAGE_UNRESPONSIVE');
+}
+
 async function frameTests() {
   // A background view draws no frames, so Muse's message box stayed 0 px wide
   // and Send never appeared: every page call first draws a 1x1 frame.
@@ -201,6 +222,7 @@ async function main() {
   try {
     siteTests();
     await frameTests();
+    await sendTests();
     await adapterTests();
     await jobLoopTests(root);
     await laneTests(fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-muse-lanes-')));

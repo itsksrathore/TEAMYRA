@@ -1,4 +1,4 @@
-const { ChatGPTAutomationAdapter } = require('./chatgpt-automation-adapter');
+const { ChatGPTAutomationAdapter, teamyraError } = require('./chatgpt-automation-adapter');
 
 const MUSE_HOME = 'https://muse.ai/';
 const NEW_THREAD_URL = 'https://muse.ai/thread/new';
@@ -93,7 +93,9 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
   }
 
   async sendTask(text) {
-    const value = String(text || '');
+    // A text box keeps line breaks as \n: a task written on Windows (\r\n)
+    // never read back equal and the job failed with the prompt left unsent.
+    const value = String(text || '').replace(/\r\n?/g, '\n');
     const payload = JSON.stringify(value);
     // Fill the box the way React reads it (its onChange takes the native
     // value setter plus an input event). Right after a new side chat opens
@@ -116,7 +118,10 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
       filled = await this.evaluate(fill);
       steady = filled?.ok ? steady + 1 : 0;
     }
-    if (!filled?.ok) throw new Error(filled?.reason || 'Could not populate the Muse message box');
+    // A box that will not take the text, or a message that will not go, is a
+    // page problem: the job loop reloads the chat, checks whether the message
+    // arrived, and sends it again only if it did not.
+    if (!filled?.ok) throw teamyraError('Could not populate the Muse message box', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
     // The Send button animates in about 1.5 s after the box gets text, and a
     // hidden view pauses that animation, so the button may never look
     // visible. Click it as soon as it exists; otherwise press Enter in the box
@@ -142,7 +147,7 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const state = await this.evaluate(submit);
       if (state === 'sent') return { ok: true, method: method || 'button' };
-      if (state === 'gone') throw new Error('prompt-not-found');
+      if (state === 'gone') throw teamyraError('Muse message box disappeared', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
       let pause = 100;
       if (state === 'clicked') {
         method ||= 'button';
@@ -156,7 +161,7 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
       }
       await new Promise(resolve => setTimeout(resolve, pause));
     }
-    throw new Error('send-button-unavailable');
+    throw teamyraError('Muse did not take the message (send-button-unavailable)', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
   }
 
   async stopGeneration() {
