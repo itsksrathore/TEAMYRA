@@ -96,7 +96,7 @@ const QWEN_SITE = {
     home: QWEN_HOME,
     newChatUrl: QWEN_HOME,
     conversationPattern: /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-    prompt: 'textarea.message-input-textarea',
+    prompt: 'textarea.message-input-textarea, textarea#chat-input',
     send: 'button.send-button',
     stop: 'button.stop-button',
     user: '.qwen-chat-message-user',

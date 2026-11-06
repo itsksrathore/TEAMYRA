@@ -197,6 +197,8 @@ async function laneTests(root) {
   const second = makeTab(1);
   const a = job('lane-a', 'task A');
   const b = job('lane-b', 'task B');
+  // Extra tabs start only once the account's first tab reports a usable page.
+  fs.writeFileSync(first.tab.statusFile, JSON.stringify({ profiles: { web: { automation_ready: true, heartbeat_at: Date.now() / 1000 } } }));
   await Promise.all([first.tab.processPendingJobsOnce(), second.tab.processPendingJobsOnce()]);
   assert.equal(read(a).state, 'done');
   assert.equal(read(b).state, 'done');

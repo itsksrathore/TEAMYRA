@@ -36,6 +36,8 @@ const MAX_DESKTOP_RESUMES = 3;
 // Waiting jobs: a worker that stays not-ready this long is reloaded, at most
 // once per HEAL_INTERVAL_MS, instead of leaving the jobs waiting for hours.
 const NOT_READY_HEAL_MS = 45000;
+const MAX_NOT_READY_RELOADS = 3;
+const RELOAD_INTERVAL_MS = 60000;
 const HEAL_INTERVAL_MS = 60000;
 const QUEUE_NUDGE_MS = 30000;
 const PROMPT_WAIT_MS = 30000;
@@ -615,7 +617,8 @@ class ChatGPTWebProvider {
     this.cancelUnload();
     this.unloadTimer = setTimeout(() => {
       this.unloadTimer = null;
-      if (this.busy || this.visible) return;
+      // A tab with work waiting would only be loaded again a moment later.
+      if (this.busy || this.visible || this.hasPendingWork()) return;
       this.closeEmbeddedPopup();
       if (this.view && !this.view.webContents.isDestroyed()) {
         try { this.window.contentView.removeChildView(this.view); } catch {}
@@ -650,6 +653,7 @@ class ChatGPTWebProvider {
     const generation = this.pageGeneration;
     this.statusRefresh = null;
     this.automation = this.site.adapter(view.webContents, {
+      isVisible: () => this.visible === true,
       timeoutMs: this.pageCallTimeoutMs,
       onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
@@ -1032,7 +1036,14 @@ class ChatGPTWebProvider {
       }
       return;
     }
-    if (this.pageUnresponsiveSince) await this.reconnect().catch(() => {});
+    // Extra tabs open the site only once the account's first tab is ready:
+    // five tabs loading a page that is not (a human check, a sign-in) made
+    // more human checks (Qwen showed its captcha again and again).
+    if (this.lane > 0 && !this.accountReady()) return;
+    if (this.pageUnresponsiveSince && this.mayReloadNow()) {
+      this.noteReload();
+      await this.reconnect().catch(() => {});
+    }
     if (!this.view || this.view.webContents.isDestroyed()) {
       await this.wakeBackground();
     }
@@ -1041,6 +1052,7 @@ class ChatGPTWebProvider {
       status = await this.healNotReady(status);
     } else if (status.workerReady) {
       this.notReadySince = null;
+      this.heals = 0;
     }
     if (!status.workerReady) {
       // Keep the jobs waiting, but explain on each of them why they wait
@@ -1072,7 +1084,41 @@ class ChatGPTWebProvider {
 
   // The page is loaded (or should be) but has no usable prompt: still
   // hydrating, an error page, a stuck overlay. Reload it after a grace period.
+  // Background reloads (a page that is not ready or does not answer): never
+  // of a page the user is looking at, at most one a minute, and at most
+  // MAX_NOT_READY_RELOADS in a row until the page works again. A page that
+  // answered slowly (a human check loading) was reloaded every few seconds,
+  // and each reload brought a new check.
+  mayReloadNow() {
+    if (this.visible) return false;
+    if ((this.heals || 0) >= (this.maxHeals ?? MAX_NOT_READY_RELOADS)) return false;
+    return Date.now() - (this.lastReloadAt || 0) >= (this.reloadIntervalMs ?? RELOAD_INTERVAL_MS);
+  }
+
+  noteReload() {
+    this.lastReloadAt = Date.now();
+    this.heals = (this.heals || 0) + 1;
+  }
+
+  // The account's first tab reported a usable page in the last minute.
+  accountReady() {
+    try {
+      const profile = JSON.parse(fs.readFileSync(this.statusFile, 'utf8')).profiles?.[this.activeProfileId] || {};
+      return profile.automation_ready === true && Date.now() / 1000 - Number(profile.heartbeat_at || 0) < 60;
+    } catch {
+      return false;
+    }
+  }
+
   async healNotReady(status) {
+    // Never reload a page the user is looking at (solving a check, signing
+    // in), and stop after a few reloads in a row: each reload of a site with
+    // a human check brought a new check.
+    if (this.visible) return status;
+    if ((this.heals || 0) >= (this.maxHeals ?? MAX_NOT_READY_RELOADS)) {
+      return { ...status, detail: `${this.site.name} page did not become usable after ${this.heals} reloads; open it in TEAMYRA (it may be showing a check)` };
+    }
+    if (!this.mayReloadNow()) return status;
     const now = Date.now();
     this.notReadySince ||= now;
     const graceMs = this.notReadyHealMs ?? NOT_READY_HEAL_MS;
@@ -1080,7 +1126,7 @@ class ChatGPTWebProvider {
     if ((now - this.notReadySince < graceMs && !unloaded) ||
         now - (this.lastHealAt || 0) < (this.healIntervalMs ?? HEAL_INTERVAL_MS)) return status;
     this.lastHealAt = now;
-    this.heals = (this.heals || 0) + 1;
+    this.noteReload();
     try { await this.reconnect(); } catch {}
     return this.refreshStatus();
   }

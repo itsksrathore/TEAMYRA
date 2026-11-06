@@ -20,6 +20,22 @@ const { MuseAutomationAdapter } = require('./muse-automation-adapter');
 // - rawReplyJs(idJson): page script returning the reply exactly as written
 //   ('' while unfinished or unreadable)
 // - busyPattern: a reply that is not an answer ("server busy"), asked again
+// Human checks most sites use: Alibaba Cloud's slider (Qwen, z.ai), its older
+// "nc" slider, Cloudflare, hCaptcha, reCAPTCHA, GeeTest, and a dialog that
+// asks to drag a slider or verify. Text is read only inside dialogs and
+// overlays, so a chat that talks about captchas does not count.
+const COMMON_CHALLENGE_JS = `(() => {
+  const shown = node => { const r = node.getBoundingClientRect(); const s = getComputedStyle(node);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const widgets = '[id^="aliyunCaptcha-window"], [id^="aliyunCaptcha-mask"], .aliyun-captcha, #nc_1_wrapper, .nc-container, ' +
+    '.geetest_panel, .geetest_box, iframe[src*="captcha"], iframe[src*="challenges.cloudflare.com"], iframe[src*="hcaptcha"], ' +
+    'iframe[src*="recaptcha"], iframe[src*="geetest"]';
+  if ([...document.querySelectorAll(widgets)].some(shown)) return true;
+  const overlays = [...document.querySelectorAll('[role=dialog], [role=alertdialog], [class*="modal" i], [class*="mask" i], [class*="captcha" i]')].filter(shown);
+  return overlays.some(node => /(drag the slider|slide to verify|complete the (security )?verification|verify you are (a )?human|security check|\u5b89\u5168\u9a8c\u8bc1|\u62d6\u52a8\u6ed1\u5757|\u8bf7\u5b8c\u6210\u9a8c\u8bc1)/i
+    .test((node.innerText || '').slice(0, 2000)));
+})()`;
+
 class ChatSiteAdapter extends ChatGPTAutomationAdapter {
   constructor(webContents, options = {}, site = {}) {
     super(webContents, options);
@@ -62,8 +78,8 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(site.prompt)});
       let challenged = false; let loginVisible = false;
-      try { challenged = Boolean(${site.challengeJs || 'false'}); } catch {}
-      try { loginVisible = !prompt && Boolean(${site.loginJs || 'false'}); } catch {}
+      try { challenged = Boolean(${site.challengeJs || 'false'}) || Boolean(${COMMON_CHALLENGE_JS}); } catch {}
+      try { loginVisible = !prompt && !challenged && Boolean(${site.loginJs || 'false'}); } catch {}
       return { promptFound: !!prompt, challenged, loginVisible, url: location.href, title: document.title };
     })()`);
   }
@@ -215,7 +231,7 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
         }
       }
       let challenged = false;
-      try { challenged = Boolean(${site.challengeJs || 'false'}); } catch {}
+      try { challenged = Boolean(${site.challengeJs || 'false'}) || Boolean(${COMMON_CHALLENGE_JS}); } catch {}
       return {
         count: replies.length,
         text: last ? csAnswer(last) : '',
@@ -243,4 +259,4 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
   }
 }
 
-module.exports = { ChatSiteAdapter };
+module.exports = { ChatSiteAdapter, COMMON_CHALLENGE_JS };

@@ -198,6 +198,43 @@ async function signInAndFrameTests() {
   assert.equal(captures, 1);
 }
 
+// Qwen's captcha came back again and again: TEAMYRA reloaded the page about
+// once a minute while it was not ready, and every reload brought a check.
+async function reloadRuleTests(root) {
+  const provider = Object.create(QwenWebProvider.prototype);
+  let reloads = 0;
+  Object.assign(provider, {
+    statusFile: path.join(root, 'qwen-status.json'), activeProfileId: 'web', notReadyHealMs: 0, healIntervalMs: 0, reloadIntervalMs: 0,
+    reconnect: async () => { reloads += 1; }, refreshStatus: async () => ({ workerReady: false })
+  });
+  provider.visible = true;
+  await provider.healNotReady({ workerReady: false });
+  assert.equal(reloads, 0, 'a page the user is looking at is never reloaded');
+  provider.visible = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) await provider.healNotReady({ workerReady: false });
+  assert.equal(reloads, 3, 'at most three reloads in a row');
+  const stopped = await provider.healNotReady({ workerReady: false });
+  assert.match(stopped.detail, /did not become usable after 3 reloads/);
+
+  // Between reloads at least a minute passes (the page may just be slow).
+  provider.heals = 0;
+  provider.reloadIntervalMs = 60000;
+  provider.lastReloadAt = 0;
+  reloads = 0;
+  await provider.healNotReady({ workerReady: false });
+  await provider.healNotReady({ workerReady: false });
+  assert.equal(reloads, 1, 'one reload a minute');
+  provider.reloadIntervalMs = 0;
+
+  // Extra tabs wait until the account's first tab has a usable page.
+  fs.writeFileSync(provider.statusFile, JSON.stringify({ profiles: { web: { automation_ready: false, heartbeat_at: Date.now() / 1000 } } }));
+  assert.equal(provider.accountReady(), false);
+  fs.writeFileSync(provider.statusFile, JSON.stringify({ profiles: { web: { automation_ready: true, heartbeat_at: Date.now() / 1000 } } }));
+  assert.equal(provider.accountReady(), true);
+  fs.writeFileSync(provider.statusFile, JSON.stringify({ profiles: { web: { automation_ready: true, heartbeat_at: Date.now() / 1000 - 600 } } }));
+  assert.equal(provider.accountReady(), false, 'an old report does not count');
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chat-sites-'));
   try {
@@ -206,6 +243,7 @@ async function main() {
     await jobLoopTests(root, QwenWebProvider, QWEN_SITE, 'qwen-web');
     await grokTests(root);
     await signInAndFrameTests();
+    await reloadRuleTests(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
