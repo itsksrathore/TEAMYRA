@@ -215,8 +215,28 @@ def active_jobs(root, worker=None, metas=None):
     return [m for m in metas if is_active(m) and (worker is None or m.get("worker") == worker)]
 
 
-def worker_busy(root, worker, metas=None):
-    return bool(active_jobs(root, worker, metas))
+MAX_WEB_LANES = 4
+
+
+def worker_capacity(root, info):
+    """Jobs a worker runs at once: one, or for a web-chat account the number of
+    tabs (lanes) TEAMYRA Desktop last reported for it."""
+    info = info or {}
+    folder = WEB_STATUS_DIRS.get(info.get("provider"))
+    if not folder:
+        return 1
+    status = _read_json(Path(root) / folder / "status.json") or {}
+    account = (status.get("profiles") or {}).get(str(info.get("profile_id") or "web")) or {}
+    try:
+        return max(1, min(MAX_WEB_LANES, int(account.get("lanes") or 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def worker_busy(root, worker, metas=None, info=None):
+    if info is None:
+        return bool(active_jobs(root, worker, metas))
+    return len(active_jobs(root, worker, metas)) >= worker_capacity(root, info)
 
 
 def cooldown_left(root, worker, metas=None):
@@ -459,7 +479,7 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
                 if not rows:
                     continue
             reason = None
-            if worker_busy(root, worker, metas):
+            if worker_busy(root, worker, metas, info):
                 reason = "busy"
             elif cooldown_left(root, worker, metas):
                 reason = "cooldown"
@@ -482,14 +502,15 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
                 if result:
                     report["dispatched"].append(result)
                     metas = load_jobs(root)
-                    if result["action"] == "cancelled":
-                        # The worker is still free; try the next queued job.
+                    # A cancelled job leaves the worker free, and a web-chat
+                    # account with free tabs takes more of its own queue now.
+                    while not borrowed and not worker_busy(root, worker, metas, info):
                         rest = queued_jobs(root, worker, metas)
-                        if rest:
-                            again = _dispatch_job(root, rest[0], spawn)
-                            if again:
-                                report["dispatched"].append(again)
-                                metas = load_jobs(root)
+                        again = _dispatch_job(root, rest[0], spawn) if rest else None
+                        if not again:
+                            break
+                        report["dispatched"].append(again)
+                        metas = load_jobs(root)
             else:
                 report["waiting"].append({"worker": worker, "reason": reason, "queued": len(rows)})
             _renumber(root, worker, metas)

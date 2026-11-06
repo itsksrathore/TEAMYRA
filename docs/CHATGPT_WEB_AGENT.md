@@ -44,6 +44,13 @@ The browser implementation is isolated from orchestration. Python core code neve
 
 The default worker ID is `chatgpt-normal`, provider `chatgpt-web`. Extra accounts are discovered as separate `chatgpt-<profile-id>` workers.
 
+**Several jobs per account.** Each account runs several tabs (lanes), 2 by default. They share the account's browser profile (one login). Each tab runs its own job in its own new conversation (Muse: side chat).
+- `TEAMYRA_WEB_LANES` sets the default, at most 4; `"lanes"` in an account's `teamyra-profile.json` overrides it.
+- The first tab is the one shown in the panel. It writes the account's status, including `lanes`, and reconciles jobs after a desktop restart. Extra tabs are hidden, take waiting jobs only through a shared claim set (never the same job twice), and unload after a minute idle.
+- The core's scheduler dispatches as many jobs to the account as its published `lanes`; further jobs queue. Other workers still run one job at a time.
+
+A signed-in account is reported ready even while TEAMYRA Desktop is closed: a job starts the desktop.
+
 Each profile writes its own readiness entry into shared runtime status. Core routing can queue work for any signed-in profile; its background view initializes on demand. The task's `project_path` is the assigned workspace for that job.
 
 If TEAMYRA Desktop is closed, the worker becomes unavailable rather than pretending a headless browser worker exists.

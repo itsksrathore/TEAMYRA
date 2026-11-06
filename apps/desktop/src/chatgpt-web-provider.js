@@ -74,6 +74,11 @@ const CHATGPT_SITE = {
   promptRules: []
 };
 
+// Jobs a tab of this desktop has taken. An account runs several tabs (lanes)
+// that all see the same waiting jobs; a tab takes a job only by adding it
+// here, synchronously, so two tabs never run one job.
+const CLAIMED_JOBS = new Set();
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -134,8 +139,13 @@ function snapBaseline(snap) {
 }
 
 class ChatGPTWebProvider {
-  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID, pageCallTimeoutMs, site = CHATGPT_SITE }) {
+  // `lane`: this tab's index for the account (0 is the one shown in the
+  // panel); `laneCount`: how many tabs the account runs at once.
+  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID, pageCallTimeoutMs, site = CHATGPT_SITE,
+    lane = 0, laneCount = 1 }) {
     this.site = site;
+    this.lane = Math.max(0, Number(lane) || 0);
+    this.laneCount = Math.max(1, Number(laneCount) || 1);
     this.userActions = userActions(site);
     this.window = window;
     this.runtimeRoot = runtimeRoot;
@@ -180,7 +190,9 @@ class ChatGPTWebProvider {
   }
 
   initialize() {
-    this.recoverInterruptedJobs();
+    // The account's first tab reconciles jobs from a previous desktop; the
+    // resumed jobs then go to whichever tab is free.
+    if (this.lane === 0) this.recoverInterruptedJobs();
     this.sessionManager.initialize();
     this.profileSessionStatus(this.activeProfileId).then(profile => {
       this.writeStatus({
@@ -638,6 +650,9 @@ class ChatGPTWebProvider {
   }
 
   writeStatus(patch = {}) {
+    // The account's first tab owns its status entry; extra tabs would
+    // overwrite it with their own (often unloaded) page state.
+    if (this.lane > 0) return {};
     let current = {};
     try { current = JSON.parse(fs.readFileSync(this.statusFile, 'utf8')); } catch {}
     const profileId = patch.active_profile_id || this.activeProfileId || DEFAULT_CHATGPT_PROFILE_ID;
@@ -646,7 +661,8 @@ class ChatGPTWebProvider {
     const updateProfile = statusPatch.profile_update !== false;
     delete statusPatch.profile_update;
 
-    const profilePatch = { heartbeat_at: Date.now() / 1000 };
+    // `lanes` tells the core how many jobs this account can run at once.
+    const profilePatch = { heartbeat_at: Date.now() / 1000, lanes: this.laneCount };
     for (const key of [
       'automation_ready', 'worker_ready', 'connected', 'login_visible',
       'challenged', 'busy', 'url', 'detail', 'session_present', 'page_unresponsive_since'
@@ -842,8 +858,9 @@ class ChatGPTWebProvider {
     if (this.busy) return;
     const scan = this.scanJobs();
     this.pendingJobCount = scan.owned;
-    let candidates = scan.waiting;
-    if (candidates.some(job => this.expireWaitingJob(job))) {
+    // Only jobs no other tab of this account has taken.
+    let candidates = scan.waiting.filter(job => !CLAIMED_JOBS.has(job.dir));
+    if (this.lane === 0 && candidates.some(job => this.expireWaitingJob(job))) {
       candidates = candidates.filter(job => !fs.existsSync(path.join(job.dir, 'DONE')));
       this.dispatchQueuedJobs();
     }
@@ -851,7 +868,8 @@ class ChatGPTWebProvider {
       this.notReadySince = null;
       // Queued ChatGPT jobs normally start from the core's scheduler. If the
       // core is not running, an idle worker asks for the next job itself.
-      if (scan.queued && !scan.owned && Date.now() - (this.lastQueueNudge || 0) >= QUEUE_NUDGE_MS) {
+      if (this.lane === 0 && scan.queued && scan.owned < this.laneCount &&
+          Date.now() - (this.lastQueueNudge || 0) >= QUEUE_NUDGE_MS) {
         this.lastQueueNudge = Date.now();
         this.dispatchQueuedJobs();
       }
@@ -868,12 +886,31 @@ class ChatGPTWebProvider {
       this.notReadySince = null;
     }
     if (!status.workerReady) {
-      // Keep the jobs waiting, but explain on each of them why they wait.
-      this.markWaitingJobs(candidates, status);
+      // Keep the jobs waiting, but explain on each of them why they wait
+      // (the first tab speaks for the account).
+      if (this.lane === 0) this.markWaitingJobs(candidates, status);
       return;
     }
-    this.markWaitingJobs(candidates, null);
-    await this.runDelegatedJob(candidates[0].dir);
+    if (this.lane === 0) this.markWaitingJobs(candidates, null);
+    // Another tab may have taken a job while this one loaded. Check and
+    // claim with no await in between.
+    const next = candidates.find(job => !CLAIMED_JOBS.has(job.dir) && this.stillWaiting(job.dir));
+    if (!next) return;
+    CLAIMED_JOBS.add(next.dir);
+    try {
+      await this.runDelegatedJob(next.dir);
+    } finally {
+      CLAIMED_JOBS.delete(next.dir);
+      // An extra tab gives its page back once it has been idle a while.
+      if (this.lane > 0) this.scheduleUnload(60000);
+    }
+  }
+
+  stillWaiting(jobDir) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(jobDir, 'meta.json'), 'utf8'));
+      return meta.state === 'waiting_for_desktop' && !fs.existsSync(path.join(jobDir, 'DONE'));
+    } catch { return false; }
   }
 
   // The page is loaded (or should be) but has no usable prompt: still
@@ -1501,6 +1538,8 @@ class ChatGPTWebProvider {
 
 // Defaults for instances made without the constructor (tests, subclasses).
 ChatGPTWebProvider.prototype.site = CHATGPT_SITE;
+ChatGPTWebProvider.prototype.lane = 0;
+ChatGPTWebProvider.prototype.laneCount = 1;
 ChatGPTWebProvider.prototype.userActions = userActions(CHATGPT_SITE);
 
-module.exports = { ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions };
+module.exports = { ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };

@@ -304,15 +304,41 @@ async function providersCached(force = false) {
 // accounts as 'muse:<profile id>', so every embedded-view control serves both.
 const WEB_CHAT_PREFIX = { 'chatgpt-web': '', 'muse-web': 'muse:' };
 
+// Tabs (lanes) per web-chat account: several jobs of one account run at once,
+// each in its own chat. TEAMYRA_WEB_LANES sets the default (2); an account's
+// teamyra-profile.json may set its own "lanes". Extra tabs are keyed
+// '<account key>#<n>' (n = 2, 3, ...) and are never shown in the panel.
+const MAX_WEB_LANES = 4;
+
+function webLaneCount(providerId, profileId) {
+  let lanes = Number(process.env.TEAMYRA_WEB_LANES) || 2;
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(PROFILES_ROOT, providerId, profileId, 'teamyra-profile.json'), 'utf8'));
+    if (Number.isInteger(meta.lanes)) lanes = meta.lanes;
+  } catch {}
+  return Math.max(1, Math.min(MAX_WEB_LANES, Math.round(lanes)));
+}
+
+function parseWebChatKey(key) {
+  const [base, laneText] = String(key || 'web').split('#');
+  const muse = base.startsWith('muse:');
+  const profileId = (muse ? base.slice('muse:'.length) : base) || 'web';
+  return { base, muse, profileId, providerId: muse ? 'muse-web' : 'chatgpt-web', lane: Math.max(1, Number(laneText) || 1) - 1 };
+}
+
 function chatgptProfileIds() {
   const ids = [];
   for (const [providerId, prefix] of Object.entries(WEB_CHAT_PREFIX)) {
-    ids.push(prefix + 'web');
+    const profiles = ['web'];
     try {
       for (const entry of fs.readdirSync(path.join(PROFILES_ROOT, providerId), { withFileTypes: true })) {
-        if (entry.isDirectory()) ids.push(prefix + entry.name);
+        if (entry.isDirectory()) profiles.push(entry.name);
       }
     } catch {}
+    for (const profileId of profiles) {
+      ids.push(prefix + profileId);
+      for (let lane = 2; lane <= webLaneCount(providerId, profileId); lane += 1) ids.push(prefix + profileId + '#' + lane);
+    }
   }
   return [...new Set(ids)];
 }
@@ -322,9 +348,10 @@ async function ensureChatgptProvider(profileId = 'web') {
   let provider = chatgptProviders.get(id);
   if (provider) return provider;
   if (!mainWindow || mainWindow.isDestroyed()) throw new Error('TEAMYRA window is unavailable');
-  provider = id.startsWith('muse:')
-    ? new MuseWebProvider({ window: mainWindow, runtimeRoot: ROOT, profileId: id.slice('muse:'.length) || 'web' })
-    : new ChatGPTWebProvider({ window: mainWindow, runtimeRoot: ROOT, profileId: id });
+  const key = parseWebChatKey(id);
+  const options = { window: mainWindow, runtimeRoot: ROOT, profileId: key.profileId, lane: key.lane,
+    laneCount: webLaneCount(key.providerId, key.profileId) };
+  provider = key.muse ? new MuseWebProvider(options) : new ChatGPTWebProvider(options);
   chatgptProviders.set(id, provider);
   try {
     await provider.initialize();

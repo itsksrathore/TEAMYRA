@@ -104,6 +104,36 @@ class MuseWorkerTests(unittest.TestCase):
             self.assertEqual(meta["last_event"], "queued for embedded Muse")
             self.assertFalse((job / "DONE").exists())
 
+    def test_an_account_with_tabs_runs_that_many_jobs_at_once(self):
+        # One ChatGPT/Muse account runs several tabs, each in its own chat;
+        # the queue used to start one job per account and hold the rest.
+        with tempfile.TemporaryDirectory() as td:
+            write_status(td, "muse", session_present=True, automation_ready=True, lanes=2)
+            for n in range(3):
+                write_job(td, f"q{n}", state="queued", queued_at=n, queue_order=n + 1, created=n)
+            info = {"id": "muse-normal", "provider": "muse-web", "profile_id": "web"}
+            self.assertEqual(scheduler.worker_capacity(td, info), 2)
+            registry = {"muse-normal": {**info, "enabled": True}}
+            report = scheduler.dispatch_once(td, spawn=lambda *a, **k: 1, registry=registry, is_ready=lambda w: True)
+            states = {f"q{n}": json.loads((Path(td) / "jobs" / f"q{n}" / "meta.json").read_text(encoding="utf-8"))["state"]
+                      for n in range(3)}
+            self.assertEqual(states, {"q0": "waiting_for_desktop", "q1": "waiting_for_desktop", "q2": "queued"})
+            self.assertEqual(len(report["dispatched"]), 2)
+            # A finished job frees its tab for the next one.
+            (Path(td) / "jobs" / "q0" / "DONE").write_text("done", encoding="utf-8")
+            scheduler.dispatch_once(td, spawn=lambda *a, **k: 1, registry=registry, is_ready=lambda w: True)
+            q2 = json.loads((Path(td) / "jobs" / "q2" / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(q2["state"], "waiting_for_desktop")
+
+    def test_other_workers_still_run_one_job_at_a_time(self):
+        self.assertEqual(scheduler.worker_capacity(ROOT, {"provider": "codex", "profile_id": "native"}), 1)
+        with tempfile.TemporaryDirectory() as td:
+            # No lane count published yet: one at a time.
+            self.assertEqual(scheduler.worker_capacity(td, {"provider": "chatgpt-web", "profile_id": "web"}), 1)
+            write_status(td, "chatgpt", lanes=99)
+            self.assertEqual(scheduler.worker_capacity(td, {"provider": "chatgpt-web", "profile_id": "web"}),
+                             scheduler.MAX_WEB_LANES)
+
 
 if __name__ == "__main__":
     unittest.main()

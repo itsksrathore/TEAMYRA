@@ -11,6 +11,7 @@ TEAMYRA's **Muse** worker will use the user's normal Muse app session (Meta's pe
   - browser profile `persist:teamyra-muse-profile[-<profile>]`;
   - readiness in `ROOT/muse/status.json` (git-ignored and blocked for workspace tools, like `chatgpt/`).
 - **Desktop:** Muse accounts live in the same provider map as ChatGPT accounts under the key `muse:<profile>`, so the embedded panel (open, size, new chat, stop, workspace) serves both. The Agents screen has a Muse card.
+- **Parallel jobs:** like ChatGPT, each Muse account runs several tabs (2 by default), each job in its own side chat; see "Several jobs per account" in `CHATGPT_WEB_AGENT.md`.
 - **Jobs:** `start_task` / `run_ai_worker` with `worker: "muse-normal"`, then `job_status` / `job_wait` / `job_result`, exactly as for `chatgpt-normal`.
 - **Allowed hosts:** every load passes Meta's account check (`muse.ai -> auth.muse.ai -> www.facebook.com -> www.instagram.com -> auth.meta.com -> auth.muse.ai -> muse.ai`). The Muse view therefore allows muse.ai, meta.com, facebook.com and instagram.com with their subdomains (plus Google/Apple sign-in); blocking any hop fails the load with `ERR_FAILED`.
 

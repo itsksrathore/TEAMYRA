@@ -143,6 +143,59 @@ async function jobLoopTests(root) {
   assert.ok(dispatchCalls.includes('scheduler.dispatch'), 'a finished job lets the queue move on');
 }
 
+// Several tabs (lanes) of one account run that account's jobs at once, each
+// job in exactly one tab.
+async function laneTests(root) {
+  const makeTab = lane => {
+    const fake = new FakeMuse(['Done one.', 'Done two.', 'Done three.']);
+    const tab = Object.create(MuseWebProvider.prototype);
+    Object.assign(tab, {
+      lane, laneCount: 2, runtimeRoot: root, stateRoot: path.join(root, 'muse'), activeProfileId: 'web', loaded: true,
+      view: { webContents: { isDestroyed: () => false } }, automation: fake, replyPollMs: 1, promptWaitMs: 5, renderWaitMs: 50,
+      progressIntervalMs: 1, ensureView: () => tab.view, setInteractionLocked: async () => {}, scheduleUnload: () => {},
+      refreshStatus: async () => { await new Promise(resolve => setTimeout(resolve, 5)); return { workerReady: true }; },
+      createConversation: async () => {}, openConversation: async () => {},
+      getCurrentConversation: async () => ({ url: 'https://muse.ai/thread/' + lane, conversationId: String(lane) }),
+      saveWorkerConversation: () => {}, notifyUser: () => true,
+      workspaceBridge: { status: async () => ({ permissions: { read: true } }), executeInWorkspace: async () => ({ ok: true }) }
+    });
+    tab.statusFile = path.join(tab.stateRoot, 'status.json');
+    return { tab, fake };
+  };
+  fs.mkdirSync(path.join(root, 'muse'), { recursive: true });
+  const job = (id, task) => {
+    const dir = path.join(root, 'jobs', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify({ cwd: root, timeout: 60 }));
+    fs.writeFileSync(path.join(dir, 'task.txt'), task);
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ provider: 'muse-web', profile_id: 'web', state: 'waiting_for_desktop', created: Date.now() }));
+    return dir;
+  };
+  const read = dir => JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+  const first = makeTab(0);
+  const second = makeTab(1);
+  const a = job('lane-a', 'task A');
+  const b = job('lane-b', 'task B');
+  await Promise.all([first.tab.processPendingJobsOnce(), second.tab.processPendingJobsOnce()]);
+  assert.equal(read(a).state, 'done');
+  assert.equal(read(b).state, 'done');
+  const ran = [first, second].map(({ fake }) => fake.sent.map(text => /task ([AB])$/.exec(text)?.[1]).filter(Boolean));
+  assert.deepEqual(ran.flat().sort(), ['A', 'B'], 'each job ran once');
+  assert.ok(ran[0].length === 1 && ran[1].length === 1, 'the two tabs ran one job each, at the same time');
+
+  // One waiting job and two free tabs: only one tab runs it.
+  const c = job('lane-c', 'task C');
+  await Promise.all([first.tab.processPendingJobsOnce(), second.tab.processPendingJobsOnce()]);
+  assert.equal(read(c).state, 'done');
+  const runs = [first, second].map(({ fake }) => fake.sent.filter(text => /task C$/.test(text)).length);
+  assert.deepEqual(runs.sort(), [0, 1]);
+  // Only the first tab writes the account's status (with its tab count).
+  second.tab.writeStatus({ detail: 'from tab 2' });
+  assert.ok(!fs.existsSync(second.tab.statusFile) || !/from tab 2/.test(fs.readFileSync(second.tab.statusFile, 'utf8')));
+  first.tab.writeStatus({ detail: 'from tab 1' });
+  assert.equal(JSON.parse(fs.readFileSync(first.tab.statusFile, 'utf8')).profiles.web.lanes, 2);
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-muse-'));
   try {
@@ -150,6 +203,7 @@ async function main() {
     await frameTests();
     await adapterTests();
     await jobLoopTests(root);
+    await laneTests(fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-muse-lanes-')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
