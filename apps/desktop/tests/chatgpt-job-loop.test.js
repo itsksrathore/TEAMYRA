@@ -85,7 +85,8 @@ class FakeChat extends ChatGPTAutomationAdapter {
     }
     if (this.pending) {
       this.turn += 1;
-      this.current = { count: this.turn, text: this.pending.text, messageId: 'turn-' + this.turn };
+      this.current = { count: this.turn, text: this.pending.text, messageId: 'turn-' + this.turn, images: this.pending.images || 0 };
+      if (this.pending.images) this.imageTurn = { messageId: 'turn-' + this.turn, images: this.pending.imageList || [{ src: 'https://chatgpt.com/backend-api/estuary/content?id=file_1' }] };
       this.genTicks = this.pending.generating || 0;
       // `later`: the reply text changes after `laterAfter` more reads without
       // a new message (a status line shown while the model still thinks).
@@ -106,6 +107,12 @@ class FakeChat extends ChatGPTAutomationAdapter {
   }
 
   async lastUserMessage() { return this.users.at(-1) || ''; }
+  async generatedImages() { return this.imageTurn || { messageId: '', turnsBack: -1, images: [] }; }
+  async evaluate(source) {
+    this.evaluated = [...(this.evaluated || []), source];
+    if (this.onEvaluate) return this.onEvaluate(source);
+    throw new Error('no page in this test');
+  }
   async stopGeneration() { return { ok: true }; }
 }
 
@@ -152,6 +159,29 @@ function makeProvider(fake, { permissions } = {}) {
     executeInWorkspace: async (workspace, tool, args, perms) => {
       provider.toolCalls.push({ workspace, tool, args, perms });
       return { ok: true, tool };
+    },
+    // Mirrors the core: the staged file must be under jobs/, the target
+    // inside the workspace; the staged copy is moved.
+    saveStagedFile: async (workspace, target, staged, perms) => {
+      provider.stagedSaves = [...(provider.stagedSaves || []), { workspace, target, staged, perms }];
+      assert.ok(path.resolve(staged).startsWith(path.join(root, 'jobs') + path.sep), 'images are staged under jobs/');
+      const file = path.resolve(workspace, target);
+      if (!file.startsWith(path.resolve(workspace) + path.sep)) throw new Error('path is outside the selected workspace');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.copyFileSync(staged, file);
+      fs.rmSync(staged);
+      return { path: file, relative_path: target, bytes: fs.statSync(file).size, backup: null };
+    }
+  };
+  // The ChatGPT view's session: records each download, returns imageBytes.
+  provider.downloads = [];
+  provider.imageBytes = pngBytes(1536, 1024);
+  provider.view.webContents.session = {
+    fetch: async (url, options) => {
+      provider.downloads.push({ url, options });
+      const bytes = provider.imageBytes;
+      return { ok: true, status: 200, headers: { get: name => (name === 'content-length' ? String(bytes.length) : 'image/png') },
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length) };
     }
   };
   provider.metaHistory = [];
@@ -168,6 +198,26 @@ function makeProvider(fake, { permissions } = {}) {
     assert.ok(fs.existsSync(path.join(dir, 'DONE')), 'dispatch follows a terminal job');
   };
   return provider;
+}
+
+// Smallest header imageInfo() reads: PNG signature + IHDR with the size.
+function pngBytes(width, height) {
+  const bytes = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'latin1');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+}
+
+function webpBytes(width, height) {
+  const bytes = Buffer.alloc(30);
+  bytes.write('RIFF', 0, 'latin1');
+  bytes.write('WEBPVP8X', 8, 'latin1');
+  bytes.writeUIntLE(width - 1, 24, 3);
+  bytes.writeUIntLE(height - 1, 27, 3);
+  return bytes;
 }
 
 function makeJob(spec = {}, meta = {}) {
@@ -1076,6 +1126,201 @@ async function testNonTerminalRequestGetsNoJobField() {
  assert.equal('job' in provider.toolCalls[0].args, false);
 }
 
+const toolResultOf = text => JSON.parse(text.slice('TEAMYRA_TOOL_RESULT '.length, text.lastIndexOf('}') + 1));
+const IMAGE_REPLY = { text: '[ChatGPT replied with 1 generated image]', images: 1 };
+const SAVE = args => 'TEAMYRA_TOOL_REQUEST ' + JSON.stringify({ tool: 'chatgpt.save_image', args });
+
+// Regression (jobs 1027-183622-...-4112 and 1027-191533-...-e9f9 could only
+// fail): ChatGPT generates the image, TEAMYRA reminds it to save, and
+// chatgpt.save_image downloads it with the view's session into the workspace.
+async function testImageIsSavedIntoTheWorkspace() {
+  const target = '02_locations/spice_market/loc_spice_market.png';
+  const fake = new FakeChat([IMAGE_REPLY, SAVE({ path: target, index: 0 }), 'Saved ' + target + ' (1536x1024).']);
+  const provider = makeProvider(fake);
+  const dir = makeJob({ expect_files: [target] });
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'done', fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8'));
+  assert.match(fake.sent[0], /chatgpt\.save_image/, 'the bootstrap lists the tool');
+  assert.match(fake.sent[1], /^TEAMYRA: your reply shows 1 generated image/);
+  assert.ok(fake.sent[1].includes(JSON.stringify({ tool: 'chatgpt.save_image', args: { path: target, index: 0 } })),
+    'the reminder names the missing expected file');
+  assert.deepEqual(provider.downloads.map(item => item.url), ['https://chatgpt.com/backend-api/estuary/content?id=file_1']);
+  assert.deepEqual(fs.readFileSync(path.join(root, target)), provider.imageBytes);
+  const result = toolResultOf(fake.sent[2]);
+  assert.equal(result.tool, 'chatgpt.save_image');
+  assert.deepEqual({ ...result.result, absolute_path: undefined }, {
+    ok: true, path: target, absolute_path: undefined, bytes: provider.imageBytes.length, width: 1536, height: 1024,
+    format: 'png', image_index: 0, images_in_reply: 1
+  });
+  assert.equal(provider.toolCalls.length, 0, 'save_image never goes through the generic text tools');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'chatgpt-images')), [], 'the staged copy is gone');
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'chatgpt-state.json'), 'utf8'));
+  assert.deepEqual(state.saved_image_turns, ['turn-1']);
+  fs.rmSync(path.join(root, '02_locations'), { recursive: true, force: true });
+}
+
+async function testImageToolErrorsAndConversion() {
+  // Read-only job: refused before anything is downloaded.
+  let fake = new FakeChat([IMAGE_REPLY, SAVE({ path: 'x.png' }), 'Could not save.']);
+  let provider = makeProvider(fake);
+  let dir = makeJob({ write: false });
+  await provider.runDelegatedJob(dir);
+  assert.match(toolResultOf(fake.sent[2]).result.error, /read-only/);
+  assert.equal(provider.downloads.length, 0);
+  assert.ok(!fs.existsSync(path.join(root, 'x.png')));
+
+  // Bad arguments and an index past the images of the reply.
+  for (const [args, pattern] of [
+    [{ path: 'x.gif' }, /\.png, \.jpg/], [{}, /path is required/], [{ path: 'x.png', index: 3 }, /index 3 is out of range: .* 1 image/],
+    [{ path: 'x.png', name: 'y' }, /unknown argument\(s\) name/], [{ path: 'x.png', index: -1 }, /whole number/]
+  ]) {
+    fake = new FakeChat([IMAGE_REPLY, SAVE(args), 'Gave up.']);
+    provider = makeProvider(fake);
+    await provider.runDelegatedJob(makeJob());
+    assert.match(toolResultOf(fake.sent[2]).result.error, pattern, JSON.stringify(args));
+  }
+
+  // No image anywhere in the conversation.
+  fake = new FakeChat([SAVE({ path: 'x.png' }), 'No image.']);
+  provider = makeProvider(fake);
+  await provider.runDelegatedJob(makeJob());
+  assert.match(toolResultOf(fake.sent[1]).result.error, /no generated image is visible/);
+
+  // ChatGPT served WebP; a .png path is re-encoded in the page at full size.
+  fake = new FakeChat([IMAGE_REPLY, SAVE({ path: 'out/y.png' }), 'Saved.']);
+  provider = makeProvider(fake);
+  provider.imageBytes = webpBytes(1024, 1536);
+  const png = pngBytes(1024, 1536);
+  fake.onEvaluate = source => {
+    assert.match(source, /convertToBlob\(\{ type: "image\/png"/);
+    return { ok: true, base64: png.toString('base64'), width: 1024, height: 1536 };
+  };
+  dir = makeJob({ expect_files: ['out/y.png'] });
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  const converted = toolResultOf(fake.sent[2]).result;
+  assert.equal(converted.converted_from, 'webp');
+  assert.equal(converted.format, 'png');
+  assert.deepEqual([converted.width, converted.height], [1024, 1536]);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'out', 'y.png')), png);
+
+  // A blob: image is read inside the page, not with the session.
+  fake = new FakeChat([{ ...IMAGE_REPLY, imageList: [{ src: 'blob:https://chatgpt.com/1234' }] }, SAVE({ path: 'out/z.png' }), 'Saved.']);
+  provider = makeProvider(fake);
+  fake.onEvaluate = source => {
+    assert.match(source, /fetch\("blob:https:\/\/chatgpt\.com\/1234"/);
+    return { ok: true, type: 'image/png', base64: pngBytes(64, 64).toString('base64') };
+  };
+  await provider.runDelegatedJob(makeJob());
+  assert.equal(toolResultOf(fake.sent[2]).result.width, 64);
+  assert.equal(provider.downloads.length, 0);
+  fs.rmSync(path.join(root, 'out'), { recursive: true, force: true });
+}
+
+async function testImageRemindersAreBounded() {
+  // ChatGPT keeps showing images without saving: two reminders, then the
+  // reply is judged as a final answer: the missing file gets the usual two
+  // "outputs missing" reminders (naming chatgpt.save_image), then fails the job.
+  const fake = new FakeChat([IMAGE_REPLY, IMAGE_REPLY, IMAGE_REPLY, 'I cannot save it.', 'Still cannot.', 'never reached']);
+  const provider = makeProvider(fake);
+  const dir = makeJob({ expect_files: ['img/a.png'] });
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'missing_output');
+  assert.equal(fake.sent.filter(text => text.startsWith('TEAMYRA: your reply shows')).length, 2);
+  const outputNudges = fake.sent.filter(text => text.startsWith('TEAMYRA: the task is not finished'));
+  assert.equal(outputNudges.length, 2);
+  assert.match(outputNudges[0], /chatgpt\.save_image.*img\/a\.png/);
+
+  // A turn whose image was saved is not reminded about again (here ChatGPT's
+  // final answer is read from that same turn, e.g. after a page reload).
+  const saved = new FakeChat([IMAGE_REPLY, SAVE({ path: 'img/a.png' }), { ...IMAGE_REPLY, text: 'Done: saved img/a.png.' }]);
+  const second = makeProvider(saved);
+  const realSnapshot = saved.assistantSnapshot.bind(saved);
+  saved.assistantSnapshot = async () => {
+    const snap = await realSnapshot();
+    return snap.text.startsWith('Done') ? { ...snap, messageId: 'turn-1' } : snap;
+  };
+  const done = makeJob({ expect_files: ['img/a.png'] });
+  await second.runDelegatedJob(done);
+  assert.equal(readMeta(done).state, 'done');
+  assert.equal(saved.sent.filter(text => text.startsWith('TEAMYRA: your reply shows')).length, 1);
+  fs.rmSync(path.join(root, 'img'), { recursive: true, force: true });
+}
+
+// chatgpt_image_batch jobs name reference images in spec.attachments: they
+// are attached to the first message (image files inside the workspace only).
+async function testReferenceImagesAreAttachedToTheFirstMessage() {
+  fs.mkdirSync(path.join(root, 'refs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'refs', 'a.png'), pngBytes(640, 480));
+  fs.writeFileSync(path.join(root, 'refs', 'b.png'), pngBytes(640, 480));
+  fs.writeFileSync(path.join(root, 'refs', 'note.txt'), 'not an image');
+  const target = 'out/hero.png';
+  const fake = new FakeChat([IMAGE_REPLY, SAVE({ path: target }), 'DONE: ' + target]);
+  const provider = makeProvider(fake);
+  provider.attached = [];
+  provider.attachApprovedFile = async file => { provider.attached.push(file); return { ok: true, path: file }; };
+  fake.onEvaluate = () => ({ shown: provider.attached.length, busy: false });
+  const dir = makeJob({ expect_files: [target], attachments: ['refs/a.png', 'refs/b.png'] });
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done', fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8'));
+  assert.deepEqual(provider.attached.map(file => path.basename(file)), ['a.png', 'b.png']);
+  assert.equal(fake.sent.length, 3, 'attached before the first message, not sent separately');
+  assert.ok(fs.existsSync(path.join(root, target)));
+
+  // Not an image, outside the workspace, or never shown by the page: the job
+  // fails before anything is sent.
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-outside-'));
+  fs.writeFileSync(path.join(outside, 'x.png'), pngBytes(10, 10));
+  for (const [attachments, pattern] of [
+    [['refs/note.txt'], /not a PNG, JPEG, WebP or GIF/],
+    [[path.join(outside, 'x.png')], /inside the job workspace/],
+    [['refs/a.png'], /did not show the 1 uploaded reference/]
+  ]) {
+    const chat = new FakeChat(['never sent']);
+    const other = makeProvider(chat);
+    other.attachWaitMs = 20;
+    other.attachApprovedFile = async () => ({ ok: true });
+    chat.onEvaluate = () => ({ shown: 0, busy: false });
+    const failed = makeJob({ attachments });
+    await other.runDelegatedJob(failed);
+    assert.equal(readMeta(failed).state, 'failed');
+    assert.match(fs.readFileSync(path.join(failed, 'events.jsonl'), 'utf8'), pattern);
+    assert.equal(chat.sent.length, 0);
+  }
+  fs.rmSync(outside, { recursive: true, force: true });
+  fs.rmSync(path.join(root, 'refs'), { recursive: true, force: true });
+  fs.rmSync(path.join(root, 'out'), { recursive: true, force: true });
+}
+
+// Other web-chat sites share this job loop but draw no images: no
+// chatgpt.save_image in their prompt, and the request is not run.
+async function testSitesWithoutImagesGetNoSaveTool() {
+  const fake = new FakeChat([IMAGE_REPLY, SAVE({ path: 'x.png' }), 'Finished.']);
+  const provider = makeProvider(fake);
+  provider.site = { ...provider.site, generatesImages: false };
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.doesNotMatch(fake.sent[0], /chatgpt\.save_image/);
+  assert.ok(!fake.sent.some(text => text.startsWith('TEAMYRA: your reply shows')));
+  assert.equal(provider.downloads.length, 0);
+  assert.ok(!fs.existsSync(path.join(root, 'x.png')));
+}
+
+// A usage limit keeps the site's words in meta.limit_notice, so
+// chatgpt_image_status can tell when the account works again.
+async function testLimitNoticeIsKeptInMeta() {
+  const notice = "You've hit your limit. Please try again later.";
+  const provider = makeProvider(new FakeChat([notice]));
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.reason, 'usage_or_rate_limit');
+  assert.equal(meta.limit_notice, notice);
+}
+
 async function main() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chatgpt-loop-'));
   try {
@@ -1121,6 +1366,12 @@ async function main() {
  await testBootstrapListsCodeTools();
  await testTerminalRunGetsTrustedJobId();
  await testNonTerminalRequestGetsNoJobField();
+    await testImageIsSavedIntoTheWorkspace();
+    await testImageToolErrorsAndConversion();
+    await testImageRemindersAreBounded();
+    await testReferenceImagesAreAttachedToTheFirstMessage();
+    await testSitesWithoutImagesGetNoSaveTool();
+    await testLimitNoticeIsKeptInMeta();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {

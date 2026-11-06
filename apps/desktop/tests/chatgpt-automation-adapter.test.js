@@ -285,6 +285,62 @@ async function domTests() {
   // delivered tool result was sent again after a desktop restart.
   const lastUser = await domAdapter(fakeDocument({ units: history })).lastUserMessage();
   assert.equal(lastUser, 'TEAMYRA_TOOL_RESULT {"tool":"x"}');
+
+  // chatgpt.save_image: when ChatGPT asks to save, its newest turn is the
+  // text request, so the images come from the newest turn that has any.
+  // Small images (avatars, icons) do not count; ChatGPT renders a generated
+  // image twice (backdrop + picture), which counts once.
+  const img = (src, width, height, shown = width) => ({
+    src, currentSrc: src, naturalWidth: width, naturalHeight: height, alt: 'Generated image',
+    getAttribute: name => (name === 'src' ? src : null),
+    getBoundingClientRect: () => ({ width: shown, height: shown })
+  });
+  const generated = 'https://chatgpt.com/backend-api/estuary/content?id=file_abc&sig=1';
+  const conversation = [
+    unit('assistant', { ids: 'a0', images: [img('https://chatgpt.com/old.png', 1024, 1024)] }),
+    unit('user', { text: 'make an image' }),
+    unit('assistant', { ids: 'a1 a1', images: [img(generated, 1536, 1024, 0), img('https://cdn/avatar.png', 32, 32), img(generated, 1536, 1024, 600),
+      img('https://chatgpt.com/second.png', 1024, 1536)] }),
+    unit('user', { text: 'TEAMYRA: save it' }),
+    unit('assistant', { ids: 'a2', body: 'TEAMYRA_TOOL_REQUEST {"tool":"chatgpt.save_image","args":{"path":"x.png"}}' })
+  ];
+  const found = await domAdapter(fakeDocument({ units: conversation })).generatedImages();
+  assert.equal(found.messageId, 'a1');
+  assert.equal(found.turnsBack, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(found.images.map(item => [item.src, item.width, item.height]))),
+    [[generated, 1536, 1024], ['https://chatgpt.com/second.png', 1024, 1536]]);
+  const none = await domAdapter(fakeDocument({ units: [unit('user', { text: 'hi', images: [img('https://u/upload.png', 900, 900)] }),
+    unit('assistant', { ids: 'b1', body: 'text only' })] })).generatedImages();
+  assert.deepEqual(JSON.parse(JSON.stringify(none)), { messageId: '', turnsBack: -1, images: [] }, 'user uploads are not generated images');
+
+  imageFileTests();
+}
+
+function imageFileTests() {
+  const { imageInfo, formatForPath } = require('../src/image-file');
+  const png = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+  png.write('IHDR', 12, 'latin1');
+  png.writeUInt32BE(1536, 16);
+  png.writeUInt32BE(1024, 20);
+  assert.deepEqual(imageInfo(png), { format: 'png', mime: 'image/png', width: 1536, height: 1024 });
+  // JPEG: SOI, an APP0 segment, then SOF0 with height 768 and width 1344.
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x03, 0x00, 0x05, 0x40, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(imageInfo(jpeg), { format: 'jpeg', mime: 'image/jpeg', width: 1344, height: 768 });
+  const webp = Buffer.alloc(30);
+  webp.write('RIFF', 0, 'latin1');
+  webp.write('WEBPVP8X', 8, 'latin1');
+  webp.writeUIntLE(1023, 24, 3);
+  webp.writeUIntLE(1535, 27, 3);
+  assert.deepEqual(imageInfo(webp), { format: 'webp', mime: 'image/webp', width: 1024, height: 1536 });
+  const gif = Buffer.from('GIF89a\x40\x00\x20\x00', 'latin1');
+  assert.deepEqual(imageInfo(gif), { format: 'gif', mime: 'image/gif', width: 64, height: 32 });
+  assert.equal(imageInfo(Buffer.from('<html>not an image</html>')), null);
+  assert.equal(imageInfo(Buffer.alloc(0)), null);
+  assert.equal(formatForPath('02_locations/a/X.PNG'), 'png');
+  assert.equal(formatForPath('a.jpeg'), 'jpeg');
+  assert.equal(formatForPath('a.webp'), 'webp');
+  assert.equal(formatForPath('a.txt'), null);
 }
 replyTests().catch(error => { console.error(error); process.exitCode = 1; });
 

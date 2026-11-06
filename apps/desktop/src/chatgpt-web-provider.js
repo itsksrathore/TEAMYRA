@@ -6,6 +6,8 @@ const { ChatGPTAutomationAdapter, teamyraError, boundedPageCall, pageTimeoutMs }
 const { WorkspaceBridge } = require('./workspace-bridge');
 const { JobProcesses, jobProcesses } = require('./job-processes');
 const { JobInspector } = require('./job-inspect');
+const imageFile = require('./image-file');
+const { Buffer } = require('node:buffer');
 const { callCore } = require('./core-api');
 const { limitNotice, replyLimitNotice, isBlockNotice, limitScript } = require('./limit-detect');
 const { readOnlyCommandProblem } = require('./read-only-commands');
@@ -86,8 +88,16 @@ const TOOL_ERROR_HINT = 'Reply with one line: TEAMYRA_TOOL_REQUEST {"tool":"<nam
 const READ_ONLY_BLOCKED_TOOLS = new Set([
   'process.start', 'process.write',
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
-  'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore'
+  'filesystem.rename', 'filesystem.delete', 'terminal.run', 'git.add', 'git.commit', 'git.restore',
+  'chatgpt.save_image'
 ]);
+const SAVE_IMAGE_TOOL = 'chatgpt.save_image';
+const SAVE_IMAGE_ARGS = new Set(['path', 'index']);
+// A reply that shows generated images nobody saved gets this many reminders
+// per job before it is accepted as the final answer.
+const MAX_IMAGE_NUDGES = 2;
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 60000;
+const MAX_JOB_ATTACHMENTS = 10;
 const ALLOWED_HOSTS = new Set([
   'chatgpt.com', 'www.chatgpt.com', 'auth.openai.com', 'auth0.openai.com', 'openai.com', 'www.openai.com',
   'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'
@@ -107,6 +117,9 @@ const CHATGPT_SITE = {
   conversationUrl: id => CHATGPT_HOME + 'c/' + id,
   sessionManager: profileId => new ChatGPTSessionManager(profileId),
   adapter: (webContents, options) => new ChatGPTAutomationAdapter(webContents, options),
+  // The site draws images in the chat and the adapter lists them
+  // (generatedImages): jobs get the chatgpt.save_image tool.
+  generatesImages: true,
   // Extra lines for the job prompt, after the tool protocol.
   promptRules: []
 };
@@ -1070,6 +1083,48 @@ class ChatGPTWebProvider {
     throw new Error(`${this.site.name} did not show the uploaded image`);
   }
 
+  // Reference images a job names in spec.attachments (chatgpt_image_batch):
+  // real image files inside the job's workspace only, attached to the message
+  // box so the first message carries them. Waits until the page shows them.
+  async attachJobImages(job, workspace, files) {
+    if (!this.site.generatesImages) throw new Error(`${this.site.name} jobs cannot take reference images`);
+    if (files.length > MAX_JOB_ATTACHMENTS) throw new Error(`at most ${MAX_JOB_ATTACHMENTS} reference images per job`);
+    const root = fs.realpathSync(workspace);
+    const approved = [];
+    for (const file of files) {
+      const resolved = fs.realpathSync(path.resolve(root, String(file || '')));
+      if (resolved !== root && !resolved.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) {
+        throw new Error('reference image must be inside the job workspace: ' + file);
+      }
+      const stat = fs.statSync(resolved);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > imageFile.MAX_IMAGE_BYTES) throw new Error('reference image is not a usable file: ' + file);
+      const head = Buffer.alloc(Math.min(stat.size, 64 * 1024));
+      const fd = fs.openSync(resolved, 'r');
+      try { fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
+      if (!imageFile.imageInfo(head)) throw new Error('reference is not a PNG, JPEG, WebP or GIF image: ' + file);
+      approved.push(resolved);
+    }
+    const previews = () => this.automation.evaluate(`(() => {
+      const box = document.querySelector('form') || document;
+      const shown = box.querySelectorAll('img[src^="blob:"], img[alt*="Uploaded"], [data-testid*="attachment"] img, [class*="attachment"] img').length;
+      const busy = Boolean(box.querySelector('[role="progressbar"], [aria-busy="true"]'));
+      return { shown, busy };
+    })()`).catch(() => ({ shown: 0, busy: true }));
+    const before = Number((await previews())?.shown) || 0;
+    for (const file of approved) await this.attachApprovedFile(file);
+    const deadline = Date.now() + (this.attachWaitMs ?? 20000) * approved.length;
+    while (Date.now() < deadline) {
+      this.checkJobActive(job);
+      const state = await previews();
+      if (Number(state?.shown) >= before + approved.length && !state?.busy) {
+        this.appendJobEvent(job.dir, 'info', `attached ${approved.length} reference image(s)`);
+        return { ok: true, attached: approved.length };
+      }
+      await sleep(500);
+    }
+    throw new Error(`${this.site.name} did not show the ${approved.length} uploaded reference image(s)`);
+  }
+
   async attachApprovedFile(approvedPath) {
     const view = this.ensureView();
     await this.automation.evaluate(`(() => {
@@ -1648,7 +1703,8 @@ class ChatGPTWebProvider {
         // A reply arrived: the page works again, so a later hang gets a fresh
         // set of recoveries.
         job.consecutiveRecoveries = 0;
-        this.saveJobState(job, { phase: 'reply', reply: reply.text || '', message: null, baseline: null });
+        this.saveJobState(job, { phase: 'reply', reply: reply.text || '', reply_images: Number(reply.images) || 0,
+          reply_message_id: reply.messageId || '', message: null, baseline: null });
         return reply;
       } catch (caught) {
         let error = caught;
@@ -1739,7 +1795,7 @@ class ChatGPTWebProvider {
   async resumeExchange(job, saved, bootstrap) {
     if (saved.phase === 'reply' && typeof saved.reply === 'string' && saved.reply) {
       this.appendJobEvent(job.dir, 'info', 'resume: processing the reply received before the restart');
-      return { text: saved.reply };
+      return { text: saved.reply, images: Number(saved.reply_images) || 0, messageId: saved.reply_message_id || '' };
     }
     if (saved.phase === 'tool' && saved.request?.tool) {
       this.appendJobEvent(job.dir, 'info', `resume: ${saved.request.tool} was running during the restart; reporting an unknown outcome`);
@@ -1756,6 +1812,97 @@ class ChatGPTWebProvider {
       return this.jobExchange(job, saved.message);
     }
     return this.jobExchange(job, bootstrap);
+  }
+
+  // Bytes of an image the ChatGPT page shows. http(s) images are fetched with
+  // the ChatGPT view's own session (its cookies; no CORS limits), blob: and
+  // data: URLs exist only inside the page and are read there.
+  async downloadImageBytes(src) {
+    const url = String(src || '');
+    if (/^(blob|data):/i.test(url)) {
+      const read = await this.automation.evaluate(imageFile.readInPageScript(url));
+      if (!read?.ok) throw new Error('could not read the image in the ChatGPT page: ' + (read?.error || 'unknown error'));
+      return { bytes: Buffer.from(read.base64, 'base64'), type: read.type || '' };
+    }
+    if (!/^https:\/\//i.test(url)) throw new Error('unsupported image address: ' + url.slice(0, 80));
+    const session = this.view?.webContents?.session;
+    if (typeof session?.fetch !== 'function') throw new Error('the ChatGPT view session cannot download files');
+    return boundedPageCall(async () => {
+      const response = await session.fetch(url, { credentials: 'include' });
+      if (!response.ok) throw new Error('image download failed: HTTP ' + response.status);
+      const declared = Number(response.headers.get('content-length'));
+      if (declared > imageFile.MAX_IMAGE_BYTES) throw new Error('image is larger than 50 MB');
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return { bytes, type: response.headers.get('content-type') || '' };
+    }, { timeoutMs: IMAGE_DOWNLOAD_TIMEOUT_MS, label: 'image download' });
+  }
+
+  // chatgpt.save_image: saves an image ChatGPT generated in this conversation
+  // to `path` inside the job workspace. `index` counts the images of the
+  // newest reply that has images (0 = first). The file format follows the
+  // extension; other formats are re-encoded in the page at full size.
+  async saveGeneratedImage(job, workspace, args, permissions) {
+    const unknown = Object.keys(args || {}).filter(key => !SAVE_IMAGE_ARGS.has(key));
+    if (unknown.length) throw new Error(`unknown argument(s) ${unknown.join(', ')}; allowed: path, index`);
+    const target = typeof args.path === 'string' ? args.path.trim() : '';
+    if (!target) throw new Error('path is required, e.g. {"path":"images/out.png"}');
+    const format = imageFile.formatForPath(target);
+    if (!format || !imageFile.WRITABLE_FORMATS.has(format)) throw new Error('path must end in .png, .jpg, .jpeg or .webp');
+    const index = args.index === undefined ? 0 : Number(args.index);
+    if (!Number.isInteger(index) || index < 0) throw new Error('index must be a whole number from 0');
+    if (typeof this.automation?.generatedImages !== 'function') throw new Error('this worker cannot read generated images');
+
+    const found = await this.automation.generatedImages();
+    const images = Array.isArray(found?.images) ? found.images : [];
+    if (!images.length) {
+      throw new Error('no generated image is visible in this conversation. Generate the image first; save it in your next reply.');
+    }
+    if (index >= images.length) {
+      throw new Error(`index ${index} is out of range: your newest reply with images has ${images.length} image(s) (index 0-${images.length - 1})`);
+    }
+    const downloaded = await this.downloadImageBytes(images[index].src);
+    let bytes = downloaded.bytes;
+    if (!bytes?.length || bytes.length > imageFile.MAX_IMAGE_BYTES) throw new Error(`downloaded image has an invalid size (${bytes?.length || 0} bytes)`);
+    let info = imageFile.imageInfo(bytes);
+    if (!info) throw new Error('the downloaded file is not a PNG, JPEG, WebP or GIF image (' + (downloaded.type || 'unknown type') + ')');
+    let convertedFrom = null;
+    if (info.format !== format) {
+      const converted = await this.automation.evaluate(imageFile.transcodeScript(bytes.toString('base64'), imageFile.FORMATS[format].mime));
+      if (!converted?.ok) throw new Error(`could not convert the ${info.format} image to ${format}: ${converted?.error || 'unknown error'}`);
+      convertedFrom = info.format;
+      bytes = Buffer.from(converted.base64, 'base64');
+      info = imageFile.imageInfo(bytes);
+      if (!info || info.format !== format) throw new Error(`converting the image to ${format} produced no valid file`);
+    }
+
+    // Staged under the job folder (no chat tool can read jobs/), then moved
+    // into the workspace by the core with filesystem.write's checks.
+    const stageDir = path.join(job.dir, 'chatgpt-images');
+    fs.mkdirSync(stageDir, { recursive: true });
+    const staged = path.join(stageDir, `${Date.now()}-${index}${imageFile.FORMATS[format].extensions[0]}`);
+    fs.writeFileSync(staged, bytes);
+    let saved;
+    try {
+      saved = await this.workspaceBridge.saveStagedFile(workspace, target, staged, permissions);
+    } finally {
+      try { fs.rmSync(staged, { force: true }); } catch {}
+    }
+    if (found.messageId) {
+      job.savedImageTurns = [...new Set([...(job.savedImageTurns || []), found.messageId])];
+    }
+    return {
+      ok: true,
+      path: saved?.relative_path || target,
+      absolute_path: saved?.path || null,
+      bytes: bytes.length,
+      width: info.width,
+      height: info.height,
+      format: info.format,
+      ...(convertedFrom ? { converted_from: convertedFrom } : {}),
+      image_index: index,
+      images_in_reply: images.length,
+      ...(saved?.backup ? { replaced_existing_file: true } : {})
+    };
   }
 
   dispatchQueuedJobs() {
@@ -1834,12 +1981,15 @@ class ChatGPTWebProvider {
         'When you need a local tool, reply with exactly one line and nothing else (no code fence):',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Send one tool request per reply and wait for its TEAMYRA_TOOL_RESULT. The JSON must be valid; write paths with forward slashes (D:/project/file.txt), never backslashes.',
-        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, code.map, code.symbol, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, process.start, process.read, process.write, process.stop, process.list, page.check, screen.capture, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
+        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, code.map, code.symbol, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, process.start, process.read, process.write, process.stop, process.list, page.check, screen.capture, git.status, git.diff, git.log, git.add, git.commit, git.restore' + (this.site.generatesImages ? ', ' + SAVE_IMAGE_TOOL : '') + '.',
         'Start with code.map to see the project, and use code.symbol to read one function instead of a whole file.',
         'code.map {path, budget_chars?, focus?}; code.symbol {path, name}.',
         'terminal.run waits for its command to finish, 60 s by default; for test suites and builds pass "timeout_seconds" (up to 1800), e.g. {"argv":["npm","run","check"],"timeout_seconds":600}. For a program that keeps running (dev server, the app, a watcher, an interactive program) use process.start {"command":"<PowerShell command>","cwd":"...","wait_for":"<regex of a ready line>","wait_seconds":30}: it returns a session_id and the output so far, and the program keeps running. Then process.read {"session_id","wait_for","wait_seconds"} for new output, process.write {"session_id","input"} to type into it, process.stop {"session_id"}; process.list shows them. They stop when the job ends.',
         'To see what you built: page.check {"url":"http://localhost:<port>/","wait_for":"<text or CSS selector>"} opens a local page and returns its text, controls, console errors, failed requests and a screenshot; screen.capture {"window":"<part of a window title>"} screenshots an open window. A screenshot is attached to the next message when it can be. Test changes this way (start the server, check the page, read the errors) instead of guessing.',
         'filesystem.read is paged: use offset and max_bytes (at most 30000) for large files, then next_offset when clipped. Keep command output short (filter it); a tool result is cut to about 40000 characters.',
+        ...(this.site.generatesImages ? ['Images: generate the image with your own image generation in one reply (that reply shows the image), then save it in your next reply with ' +
+          'TEAMYRA_TOOL_REQUEST {"tool":"chatgpt.save_image","args":{"path":"relative/out.png","index":0}} — index counts the images of your newest reply that has images (0 = first). ' +
+          'The format follows the extension (.png, .jpg, .webp). The result gives the saved path, bytes and pixel size; never write image files with filesystem.write.'] : []),
         fullAccess
           ? 'The user granted full PC access: absolute paths anywhere on this PC are allowed; relative paths resolve inside the workspace.'
           : 'Use relative paths inside the workspace.',
@@ -1860,12 +2010,19 @@ class ChatGPTWebProvider {
       let protocolRecoveries = Number(resume?.protocol_recoveries) || 0;
       let successfulTools = Number(resume?.successful_tools) || 0;
       let outputNudges = Number(resume?.output_nudges) || 0;
+      let imageNudges = Number(resume?.image_nudges) || 0;
+      job.savedImageTurns = Array.isArray(resume?.saved_image_turns) ? resume.saved_image_turns : [];
       let transientRetries = 0;
       const firstStep = Number(resume?.step) || 0;
       const counters = step => ({
         step, parse_failures: parseFailures, protocol_recoveries: protocolRecoveries, successful_tools: successfulTools,
-        output_nudges: outputNudges
+        output_nudges: outputNudges, image_nudges: imageNudges, saved_image_turns: job.savedImageTurns
       });
+      // Reference images of an image job (chatgpt_image_batch) go with the
+      // first message.
+      if (!resume?.phase && Array.isArray(spec.attachments) && spec.attachments.length) {
+        await this.attachJobImages(job, assignedWorkspace, spec.attachments);
+      }
       let reply = resume?.phase
         ? await this.resumeExchange(job, resume, bootstrap)
         : await this.jobExchange(job, bootstrap);
@@ -1923,6 +2080,24 @@ class ChatGPTWebProvider {
             exactMissing = true; // this site gives the exact text, but not now
           }
         }
+        // A reply that shows generated images is not the end of an image
+        // task: nothing has saved them yet, and ChatGPT cannot send the save
+        // request in the same reply as the image.
+        if (this.site.generatesImages && !parsed.marker && Number(reply.images) > 0 && imageNudges < MAX_IMAGE_NUDGES &&
+            !(reply.messageId && job.savedImageTurns.includes(reply.messageId))) {
+          imageNudges += 1;
+          const missing = missingExpectedOutputs(assignedWorkspace, spec.expect_files);
+          const example = missing[0] || 'relative/out.png';
+          this.appendJobEvent(jobDir, 'info', `reply shows ${reply.images} generated image(s) that are not saved yet; reminding ChatGPT (${imageNudges}/${MAX_IMAGE_NUDGES})`);
+          this.writeJobMeta(jobDir, { last_event: 'asking ChatGPT to save its generated image' });
+          reply = await this.jobExchange(job, `TEAMYRA: your reply shows ${reply.images} generated image(s), but nothing has saved ` +
+            `${reply.images === 1 ? 'it' : 'them'} into the workspace yet` +
+            (missing.length ? ` and these expected files are missing: ${JSON.stringify(missing)}` : '') +
+            '. To save one, reply with exactly one line: TEAMYRA_TOOL_REQUEST ' +
+            JSON.stringify({ tool: SAVE_IMAGE_TOOL, args: { path: example, index: 0 } }) +
+            ' (index 0 = the first image of that reply). If the task is complete, reply with the final result.');
+          continue;
+        }
         if (!parsed.marker) {
           if (looksLikeProtocolLoss(reply.text, successfulTools)) {
             if (protocolRecoveries >= MAX_PROTOCOL_RECOVERIES) {
@@ -1953,6 +2128,10 @@ class ChatGPTWebProvider {
             reply = await this.jobExchange(job, [
               'TEAMYRA: the task is not finished. These expected output files do not exist yet or are empty: ' + JSON.stringify(missing) + '.',
               'The TEAMYRA tool bridge is available in this chat: send TEAMYRA_TOOL_REQUEST lines (one per reply) to read, run commands and write the files, then give the final result.',
+              ...(this.site.generatesImages && missing.some(file => imageFile.formatForPath(file))
+                ? ['For an image file: generate the image in one reply, then save it in the next with TEAMYRA_TOOL_REQUEST ' +
+                  JSON.stringify({ tool: SAVE_IMAGE_TOOL, args: { path: missing.find(file => imageFile.formatForPath(file)), index: 0 } }) + '.']
+                : []),
               'Reply now with your next TEAMYRA_TOOL_REQUEST.'
             ].join('\n'));
             continue;
@@ -2063,6 +2242,8 @@ class ChatGPTWebProvider {
               authorize: (command, cwd) => this.workspaceBridge.authorizeProcess(
                 assignedWorkspace, command, cwd, taskPermissions, this.site.workerId(this.activeProfileId || 'web'))
             });
+          } else if (request.tool === SAVE_IMAGE_TOOL && this.site.generatesImages) {
+            toolResult = await this.saveGeneratedImage(job, assignedWorkspace, request.args, taskPermissions);
           } else if (JobInspector.handles(request.tool)) {
             toolResult = await this.inspector.call(jobDir, request.tool, request.args, { workspace: assignedWorkspace });
           } else {
@@ -2106,6 +2287,9 @@ class ChatGPTWebProvider {
         attention: null,
         usage: { ...job.usage },
         ended: Date.now() / 1000,
+        // The site's own words ("... resets at 5:30 PM"): chatgpt_image_status
+        // reads the reset time from it.
+        ...(job.limitNotice ? { limit_notice: String(job.limitNotice).slice(0, 400) } : {}),
         last_event: 'error: ' + String(error?.message || error).slice(0, 180)
       });
       fs.writeFileSync(path.join(jobDir, 'DONE'), state, 'utf8');

@@ -565,6 +565,40 @@ class ChatGPTAutomationAdapter {
     })()`);
   }
 
+  // Generated images of the newest assistant turn that has any, in document
+  // order: { messageId, turnsBack, images: [{ src, width, height, alt }] }.
+  // When ChatGPT asks to save an image, its newest turn is that text request,
+  // so the search walks back to the turn that showed the image. Large `img`
+  // elements only (icons and avatars are small); the same picture rendered
+  // twice (a blurred backdrop and the image) counts once.
+  async generatedImages() {
+    return this.evaluate(`(() => {${TURNS_JS}
+      const large = img => {
+        const rect = img.getBoundingClientRect();
+        return Math.max(rect.width, img.naturalWidth || 0) >= 128 && Math.max(rect.height, img.naturalHeight || 0) >= 128;
+      };
+      const imagesIn = scope => {
+        const seen = new Set();
+        const out = [];
+        for (const img of scope ? scope.querySelectorAll('img') : []) {
+          const src = img.currentSrc || img.src || img.getAttribute('src') || '';
+          if (!src || seen.has(src) || !large(img)) continue;
+          seen.add(src);
+          out.push({ src, width: img.naturalWidth || 0, height: img.naturalHeight || 0, alt: img.alt || img.getAttribute('alt') || '' });
+        }
+        return out;
+      };
+      const turns = teamyraTurns('assistant');
+      for (let index = turns.length - 1; index >= 0; index -= 1) {
+        const unit = turns[index];
+        let images = imagesIn(unit);
+        if (!images.length) images = imagesIn(unit.closest('[data-testid^="conversation-turn-"], [data-turn-id], article'));
+        if (images.length) return { messageId: teamyraTurnId(unit), turnsBack: turns.length - 1 - index, images };
+      }
+      return { messageId: '', turnsBack: -1, images: [] };
+    })()`);
+  }
+
   // URL of the newest conversation in the sidebar, or ''. Used after a reload
   // when the job's conversation URL was never observed.
   async latestConversationUrl() {

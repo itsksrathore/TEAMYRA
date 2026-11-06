@@ -384,6 +384,15 @@ def handle(action, payload):
             actor=str(payload.get("actor") or "chatgpt-normal")[:100],
             confirm=payload.get("confirm") is True,
         )
+    if action == "chatgpt.workspace.save-staged-file":
+        return workspace_tools.WorkspaceToolService(ROOT).save_staged_file(
+            payload.get("workspace"),
+            payload.get("path"),
+            payload.get("staged"),
+            permissions=payload.get("permissions"),
+            token=_bridge_token(payload),
+            actor="chatgpt-normal",
+        )
     if action == "worktree.list":
         return worktree_manager.list_managed(WORKTREES)
     if action == "worktree.status":
