@@ -14,6 +14,8 @@ Module._load = function (request, ...rest) {
 };
 const { QwenWebProvider, QWEN_SITE } = require('../src/qwen-web-provider');
 const { ChatSiteAdapter } = require('../src/chat-site-adapter');
+const { googleSignInHost } = require('../src/chatgpt-web-provider');
+const { MuseAutomationAdapter } = require('../src/muse-automation-adapter');
 const { GrokWebProvider, GROK_SITE, GROK_BUSY_PREFIX } = require('../src/grok-web-provider');
 Module._load = originalLoad;
 
@@ -175,6 +177,27 @@ async function grokTests(root) {
   await jobLoopTests(root, GrokWebProvider, GROK_SITE, 'grok-web');
 }
 
+async function signInAndFrameTests() {
+  // "Sign in with Google" passes through Google's country domain and
+  // accounts.youtube.com; blocking them left DeepSeek's sign-in stuck.
+  for (const host of ['accounts.google.com', 'accounts.google.co.in', 'accounts.google.de', 'accounts.youtube.com']) {
+    assert.ok(googleSignInHost(host), host);
+  }
+  for (const host of ['accounts.google.com.evil.com', 'google.com', 'evil-accounts.google.com', 'youtube.com']) {
+    assert.ok(!googleSignInHost(host), host);
+  }
+  // A view the user is looking at draws its own frames: no capture there.
+  let captures = 0;
+  const contents = { isDestroyed: () => false, debugger: { isAttached: () => true, sendCommand: async () => { captures += 1; } } };
+  let shown = true;
+  const adapter = new MuseAutomationAdapter(contents, { isVisible: () => shown });
+  await adapter.drawFrame();
+  assert.equal(captures, 0);
+  shown = false;
+  await adapter.drawFrame();
+  assert.equal(captures, 1);
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chat-sites-'));
   try {
@@ -182,6 +205,7 @@ async function main() {
     await adapterTests(adapter);
     await jobLoopTests(root, QwenWebProvider, QWEN_SITE, 'qwen-web');
     await grokTests(root);
+    await signInAndFrameTests();
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

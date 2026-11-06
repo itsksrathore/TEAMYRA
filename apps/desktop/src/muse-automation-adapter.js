@@ -45,6 +45,9 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
   // the worker's background view draws none: the message box stays 0 px wide
   // and the Send button never appears. A 1x1 DevTools capture draws a frame.
   async drawFrame() {
+    // A view the user is looking at draws its own frames; capturing it every
+    // few seconds is wasted work and could make the page flicker.
+    if (this.pageOptions?.isVisible?.()) return;
     const api = this.webContents?.debugger;
     if (!api || this.webContents.isDestroyed?.()) return;
     try {

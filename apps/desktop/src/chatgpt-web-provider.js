@@ -128,10 +128,19 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// "Sign in with Google" passes through Google's own sites after the account
+// is chosen (country domains such as accounts.google.co.in, and
+// accounts.youtube.com to set its cookies). Blocking a hop left the sign-in
+// stuck on Google's account chooser.
+function googleSignInHost(host) {
+  return /^accounts\.google\.[a-z]{2,3}(\.[a-z]{2})?$/.test(host) ||
+    ['accounts.youtube.com', 'myaccount.google.com', 'gds.google.com', 'ogs.google.com'].includes(host);
+}
+
 function safeHttps(url, hosts = ALLOWED_HOSTS) {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'https:' && hosts.has(parsed.hostname);
+    return parsed.protocol === 'https:' && (hosts.has(parsed.hostname) || googleSignInHost(parsed.hostname));
   } catch {
     return false;
   }
@@ -434,6 +443,7 @@ class ChatGPTWebProvider {
     this.window.contentView.addChildView(this.view);
     const generation = this.pageGeneration;
     this.automation = this.site.adapter(this.view.webContents, {
+      isVisible: () => this.visible === true,
       timeoutMs: this.pageCallTimeoutMs,
       onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
@@ -446,7 +456,9 @@ class ChatGPTWebProvider {
       };
     });
     const guardTopLevelNavigation = event => {
-      if (!safeHttps(event.url, this.site.hosts)) event.preventDefault();
+      if (safeHttps(event.url, this.site.hosts)) return;
+      event.preventDefault();
+      this.noteBlockedNavigation(event.url);
     };
     this.view.webContents.on('will-navigate', guardTopLevelNavigation);
     this.view.webContents.on('will-redirect', guardTopLevelNavigation);
@@ -475,6 +487,18 @@ class ChatGPTWebProvider {
     return this.view;
   }
 
+  // A page load outside the site's allowed hosts was stopped. Recorded so a
+  // stuck sign-in can be traced (logs/web-blocked-navigation.log).
+  noteBlockedNavigation(url) {
+    let host = '';
+    try { host = new URL(url).hostname; } catch {}
+    try {
+      const file = path.join(this.runtimeRoot, 'logs', 'web-blocked-navigation.log');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, `${new Date().toISOString()} ${this.site.id} ${this.activeProfileId} ${host} ${String(url).slice(0, 300)}\n`);
+    } catch {}
+  }
+
   createEmbeddedPopup(options = {}) {
     this.closeEmbeddedPopup();
     const ses = this.sessionManager.getSession();
@@ -496,7 +520,9 @@ class ChatGPTWebProvider {
     this.window.contentView.addChildView(popup);
 
     const guardTopLevelNavigation = event => {
-      if (!safeHttps(event.url, this.site.hosts)) event.preventDefault();
+      if (safeHttps(event.url, this.site.hosts)) return;
+      event.preventDefault();
+      this.noteBlockedNavigation(event.url);
     };
     popup.webContents.on('will-navigate', guardTopLevelNavigation);
     popup.webContents.on('will-redirect', guardTopLevelNavigation);
@@ -512,6 +538,11 @@ class ChatGPTWebProvider {
     });
     popup.webContents.on('destroyed', () => {
       if (this.popupView === popup) this.popupView = null;
+      // Its layer must go too, or an empty view stays over the page.
+      try { this.window.contentView.removeChildView(popup); } catch {}
+      if (!this.busy && this.view && !this.view.webContents.isDestroyed()) {
+        this.view.webContents.reload();
+      }
       this.refreshStatus().catch(() => {});
     });
     popup.webContents.on('render-process-gone', () => {
@@ -1759,4 +1790,4 @@ ChatGPTWebProvider.prototype.laneCount = 1;
 ChatGPTWebProvider.prototype.inspector = new JobInspector();
 ChatGPTWebProvider.prototype.userActions = userActions(CHATGPT_SITE);
 
-module.exports = { boundToolResult, ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };
+module.exports = { boundToolResult, googleSignInHost, ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };
