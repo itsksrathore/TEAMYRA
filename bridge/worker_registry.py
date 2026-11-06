@@ -84,6 +84,17 @@ def build_worker_registry(root, home=None):
             "enabled": True,
             "priority": 250,
         },
+        "muse-normal": {
+            "id": "muse-normal",
+            "provider": "muse-web",
+            "label": "Muse",
+            "profile_id": "web",
+            "home": None,
+            "native": True,
+            "execution": "desktop-web",
+            "enabled": True,
+            "priority": 260,
+        },
     }
 
     legacy = profiles / "codex2"
@@ -142,17 +153,19 @@ def build_worker_registry(root, home=None):
                 "settings": {k: meta[k] for k in ("model", "effort", "permission_mode") if meta[k] is not None},
             }
 
-    chatgpt_profiles = profiles / "chatgpt-web"
-    if chatgpt_profiles.exists():
-        for path in sorted((p for p in chatgpt_profiles.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
+    for provider, prefix in (("chatgpt-web", "chatgpt-"), ("muse-web", "muse-")):
+        web_profiles = profiles / provider
+        if not web_profiles.exists():
+            continue
+        for path in sorted((p for p in web_profiles.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
             part = safe_worker_part(path.name)
-            worker_id = "chatgpt-" + part
+            worker_id = prefix + part
             if worker_id in workers:
                 continue
             meta = profile_metadata(path)
             workers[worker_id] = {
                 "id": worker_id,
-                "provider": "chatgpt-web",
+                "provider": provider,
                 "label": meta["name"],
                 "profile_id": path.name,
                 "home": None,

@@ -104,7 +104,7 @@ def active_jobs(runtime_root, max_age=600):
         state = str(data.get("state") or "").lower()
         # An unfinished ChatGPT job needs the core's scheduler however long it
         # has waited: the scheduler is what restarts TEAMYRA Desktop for it.
-        if (data.get("provider") == "chatgpt-web" and state in CHATGPT_ACTIVE_STATES
+        if (data.get("provider") in ("chatgpt-web", "muse-web") and state in CHATGPT_ACTIVE_STATES
                 and not (meta.parent / "DONE").exists()):
             return True
         if state not in ACTIVE_JOB_STATES:

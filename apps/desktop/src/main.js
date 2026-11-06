@@ -105,6 +105,7 @@ fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
 const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary, builtinMediaMetaFile } = require('./provider-registry');
 const { callCore } = require('./core-api');
 const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
+const { MuseWebProvider } = require('./muse-web-provider');
 const { GoogleMediaEngine } = require('./media/google-media-engine');
 const {
   ensureTeamyraMcp,
@@ -216,10 +217,10 @@ async function providersCached(force = false) {
     .then(async data => {
       try {
         await syncChatgptProviders();
-        const provider = data.find(item => item.id === 'chatgpt-web');
-        if (provider) {
+        for (const provider of data.filter(item => WEB_CHAT_PREFIX[item.id] !== undefined)) {
+          const name = provider.id === 'muse-web' ? 'Muse' : 'ChatGPT';
           const statuses = await Promise.all((provider.profiles || []).map(async profile => {
-            const instance = await ensureChatgptProvider(profile.id);
+            const instance = await ensureChatgptProvider(WEB_CHAT_PREFIX[provider.id] + profile.id);
             const [sessionStatus, liveStatus] = await Promise.all([
               instance.profileSessionStatus(profile.id).catch(() => ({ signedIn: false })),
               instance.getStatus().catch(() => ({ automationReady: false, workerReady: false }))
@@ -242,7 +243,7 @@ async function providersCached(force = false) {
           provider.workerReady = provider.profiles.some(profile => profile.workerReady);
           provider.activeProfileId = activeChatgptProfileId;
           provider.status = provider.workerReady
-            ? 'ChatGPT workers ready'
+            ? name + ' workers ready'
             : provider.signedIn
               ? 'Signed in; worker view will initialize on demand'
               : 'Open inside TEAMYRA to sign in';
@@ -299,14 +300,20 @@ async function providersCached(force = false) {
   return PROVIDER_CACHE.pending;
 }
 
+// Web-chat workers share one map: ChatGPT accounts by profile id, Muse
+// accounts as 'muse:<profile id>', so every embedded-view control serves both.
+const WEB_CHAT_PREFIX = { 'chatgpt-web': '', 'muse-web': 'muse:' };
+
 function chatgptProfileIds() {
-  const ids = ['web'];
-  const root = path.join(PROFILES_ROOT, 'chatgpt-web');
-  try {
-    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (entry.isDirectory()) ids.push(entry.name);
-    }
-  } catch {}
+  const ids = [];
+  for (const [providerId, prefix] of Object.entries(WEB_CHAT_PREFIX)) {
+    ids.push(prefix + 'web');
+    try {
+      for (const entry of fs.readdirSync(path.join(PROFILES_ROOT, providerId), { withFileTypes: true })) {
+        if (entry.isDirectory()) ids.push(prefix + entry.name);
+      }
+    } catch {}
+  }
   return [...new Set(ids)];
 }
 
@@ -315,7 +322,9 @@ async function ensureChatgptProvider(profileId = 'web') {
   let provider = chatgptProviders.get(id);
   if (provider) return provider;
   if (!mainWindow || mainWindow.isDestroyed()) throw new Error('TEAMYRA window is unavailable');
-  provider = new ChatGPTWebProvider({ window: mainWindow, runtimeRoot: ROOT, profileId: id });
+  provider = id.startsWith('muse:')
+    ? new MuseWebProvider({ window: mainWindow, runtimeRoot: ROOT, profileId: id.slice('muse:'.length) || 'web' })
+    : new ChatGPTWebProvider({ window: mainWindow, runtimeRoot: ROOT, profileId: id });
   chatgptProviders.set(id, provider);
   try {
     await provider.initialize();
@@ -364,6 +373,7 @@ function workerIdForProfile(providerId, profileId) {
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
   if (providerId === 'chatgpt-web') return profileId === 'web' ? 'chatgpt-normal' : 'chatgpt-' + safeWorkerPart(profileId);
+  if (providerId === 'muse-web') return profileId === 'web' ? 'muse-normal' : 'muse-' + safeWorkerPart(profileId);
   return '';
 }
 
@@ -377,7 +387,7 @@ function mergeUsageProviderState(snapshot, providers) {
       const row = byWorker.get(workerId);
       if (!row) continue;
       row.provider = provider.id || row.provider;
-      const providerReady = provider.id === 'chatgpt-web' ? provider.workerReady === true : true;
+      const providerReady = WEB_CHAT_PREFIX[provider.id] !== undefined ? provider.workerReady === true : true;
       row.ready = Boolean(provider.installed && profile.signedIn && profile.enabled !== false && providerReady);
     }
   }
@@ -437,7 +447,7 @@ function jobBlocksDesktopSleep(job) {
   // An unfinished ChatGPT job needs this desktop however long it has waited:
   // its worker lives here, and an idle exit used to strand queued and
   // waiting jobs for hours with nothing left to pick them up.
-  if (job?.provider === 'chatgpt-web' && !job.done &&
+  if (WEB_CHAT_PREFIX[job?.provider] !== undefined && !job.done &&
       ['queued', 'starting', 'running', 'waiting_for_desktop', 'needs_user'].includes(job.state)) return true;
   const activeStates = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
   if (!activeStates.has(job?.state)) return false;
@@ -1269,7 +1279,7 @@ async function desktopCreateAccount(providerId, requestedName) {
     name, provider: provider.id, enabled: true, priority: 100, createdAt: new Date().toISOString()
   }, null, 2), 'utf8');
   PROVIDER_CACHE = { at: 0, data: null, pending: null };
-  if (provider.id === 'chatgpt-web') await ensureChatgptProvider(profileId);
+  if (WEB_CHAT_PREFIX[provider.id] !== undefined) await ensureChatgptProvider(WEB_CHAT_PREFIX[provider.id] + profileId);
   if (provider.id === 'google-media' && googleMediaEngine) googleMediaEngine.ensureProfile(profileId);
   return { ok: true, provider: provider.id, profileId, name, loginReady: true };
 }

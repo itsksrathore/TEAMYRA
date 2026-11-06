@@ -45,9 +45,15 @@ const WORKER_META = {
   codex: { code: 'CX', icon: 'openai', cls: 'codex', label: 'Codex' },
   antigravity: { code: 'AG', icon: 'antigravity', cls: 'antigravity', label: 'Antigravity' },
   chatgpt: { code: 'GPT', icon: 'openai', cls: 'chatgpt', label: 'ChatGPT' },
+  muse: { code: 'MU', icon: '', cls: 'antigravity', label: 'Muse' },
   googleMedia: { code: 'GM', icon: '', cls: 'antigravity', label: 'Google Media' },
   other: { code: 'AI', icon: '', cls: '', label: 'Agent' }
 };
+
+// Web-chat providers: their accounts open in the embedded panel. Muse accounts
+// are addressed there as 'muse:<profile id>'.
+const WEB_CHAT_PREFIX = { 'chatgpt-web': '', 'muse-web': 'muse:' };
+const isWebChat = providerId => WEB_CHAT_PREFIX[providerId] !== undefined;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -73,12 +79,14 @@ function workerIdForProfile(providerId, profileId) {
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
   if (providerId === 'chatgpt-web') return profileId === 'web' ? 'chatgpt-normal' : 'chatgpt-' + safeSlug(profileId);
+  if (providerId === 'muse-web') return profileId === 'web' ? 'muse-normal' : 'muse-' + safeSlug(profileId);
   return '';
 }
 
 function workerMeta(worker) {
   const value = String(worker || '').toLowerCase();
   if (value.includes('chatgpt')) return WORKER_META.chatgpt;
+  if (value.startsWith('muse')) return WORKER_META.muse;
   if (value.includes('claude')) return WORKER_META.claude;
   if (value.includes('codex')) return WORKER_META.codex;
   if (value.includes('antigravity') || value.includes('agy')) return WORKER_META.antigravity;
@@ -88,6 +96,7 @@ function workerMeta(worker) {
 function providerMeta(providerId) {
   if (providerId === 'elevenlabs') return { code: 'EL', icon: '', cls: 'chatgpt', label: 'ElevenLabs' };
   if (providerId === 'chatgpt-web') return WORKER_META.chatgpt;
+  if (providerId === 'muse-web') return WORKER_META.muse;
   if (providerId === 'google-media') return WORKER_META.googleMedia;
   return workerMeta(providerId);
 }
@@ -265,7 +274,7 @@ async function refreshJobs() {
 
 function profileRows(provider) {
   let profiles = Array.isArray(provider.profiles) ? [...provider.profiles] : [];
-  if (!['chatgpt-web', 'elevenlabs'].includes(provider.id) && provider.installed && !profiles.length) {
+  if (!isWebChat(provider.id) && provider.id !== 'elevenlabs' && provider.installed && !profiles.length) {
     profiles = [{
       id: 'native',
       name: 'Default',
@@ -279,7 +288,7 @@ function profileRows(provider) {
 
 function profileActionLabel(provider, profile) {
   if (provider.id === 'elevenlabs') return profile.signedIn ? 'Open' : profile.mcpState === 'connecting' ? 'Connecting…' : 'Connect';
-  if (provider.id === 'chatgpt-web' || provider.id === 'google-media') return profile.signedIn ? 'Open' : 'Connect';
+  if (isWebChat(provider.id) || provider.id === 'google-media') return profile.signedIn ? 'Open' : 'Connect';
   return profile.signedIn ? 'Open' : 'Connect';
 }
 
@@ -304,10 +313,10 @@ function mcpButtonHtml(provider) {
 function agentCardHtml(provider) {
   const meta = providerMeta(provider.id);
   const profiles = profileRows(provider);
-  const connected = provider.id === 'chatgpt-web'
+  const connected = isWebChat(provider.id)
     ? provider.signedIn === true
     : profiles.some(profile => profile.signedIn);
-  const status = provider.id === 'elevenlabs' ? provider.status : provider.id === 'chatgpt-web'
+  const status = provider.id === 'elevenlabs' ? provider.status : isWebChat(provider.id)
     ? (provider.status || 'Embedded web session')
     : !provider.installed
       ? 'Not installed'
@@ -320,7 +329,7 @@ function agentCardHtml(provider) {
         <div class="profile-row">
           <div class="profile-name">
             <strong>${escapeHtml(profile.name || profile.id)}</strong>
-            <span>${provider.id === 'google-media' && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : provider.id === 'chatgpt-web' ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
+            <span>${provider.id === 'google-media' && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : isWebChat(provider.id) ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
           </div>
           <div class="profile-actions">
             <button class="profile-action" type="button"
@@ -371,7 +380,7 @@ async function refreshAgents(force = false) {
   currentProviders = providers;
   currentMcpConnections = mcpConnections || { endpoint: '', service: { running: false }, providers: {} };
   const connected = currentProviders.filter(provider =>
-    provider.id === 'chatgpt-web'
+    isWebChat(provider.id)
       ? provider.signedIn === true
       : profileRows(provider).some(profile => profile.signedIn)
   ).length;
@@ -496,8 +505,8 @@ async function refreshAgents(force = false) {
         const result = await window.teamyra.addAccount(provider.id, name);
         if (!result?.ok) throw new Error(result?.reason || 'Could not create account');
 
-        if (provider.id === 'chatgpt-web') {
-          await openChatgptDetail(result.profileId);
+        if (isWebChat(provider.id)) {
+          await openChatgptDetail(WEB_CHAT_PREFIX[provider.id] + result.profileId);
         } else if (provider.id === 'elevenlabs') {
           await openElevenLabsMcp({ id: result.profileId, name: result.name }, () => refreshAgents(true), { startLogin: true });
           refreshAgents(true).catch(() => {});
@@ -550,8 +559,8 @@ async function openProvider(provider, profile) {
     return;
   }
   await window.teamyra.setGoogleMediaVisible(false).catch(() => {});
-  if (provider.id === 'chatgpt-web') {
-    await openChatgptDetail(profile.id || 'web');
+  if (isWebChat(provider.id)) {
+    await openChatgptDetail(WEB_CHAT_PREFIX[provider.id] + (profile.id || 'web'));
     return;
   }
   if (!provider.installed) {
@@ -734,6 +743,13 @@ function syncChatgptBounds() {
 
 async function openChatgptDetail(profileId = 'web') {
   activeChatgptProfileId = profileId || 'web';
+  const muse = activeChatgptProfileId.startsWith('muse:');
+  const site = muse ? 'Muse' : 'ChatGPT';
+  $('#chatgptTitle').textContent = muse ? 'Muse' : 'ChatGPT Normal';
+  $('#chatgptAvatar').textContent = muse ? 'MU' : 'GPT';
+  $('#chatgptPlaceholderTitle').textContent = site + ' stays inside Teamyra';
+  $('#chatgptPlaceholderText').textContent = 'Open the agent to load your normal ' + site + ' account here.';
+  $('#chatgptOpen').textContent = 'Open ' + site;
   activeView = 'agents';
   $('#agentsShelf').hidden = true;
   $('#chatgptDetail').hidden = false;
@@ -942,7 +958,7 @@ $('#newTaskForm').addEventListener('submit', submitTask);
 
 $('#closeTerminal').addEventListener('click', () => closeTerminal());
 $('#chatgptBack').addEventListener('click', () => closeChatgptDetail().catch(() => {}));
-$('#chatgptOpen').addEventListener('click', () => openChatgptDetail().catch(error => alert(String(error?.message || error))));
+$('#chatgptOpen').addEventListener('click', () => openChatgptDetail(activeChatgptProfileId).catch(error => alert(String(error?.message || error))));
 $('#chatgptWorkspaceButton').addEventListener('click', () => selectChatgptWorkspace().catch(error => alert(String(error?.message || error))));
 $('#chatgptTools').addEventListener('click', async () => {
   await refreshChatgptStatus().catch(() => {});

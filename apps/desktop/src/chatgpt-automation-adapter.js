@@ -270,6 +270,9 @@ class ChatGPTAutomationAdapter {
     this.pageOptions = options;
   }
 
+  // The site's name in errors (a subclass drives another site).
+  get siteName() { return 'ChatGPT'; }
+
   pageCall(operation, label) {
     return boundedPageCall(operation, { ...this.pageOptions, label });
   }
@@ -498,10 +501,11 @@ class ChatGPTAutomationAdapter {
       if (signature !== lastSignature || snap.generating) lastProgressAt = Date.now();
       lastSignature = signature;
       if (shouldRecover?.() || (!snap.generating && Date.now() - lastProgressAt >= noProgressMs)) {
-        throw teamyraError('ChatGPT page made no progress', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+        throw teamyraError(this.siteName + ' page made no progress', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
       }
       if (detectChallenge && snap?.challenged) {
-        throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
+        throw teamyraError(this.siteName + ' requires user verification in the embedded view', 'TEAMYRA_CHALLENGED',
+          this.siteName.toLowerCase() + '_verification');
       }
       // ChatGPT virtualizes older turns, so the visible count can stay at five
       // or even decrease. Prefer the last turn identity, then its text.
@@ -531,7 +535,7 @@ class ChatGPTAutomationAdapter {
       }
       await sleep(Math.max(1, Math.min(pollMs, endAt - Date.now())));
     }
-    const error = teamyraError('Timed out waiting for ChatGPT response', 'TEAMYRA_TIMEOUT', 'timeout');
+    const error = teamyraError('Timed out waiting for ' + this.siteName + ' response', 'TEAMYRA_TIMEOUT', 'timeout');
     error.generating = Boolean(lastSnap?.generating);
     throw error;
   }

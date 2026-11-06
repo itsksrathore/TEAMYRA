@@ -12,17 +12,20 @@ function safeProfileId(value) {
     .slice(0, 48) || DEFAULT_PROFILE_ID;
 }
 
-function partitionForProfile(profileId = DEFAULT_PROFILE_ID) {
+function partitionForProfile(profileId = DEFAULT_PROFILE_ID, base = DEFAULT_PARTITION) {
   const id = safeProfileId(profileId);
   return id === DEFAULT_PROFILE_ID
-    ? DEFAULT_PARTITION
-    : DEFAULT_PARTITION + '-' + id;
+    ? base
+    : base + '-' + id;
 }
 
+// One persistent browser profile per web-chat account. Another site (Muse)
+// passes its own partition base and the origin whose cookies mean signed in.
 class ChatGPTSessionManager {
-  constructor(profileId = DEFAULT_PROFILE_ID) {
+  constructor(profileId = DEFAULT_PROFILE_ID, { partitionBase = DEFAULT_PARTITION, cookieUrl = 'https://chatgpt.com' } = {}) {
     this.profileId = safeProfileId(profileId);
-    this.partition = partitionForProfile(this.profileId);
+    this.partition = partitionForProfile(this.profileId, partitionBase);
+    this.cookieUrl = cookieUrl;
     this.session = null;
   }
 
@@ -41,7 +44,7 @@ class ChatGPTSessionManager {
 
   async cookieSummary() {
     const ses = this.initialize();
-    const cookies = await ses.cookies.get({ url: 'https://chatgpt.com' });
+    const cookies = await ses.cookies.get({ url: this.cookieUrl });
     return {
       count: cookies.length,
       hasSessionCookies: cookies.some(cookie => /session|auth|token/i.test(cookie.name))

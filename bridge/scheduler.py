@@ -28,7 +28,10 @@ from worker_registry import build_worker_registry
 QUEUED = "queued"
 # A worker with a job in one of these states (and no DONE file) is busy.
 ACTIVE_STATES = {"starting", "running", "waiting", "waiting_for_desktop", "needs_user"}
-DESKTOP_PROVIDERS = {"chatgpt-web"}
+# Web-chat workers run inside TEAMYRA Desktop; each writes its readiness to
+# ROOT/<folder>/status.json.
+WEB_STATUS_DIRS = {"chatgpt-web": "chatgpt", "muse-web": "muse"}
+DESKTOP_PROVIDERS = set(WEB_STATUS_DIRS)
 COOLDOWN_SECONDS = 1800
 LOCK_NAME = "_scheduler.lock"
 LOCK_WAIT_SECONDS = 15.0
@@ -88,7 +91,8 @@ def _write_spec(job_dir, spec):
 
 def chatgpt_ready(root, info):
     """A pool recipient must have a fresh, ready desktop account."""
-    status = _read_json(Path(root) / "chatgpt" / "status.json") or {}
+    folder = WEB_STATUS_DIRS.get(info.get("provider"), "chatgpt")
+    status = _read_json(Path(root) / folder / "status.json") or {}
     if time.time() - float(status.get("heartbeat_at") or 0) > 20:
         return False
     profile = str(info.get("profile_id") or "web")
@@ -446,7 +450,7 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
                 # comparable; queue_order is only meaningful within one worker.
                 rows = [m for m in metas if is_queued(m) and m.get("worker") != worker
                         and m.get("provider") == info.get("provider") and not m.get("pin")
-                        and (m.get("provider") == "chatgpt-web" or m.get("pool") is True)
+                        and (m.get("provider") in DESKTOP_PROVIDERS or m.get("pool") is True)
                         and registry.get(m.get("worker"), {}).get("provider") == info.get("provider")]
                 rows.sort(key=lambda m: (float(m.get("queued_at") or m.get("created") or 0),
                                          str(m.get("id"))))
@@ -465,7 +469,7 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
                 except Exception:
                     reason = "not_ready"
             elif borrowed:
-                if info.get("provider") == "chatgpt-web" and not chatgpt_ready(root, info):
+                if info.get("provider") in DESKTOP_PROVIDERS and not chatgpt_ready(root, info):
                     reason = "not_ready"
             if reason is None:
                 if borrowed:

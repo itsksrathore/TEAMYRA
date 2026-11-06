@@ -31,16 +31,21 @@ const RENDER_WAIT_MS = 25000;
 const JOB_STATE_FILE = 'chatgpt-state.json';
 const UNKNOWN_TOOL_OUTCOME = 'TEAMYRA Desktop restarted while this tool was running, so its outcome is unknown. ' +
   'Check the current state first (read the file, list the folder or run git status) and repeat the step only if it did not happen.';
-const VERIFICATION_MESSAGE = 'ChatGPT asks for human verification. Open TEAMYRA Desktop, select the ChatGPT worker and complete the check; the job resumes automatically.';
-const SIGN_IN_MESSAGE = 'This ChatGPT account is signed out. Open TEAMYRA Desktop, select the ChatGPT worker and sign in; the job resumes automatically.';
-const USER_ACTIONS = {
-  verification: { kind: 'chatgpt_verification', message: VERIFICATION_MESSAGE, title: 'TEAMYRA: ChatGPT verification needed',
-    waiting: 'waiting: ChatGPT verification required in TEAMYRA Desktop', paused: 'needs_user: ChatGPT verification required',
-    resumed: 'ChatGPT verification cleared; resuming the same conversation' },
-  sign_in: { kind: 'chatgpt_sign_in', message: SIGN_IN_MESSAGE, title: 'TEAMYRA: ChatGPT sign-in needed',
-    waiting: 'waiting: ChatGPT sign-in required in TEAMYRA Desktop', paused: 'needs_user: ChatGPT sign-in required',
-    resumed: 'ChatGPT signed in again; resuming the same conversation' }
-};
+// What a human has to do in the embedded view, worded for the site.
+function userActions({ name, id }) {
+  return {
+    verification: { kind: id + '_verification',
+      message: `${name} asks for human verification. Open TEAMYRA Desktop, select the ${name} worker and complete the check; the job resumes automatically.`,
+      title: `TEAMYRA: ${name} verification needed`,
+      waiting: `waiting: ${name} verification required in TEAMYRA Desktop`, paused: `needs_user: ${name} verification required`,
+      resumed: `${name} verification cleared; resuming the same conversation` },
+    sign_in: { kind: id + '_sign_in',
+      message: `This ${name} account is signed out. Open TEAMYRA Desktop, select the ${name} worker and sign in; the job resumes automatically.`,
+      title: `TEAMYRA: ${name} sign-in needed`,
+      waiting: `waiting: ${name} sign-in required in TEAMYRA Desktop`, paused: `needs_user: ${name} sign-in required`,
+      resumed: `${name} signed in again; resuming the same conversation` }
+  };
+}
 const TOOL_ERROR_HINT = 'Reply with one line: TEAMYRA_TOOL_REQUEST {"tool":"<name>","args":{...}} using valid JSON and forward slashes in paths (D:/dir/file). If the task is complete, reply with the final answer without the TEAMYRA_TOOL_REQUEST marker.';
 const READ_ONLY_BLOCKED_TOOLS = new Set([
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
@@ -51,21 +56,39 @@ const ALLOWED_HOSTS = new Set([
   'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'
 ]);
 
+// Everything that differs between web-chat sites. ChatGPT is the default;
+// another site (muse-web-provider.js) passes its own.
+const CHATGPT_SITE = {
+  id: 'chatgpt',
+  name: 'ChatGPT',
+  provider: 'chatgpt-web',
+  stateDir: 'chatgpt',
+  home: CHATGPT_HOME,
+  hosts: ALLOWED_HOSTS,
+  conversationHost: 'chatgpt.com',
+  workerId: profileId => profileId === DEFAULT_CHATGPT_PROFILE_ID ? 'chatgpt-normal' : 'chatgpt-' + profileId,
+  conversationUrl: id => CHATGPT_HOME + 'c/' + id,
+  sessionManager: profileId => new ChatGPTSessionManager(profileId),
+  adapter: (webContents, options) => new ChatGPTAutomationAdapter(webContents, options),
+  // Extra lines for the job prompt, after the tool protocol.
+  promptRules: []
+};
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function safeHttps(url) {
+function safeHttps(url, hosts = ALLOWED_HOSTS) {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'https:' && ALLOWED_HOSTS.has(parsed.hostname);
+    return parsed.protocol === 'https:' && hosts.has(parsed.hostname);
   } catch {
     return false;
   }
 }
 
-function safePopupUrl(url) {
-  return url === 'about:blank' || safeHttps(url);
+function safePopupUrl(url, hosts = ALLOWED_HOSTS) {
+  return url === 'about:blank' || safeHttps(url, hosts);
 }
 
 function missingExpectedOutputs(workspace, paths = []) {
@@ -111,15 +134,17 @@ function snapBaseline(snap) {
 }
 
 class ChatGPTWebProvider {
-  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID, pageCallTimeoutMs }) {
+  constructor({ window, runtimeRoot, profileId = DEFAULT_CHATGPT_PROFILE_ID, pageCallTimeoutMs, site = CHATGPT_SITE }) {
+    this.site = site;
+    this.userActions = userActions(site);
     this.window = window;
     this.runtimeRoot = runtimeRoot;
-    this.stateRoot = path.join(runtimeRoot, 'chatgpt');
+    this.stateRoot = path.join(runtimeRoot, site.stateDir);
     this.statusFile = path.join(this.stateRoot, 'status.json');
     this.activeProfileId = String(profileId || DEFAULT_CHATGPT_PROFILE_ID);
     this.fixedProfileId = this.activeProfileId;
     this.workerConversationFile = this.profileConversationFile(this.activeProfileId);
-    this.sessionManager = new ChatGPTSessionManager(this.activeProfileId);
+    this.sessionManager = site.sessionManager(this.activeProfileId);
     this.workspaceBridge = new WorkspaceBridge();
     this.view = null;
     this.popupView = null;
@@ -143,7 +168,7 @@ class ChatGPTWebProvider {
     fs.mkdirSync(this.stateRoot, { recursive: true });
     this.writeStatus({
       profile_update: false,
-      detail: 'Embedded ChatGPT available; open it to initialize the session.',
+      detail: `Embedded ${this.site.name} available; open it to initialize the session.`,
       automation_ready: false,
       worker_ready: false,
       connected: false,
@@ -217,7 +242,7 @@ class ChatGPTWebProvider {
       const dir = path.join(jobsRoot, entry.name);
       let meta;
       try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')); } catch { continue; }
-      if (meta.provider !== 'chatgpt-web' || !['running', 'needs_user'].includes(meta.state) ||
+      if (meta.provider !== this.site.provider || !['running', 'needs_user'].includes(meta.state) ||
           String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId ||
           fs.existsSync(path.join(dir, 'DONE'))) continue;
       const saved = this.loadJobState(dir);
@@ -227,7 +252,7 @@ class ChatGPTWebProvider {
       const resumable = resumes < MAX_DESKTOP_RESUMES && !fs.existsSync(path.join(dir, 'CANCEL')) &&
         (saved?.conversation_url || !(Number(saved?.successful_tools) > 0 || saved?.phase === 'tool'));
       if (resumable) {
-        const note = `TEAMYRA Desktop restarted; resuming the job in the same ChatGPT conversation (${resumes + 1}/${MAX_DESKTOP_RESUMES})`;
+        const note = `TEAMYRA Desktop restarted; resuming the job in the same ${this.site.name} conversation (${resumes + 1}/${MAX_DESKTOP_RESUMES})`;
         this.appendJobEvent(dir, 'info', note);
         this.writeJobMeta(dir, {
           state: 'waiting_for_desktop', reason: null, attention: null, resume_requested: true,
@@ -236,8 +261,8 @@ class ChatGPTWebProvider {
         continue;
       }
       const detail = resumes >= MAX_DESKTOP_RESUMES
-        ? `ChatGPT desktop restarted ${resumes + 1} times during this job; partial workspace changes are preserved. Resume with a new job.`
-        : 'ChatGPT desktop restarted; partial workspace changes are preserved. Resume with a new job.';
+        ? `${this.site.name} desktop restarted ${resumes + 1} times during this job; partial workspace changes are preserved. Resume with a new job.`
+        : `${this.site.name} desktop restarted; partial workspace changes are preserved. Resume with a new job.`;
       this.appendJobEvent(dir, 'error', detail);
       this.writeJobMeta(dir, {
         state: 'failed', reason: 'desktop_interrupted', exit_code: 1, attention: null,
@@ -256,7 +281,7 @@ class ChatGPTWebProvider {
   async profileSessionStatus(profileId) {
     const manager = profileId === this.activeProfileId
       ? this.sessionManager
-      : new ChatGPTSessionManager(profileId);
+      : this.site.sessionManager(profileId);
     const summary = await manager.cookieSummary().catch(() => ({ count: 0, hasSessionCookies: false }));
     return {
       profileId,
@@ -267,7 +292,7 @@ class ChatGPTWebProvider {
 
   async switchProfile(profileId = DEFAULT_CHATGPT_PROFILE_ID) {
     const next = String(profileId || DEFAULT_CHATGPT_PROFILE_ID).trim() || DEFAULT_CHATGPT_PROFILE_ID;
-    if (next !== this.fixedProfileId) throw new Error('This ChatGPT worker is bound to a different account');
+    if (next !== this.fixedProfileId) throw new Error(`This ${this.site.name} worker is bound to a different account`);
     return this.getStatus();
   }
 
@@ -289,20 +314,20 @@ class ChatGPTWebProvider {
     this.view.setVisible(this.visible);
     this.window.contentView.addChildView(this.view);
     const generation = this.pageGeneration;
-    this.automation = new ChatGPTAutomationAdapter(this.view.webContents, {
+    this.automation = this.site.adapter(this.view.webContents, {
       timeoutMs: this.pageCallTimeoutMs,
       onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
-      if (!safePopupUrl(url)) return { action: 'deny' };
+      if (!safePopupUrl(url, this.site.hosts)) return { action: 'deny' };
       return {
         action: 'allow',
         createWindow: options => this.createEmbeddedPopup(options)
       };
     });
     const guardTopLevelNavigation = event => {
-      if (!safeHttps(event.url)) event.preventDefault();
+      if (!safeHttps(event.url, this.site.hosts)) event.preventDefault();
     };
     this.view.webContents.on('will-navigate', guardTopLevelNavigation);
     this.view.webContents.on('will-redirect', guardTopLevelNavigation);
@@ -317,12 +342,12 @@ class ChatGPTWebProvider {
       // jobs then waited for hours for a worker that never became ready.
       if (isMainFrame === false || Number(code) === -3) return;
       this.loaded = false;
-      this.writeStatus({ detail: `ChatGPT page failed to load (${code}): ${description}` });
+      this.writeStatus({ detail: `${this.site.name} page failed to load (${code}): ${description}` });
     });
     this.view.webContents.on('render-process-gone', (_event, details) => {
       this.loaded = false;
       this.markPageUnresponsive();
-      this.writeStatus({ detail: 'ChatGPT renderer stopped: ' + (details?.reason || 'unknown') });
+      this.writeStatus({ detail: `${this.site.name} renderer stopped: ` + (details?.reason || 'unknown') });
     });
     this.view.webContents.on('unresponsive', () => this.markPageUnresponsive());
     this.view.webContents.on('before-input-event', event => {
@@ -352,12 +377,12 @@ class ChatGPTWebProvider {
     this.window.contentView.addChildView(popup);
 
     const guardTopLevelNavigation = event => {
-      if (!safeHttps(event.url)) event.preventDefault();
+      if (!safeHttps(event.url, this.site.hosts)) event.preventDefault();
     };
     popup.webContents.on('will-navigate', guardTopLevelNavigation);
     popup.webContents.on('will-redirect', guardTopLevelNavigation);
     popup.webContents.setWindowOpenHandler(({ url }) => {
-      if (safePopupUrl(url)) {
+      if (safePopupUrl(url, this.site.hosts)) {
         setImmediate(() => {
           if (this.popupView === popup && !popup.webContents.isDestroyed()) {
             this.pageCall(() => popup.webContents.loadURL(url), 'popup navigation').catch(() => {});
@@ -393,7 +418,7 @@ class ChatGPTWebProvider {
     if (this.visible) view.setBounds(this.bounds);
     const url = view.webContents.getURL();
     if (!url || url === 'about:blank') {
-      await this.pageCall(() => view.webContents.loadURL(CHATGPT_HOME), 'navigation');
+      await this.pageCall(() => view.webContents.loadURL(this.site.home), 'navigation');
     }
     await this.refreshStatus();
     return this.getStatus();
@@ -412,7 +437,7 @@ class ChatGPTWebProvider {
     void (async () => {
       try {
         if (!current || current === 'about:blank') {
-          await this.pageCall(() => view.webContents.loadURL(CHATGPT_HOME), 'navigation');
+          await this.pageCall(() => view.webContents.loadURL(this.site.home), 'navigation');
         }
         await this.pageCall(async () => {
           while (view.webContents.isLoading()) await sleep(120);
@@ -474,16 +499,16 @@ class ChatGPTWebProvider {
     this.pageGeneration += 1;
     const generation = this.pageGeneration;
     this.statusRefresh = null;
-    this.automation = new ChatGPTAutomationAdapter(view.webContents, {
+    this.automation = this.site.adapter(view.webContents, {
       timeoutMs: this.pageCallTimeoutMs,
       onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
     this.loaded = false;
     this.lastProbe = null;
     const current = view.webContents.getURL();
-    const target = safeHttps(current) ? current : CHATGPT_HOME;
+    const target = safeHttps(current, this.site.hosts) ? current : this.site.home;
     await this.pageCall(() => view.webContents.loadURL(target), 'reconnect');
-    if (generation !== this.pageGeneration) throw teamyraError('ChatGPT navigation superseded', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+    if (generation !== this.pageGeneration) throw teamyraError(`${this.site.name} navigation superseded`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
     this.loaded = true;
     const probe = await this.automation.probe();
     this.lastProbe = probe;
@@ -542,8 +567,8 @@ class ChatGPTWebProvider {
   async getStatus() {
     const workspace = this.workspaceBridge.statusCache?.value || null;
     return {
-      id: this.activeProfileId === DEFAULT_CHATGPT_PROFILE_ID ? 'chatgpt-normal' : 'chatgpt-' + this.activeProfileId,
-      provider: 'chatgpt-web',
+      id: this.site.workerId(this.activeProfileId),
+      provider: this.site.provider,
       profileId: this.activeProfileId,
       connected: Boolean(this.view && !this.view.webContents.isDestroyed() && this.loaded),
       visible: this.visible,
@@ -594,16 +619,16 @@ class ChatGPTWebProvider {
       busy: status.busy,
       url: status.url,
       detail: status.pageUnresponsiveSince ? status.detail : status.challenged
-        ? 'ChatGPT requires user verification in the embedded view.'
+        ? `${this.site.name} requires user verification in the embedded view.`
         : status.automationReady && !status.workspace?.available
-          ? 'Embedded ChatGPT session is active; select a workspace to enable worker routing.'
+          ? `Embedded ${this.site.name} session is active; select a workspace to enable worker routing.`
           : status.automationReady
-            ? 'Embedded ChatGPT session is active.'
+            ? `Embedded ${this.site.name} session is active.`
           : status.loginVisible
-            ? 'ChatGPT sign-in is required in the embedded view.'
+            ? `${this.site.name} sign-in is required in the embedded view.`
             : status.connected
-              ? 'ChatGPT page loaded; waiting for an interactive prompt.'
-              : 'Embedded ChatGPT is not currently loaded.'
+              ? `${this.site.name} page loaded; waiting for an interactive prompt.`
+              : `Embedded ${this.site.name} is not currently loaded.`
     });
     return status;
   }
@@ -612,7 +637,7 @@ class ChatGPTWebProvider {
     let current = {};
     try { current = JSON.parse(fs.readFileSync(this.statusFile, 'utf8')); } catch {}
     const profileId = patch.active_profile_id || this.activeProfileId || DEFAULT_CHATGPT_PROFILE_ID;
-    const workerId = profileId === DEFAULT_CHATGPT_PROFILE_ID ? 'chatgpt-normal' : 'chatgpt-' + profileId;
+    const workerId = this.site.workerId(profileId);
     const statusPatch = { ...patch };
     const updateProfile = statusPatch.profile_update !== false;
     delete statusPatch.profile_update;
@@ -631,7 +656,7 @@ class ChatGPTWebProvider {
     }
     const data = {
       ...current,
-      provider: 'chatgpt-web',
+      provider: this.site.provider,
       worker: workerId,
       active_profile_id: profileId,
       heartbeat_at: Date.now() / 1000,
@@ -679,9 +704,9 @@ class ChatGPTWebProvider {
     const view = this.ensureView();
     const url = String(value || '').startsWith('https://')
       ? String(value)
-      : `https://chatgpt.com/c/${String(value || '')}`;
-    if (!safeHttps(url) || !new URL(url).hostname.endsWith('chatgpt.com')) {
-      throw new Error('Invalid ChatGPT conversation URL');
+      : this.site.conversationUrl(String(value || ''));
+    if (!safeHttps(url, this.site.hosts) || !new URL(url).hostname.endsWith(this.site.conversationHost)) {
+      throw new Error(`Invalid ${this.site.name} conversation URL`);
     }
     await this.pageCall(() => view.webContents.loadURL(url), 'conversation navigation');
     this.loaded = true;
@@ -697,9 +722,9 @@ class ChatGPTWebProvider {
     while (Date.now() < deadline) {
       probe = await this.automation.probe();
       if (probe.challenged) {
-        throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
+        throw teamyraError(`${this.site.name} requires user verification in the embedded view`, 'TEAMYRA_CHALLENGED', this.site.id + '_verification');
       }
-      if (probe.loginVisible) throw teamyraError('ChatGPT sign-in is required', 'TEAMYRA_SIGNED_OUT', 'chatgpt_sign_in');
+      if (probe.loginVisible) throw teamyraError(`${this.site.name} sign-in is required`, 'TEAMYRA_SIGNED_OUT', this.site.id + '_sign_in');
       if (probe.promptFound) break;
       await sleep(250);
     }
@@ -707,7 +732,7 @@ class ChatGPTWebProvider {
     // A prompt that never appears is a page problem (still hydrating, a
     // stuck overlay): the job loop reloads the conversation and checks
     // whether the message arrived, instead of failing the job.
-    if (!probe?.promptFound) throw teamyraError('ChatGPT prompt is unavailable', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+    if (!probe?.promptFound) throw teamyraError(`${this.site.name} prompt is unavailable`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
     return this.automation.sendTask(text);
   }
 
@@ -746,7 +771,7 @@ class ChatGPTWebProvider {
       }
       const { root } = await this.pageCall(() => debuggerApi.sendCommand('DOM.getDocument', { depth: -1, pierce: true }), 'DOM.getDocument');
       const { nodeId } = await this.pageCall(() => debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type="file"]' }), 'DOM.querySelector');
-      if (!nodeId) throw new Error('ChatGPT file input was not found');
+      if (!nodeId) throw new Error(`${this.site.name} file input was not found`);
       await this.pageCall(() => debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId, files: [approvedPath] }), 'DOM.setFileInputFiles');
       return { ok: true, path: approvedPath };
     } finally {
@@ -773,7 +798,7 @@ class ChatGPTWebProvider {
       const dir = path.join(jobsRoot, entry.name);
       try {
         const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
-        if (meta.provider !== 'chatgpt-web' || fs.existsSync(path.join(dir, 'DONE'))) continue;
+        if (meta.provider !== this.site.provider || fs.existsSync(path.join(dir, 'DONE'))) continue;
         if (meta.state === 'queued') { queued += 1; continue; }
         if (String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId) continue;
         if (['waiting_for_desktop', 'running', 'needs_user'].includes(meta.state)) owned += 1;
@@ -798,7 +823,7 @@ class ChatGPTWebProvider {
     const start = Number(meta.dispatched_at || meta.created || 0);
     const timeout = Number(meta.timeout_s || 0);
     if (!start || !timeout || Date.now() / 1000 <= start + timeout) return false;
-    const detail = 'timed out waiting for the embedded ChatGPT worker' +
+    const detail = `timed out waiting for the embedded ${this.site.name} worker` +
       (meta.last_event && /^waiting: /.test(meta.last_event) ? ' (' + meta.last_event.slice(9) + ')' : '');
     this.appendJobEvent(dir, 'error', detail);
     this.writeJobMeta(dir, {
@@ -865,10 +890,10 @@ class ChatGPTWebProvider {
   // Writes attention / last_event on jobs that wait for this worker. `status`
   // is the not-ready worker status, or null when the worker is ready again.
   markWaitingJobs(candidates, status) {
-    const action = status?.challenged ? USER_ACTIONS.verification : status?.loginVisible ? USER_ACTIONS.sign_in : null;
+    const action = status?.challenged ? this.userActions.verification : status?.loginVisible ? this.userActions.sign_in : null;
     let notify = false;
     for (const { dir, meta } of candidates) {
-      const userKinds = [USER_ACTIONS.verification.kind, USER_ACTIONS.sign_in.kind];
+      const userKinds = [this.userActions.verification.kind, this.userActions.sign_in.kind];
       const current = userKinds.includes(meta.attention?.kind) ? meta.attention.kind : null;
       const patch = {};
       if (action) {
@@ -881,7 +906,7 @@ class ChatGPTWebProvider {
         if (current) patch.attention = null;
         if (status) {
           const seconds = this.notReadySince ? Math.round((Date.now() - this.notReadySince) / 1000) : 0;
-          const detail = 'waiting: embedded ChatGPT worker is not ready' +
+          const detail = `waiting: embedded ${this.site.name} worker is not ready` +
             (this.heals ? ` (reloaded ${this.heals}x)` : '') + (status.detail ? ': ' + status.detail : '');
           if (meta.last_event !== detail) patch.last_event = detail;
           if (seconds && !meta.not_ready_since) patch.not_ready_since = this.notReadySince / 1000;
@@ -936,7 +961,7 @@ class ChatGPTWebProvider {
 
   checkJobActive(job) {
     if (job.isCancelled()) throw teamyraError('TEAMYRA job cancelled', 'TEAMYRA_CANCELLED', 'cancelled');
-    if (Date.now() >= job.deadline) throw teamyraError('ChatGPT job timed out', 'TEAMYRA_TIMEOUT', 'timeout');
+    if (Date.now() >= job.deadline) throw teamyraError(`${this.site.name} job timed out`, 'TEAMYRA_TIMEOUT', 'timeout');
   }
 
   recordJobUsage(job) {
@@ -949,7 +974,7 @@ class ChatGPTWebProvider {
   // or signed in again). The job keeps its conversation; it fails only on
   // cancel or deadline. `kind` is 'verification' or 'sign_in'.
   async waitForChallengeResolution(job, kind = 'verification') {
-    const action = USER_ACTIONS[kind] || USER_ACTIONS.verification;
+    const action = this.userActions[kind] || this.userActions.verification;
     const since = Date.now() / 1000;
     this.appendJobEvent(job.dir, 'attention', action.message);
     this.writeJobMeta(job.dir, {
@@ -979,7 +1004,7 @@ class ChatGPTWebProvider {
       state: 'running',
       reason: null,
       attention: null,
-      last_event: kind === 'sign_in' ? 'resumed after ChatGPT sign-in' : 'resumed after ChatGPT verification'
+      last_event: kind === 'sign_in' ? `resumed after ${this.site.name} sign-in` : `resumed after ${this.site.name} verification`
     });
     this.appendJobEvent(job.dir, 'info', action.resumed);
     // A sign-in may land on a new page; go back to the job conversation.
@@ -996,7 +1021,7 @@ class ChatGPTWebProvider {
       try {
         const snap = await this.automation.assistantSnapshot();
         if (snap?.challenged) {
-          throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
+          throw teamyraError(`${this.site.name} requires user verification in the embedded view`, 'TEAMYRA_CHALLENGED', this.site.id + '_verification');
         }
         await this.sendTask(text);
         job.usage.chars_sent += String(text || '').length;
@@ -1115,7 +1140,7 @@ class ChatGPTWebProvider {
           onProgress: ({ elapsedMs, generating }) => {
             const seconds = Math.round(elapsedMs / 1000);
             this.writeJobMeta(job.dir, {
-              last_event: generating ? `chatgpt generating ${seconds} s` : `waiting for chatgpt reply ${seconds} s`
+              last_event: generating ? `${this.site.id} generating ${seconds} s` : `waiting for ${this.site.id} reply ${seconds} s`
             });
           }
         });
@@ -1134,7 +1159,7 @@ class ChatGPTWebProvider {
           try {
             const delivered = await this.recoverJobPage(job, () => snap ? this.lastMessageDelivered(job, text) : false);
             if (!delivered) {
-              if (snap) this.appendJobEvent(job.dir, 'info', 'the last message did not reach ChatGPT before the page hung; sending it again');
+              if (snap) this.appendJobEvent(job.dir, 'info', `the last message did not reach ${this.site.name} before the page hung; sending it again`);
               snap = null;
             }
             continue;
@@ -1164,7 +1189,7 @@ class ChatGPTWebProvider {
       this.checkJobActive(job);
       job.pageRecoveries = (job.pageRecoveries || 0) + 1;
       job.consecutiveRecoveries = (job.consecutiveRecoveries || 0) + 1;
-      this.writeJobMeta(job.dir, { page_recoveries: job.pageRecoveries, last_event: 'recovering unresponsive ChatGPT page' });
+      this.writeJobMeta(job.dir, { page_recoveries: job.pageRecoveries, last_event: `recovering unresponsive ${this.site.name} page` });
       this.appendJobEvent(job.dir, 'page_recovery',
         `reloading the job conversation (attempt ${job.consecutiveRecoveries}/${limit}, ${job.pageRecoveries} this job)`);
       if (job.consecutiveRecoveries > 1) {
@@ -1186,7 +1211,7 @@ class ChatGPTWebProvider {
         if (userActionKind(error)) throw error;
       }
     }
-    throw teamyraError(`ChatGPT page unresponsive after ${job.consecutiveRecoveries || 0} reloads in a row` +
+    throw teamyraError(`${this.site.name} page unresponsive after ${job.consecutiveRecoveries || 0} reloads in a row` +
       ` (${job.pageRecoveries || 0} this job)`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
   }
 
@@ -1219,7 +1244,7 @@ class ChatGPTWebProvider {
   dispatchQueuedJobs() {
     // Job completion must never wait for (or fail because of) queue dispatch.
     Promise.resolve().then(() => callCore('scheduler.dispatch')).catch(error => {
-      console.error('ChatGPT queue dispatch failed:', error);
+      console.error(`${this.site.name} queue dispatch failed:`, error);
     });
   }
 
@@ -1267,7 +1292,7 @@ class ChatGPTWebProvider {
         : spec.session_id ? { conversationId: spec.session_id } : null;
       job.conversationId = requestedConversation?.conversationId || null;
       job.conversationUrl = requestedConversation?.url ||
-        (job.conversationId ? CHATGPT_HOME + 'c/' + job.conversationId : null);
+        (job.conversationId ? this.site.conversationUrl(job.conversationId) : null);
       if (job.conversationId) this.saveJobState(job, { conversation_id: job.conversationId, conversation_url: job.conversationUrl });
       try {
         if (job.conversationUrl) await this.openConversation(job.conversationUrl);
@@ -1280,14 +1305,14 @@ class ChatGPTWebProvider {
       this.writeJobMeta(jobDir, {
         state: 'running', ...(resume ? {} : { started: Date.now() / 1000 }), runner_pid: null, attention: null,
         resume_requested: false, not_ready_since: null, usage: { ...job.usage },
-        last_event: resume ? 'running: resumed after a desktop restart' : 'running: embedded ChatGPT worker started'
+        last_event: resume ? 'running: resumed after a desktop restart' : `running: embedded ${this.site.name} worker started`
       });
       this.appendJobEvent(jobDir, 'info', resume
-        ? 'embedded ChatGPT worker resumed the job in its conversation after a desktop restart'
-        : 'embedded ChatGPT worker started');
+        ? `embedded ${this.site.name} worker resumed the job in its conversation after a desktop restart`
+        : `embedded ${this.site.name} worker started`);
 
       const bootstrap = [
-        'You are Teamyra Worker — ChatGPT, operating on a local project through controlled TEAMYRA tools.',
+        `You are Teamyra Worker — ${this.site.name}, operating on a local project through controlled TEAMYRA tools.`,
         'Do not claim you changed/read local files unless TEAMYRA returned the tool result.',
         'When you need a local tool, reply with exactly one line and nothing else (no code fence):',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
@@ -1302,6 +1327,7 @@ class ChatGPTWebProvider {
         'This text bridge is your local tool interface: emit TEAMYRA_TOOL_REQUEST even if task files mention calling native tools.',
         'Destructive operations may be denied pending explicit user confirmation. Never try to bypass that denial.',
         'When the task is complete, reply normally with the final result and do not include the TEAMYRA_TOOL_REQUEST marker.',
+        ...this.site.promptRules,
         '',
         'WORKSPACE: ' + spec.cwd,
         'EXPECTED OUTPUT FILES (must exist and be non-empty): ' + JSON.stringify(spec.expect_files || []),
@@ -1332,7 +1358,7 @@ class ChatGPTWebProvider {
           if (looksLikeProtocolLoss(reply.text, successfulTools)) {
             if (protocolRecoveries >= MAX_PROTOCOL_RECOVERIES) {
               reason = 'protocol_lost';
-              throw new Error('ChatGPT lost the TEAMYRA tool protocol after two reminders');
+              throw new Error(`${this.site.name} lost the TEAMYRA tool protocol after two reminders`);
             }
             protocolRecoveries += 1;
             this.appendJobEvent(jobDir, 'protocol_recovery', `protocol reminder ${protocolRecoveries}/${MAX_PROTOCOL_RECOVERIES}: ${reply.text}`);
@@ -1360,7 +1386,7 @@ class ChatGPTWebProvider {
             ended: Date.now() / 1000,
             session_id: conversation.conversationId,
             chatgpt_url: conversation.url,
-            last_event: 'done: embedded ChatGPT completed'
+            last_event: `done: embedded ${this.site.name} completed`
           });
           fs.writeFileSync(path.join(jobDir, 'DONE'), 'done', 'utf8');
           state = 'done';
@@ -1372,7 +1398,7 @@ class ChatGPTWebProvider {
           this.appendJobEvent(jobDir, 'error', `tool request parse error ${parseFailures}/${MAX_TOOL_PARSE_FAILURES}: ${parsed.error}`);
           if (parseFailures >= MAX_TOOL_PARSE_FAILURES) {
             reason = 'tool_parse_error';
-            throw new Error(`ChatGPT sent ${parseFailures} unparseable TEAMYRA tool requests in a row: ${parsed.error}`);
+            throw new Error(`${this.site.name} sent ${parseFailures} unparseable TEAMYRA tool requests in a row: ${parsed.error}`);
           }
           reply = await this.jobExchange(job, 'TEAMYRA_TOOL_ERROR ' + JSON.stringify({ error: parsed.error, hint: TOOL_ERROR_HINT }));
           continue;
@@ -1411,7 +1437,7 @@ class ChatGPTWebProvider {
         this.appendJobEvent(jobDir, 'result', rawToolResult.slice(0, 3000));
         reply = await this.jobExchange(job, 'TEAMYRA_TOOL_RESULT ' + JSON.stringify({ tool: request.tool, result: boundedToolResult }) + '\nContinue the task.');
       }
-      throw new Error('ChatGPT exceeded the maximum TEAMYRA tool-call loop');
+      throw new Error(`${this.site.name} exceeded the maximum TEAMYRA tool-call loop`);
     } catch (error) {
       if (error?.code === 'TEAMYRA_CANCELLED') state = 'cancelled';
       else if (state !== 'cancelled') state = 'failed';
@@ -1447,7 +1473,7 @@ class ChatGPTWebProvider {
         worker_ready: false,
         connected: false,
         busy: false,
-        detail: 'TEAMYRA Desktop ChatGPT worker is closed.'
+        detail: `TEAMYRA Desktop ${this.site.name} worker is closed.`
       });
     } catch {}
     clearInterval(this.jobTimer);
@@ -1469,4 +1495,8 @@ class ChatGPTWebProvider {
   }
 }
 
-module.exports = { ChatGPTWebProvider, CHATGPT_HOME };
+// Defaults for instances made without the constructor (tests, subclasses).
+ChatGPTWebProvider.prototype.site = CHATGPT_SITE;
+ChatGPTWebProvider.prototype.userActions = userActions(CHATGPT_SITE);
+
+module.exports = { ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions };

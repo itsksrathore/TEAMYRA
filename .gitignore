@@ -37,6 +37,7 @@ apps/desktop/renderer/bundle.css
 build/
 dist/
 chatgpt/
+muse/
 backups/
 /.review-in/
 /.review-out/

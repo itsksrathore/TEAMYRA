@@ -145,8 +145,9 @@ def _probe_worker_auth(info, now):
             rc, out, err = run([*launch, "models"], timeout=timeout)
             detail = (out + err).strip()
             ready = rc == 0 and bool(out.strip())
-        elif provider == "chatgpt-web":
-            status_file = ROOT / "chatgpt" / "status.json"
+        elif provider in scheduler.DESKTOP_PROVIDERS:
+            site = "Muse" if provider == "muse-web" else "ChatGPT"
+            status_file = ROOT / scheduler.WEB_STATUS_DIRS[provider] / "status.json"
             try:
                 status = json.loads(status_file.read_text(encoding="utf-8"))
             except Exception:
@@ -169,7 +170,7 @@ def _probe_worker_auth(info, now):
                 profile_detail = profile_status.get("detail")
             ready = age <= 20 and profile_ready
             detail = str(profile_detail or (
-                "embedded ChatGPT session ready" if ready else "open this ChatGPT account in TEAMYRA and sign in"
+                f"embedded {site} session ready" if ready else f"open this {site} account in TEAMYRA and sign in"
             ))
         else:
             ready, detail = False, "unsupported provider"
@@ -250,7 +251,7 @@ def refresh_worker_auth_all():
 def scheduler_worker_ready(worker):
     """Dispatch gate for the background scheduler: never probes, never blocks."""
     info = worker_registry().get(worker) or {}
-    if info.get("provider") == "chatgpt-web":
+    if info.get("provider") in scheduler.DESKTOP_PROVIDERS:
         return scheduler.chatgpt_ready(jobs_root(), info)
     entry = AUTH_CACHE.get(worker)
     if not entry:
@@ -629,7 +630,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     # The desktop bridge validates that path and sandboxes every tool call to it.
     # enabled controls automatic routing only; explicit/manual worker selection remains allowed.
     ready, auth_detail = worker_auth_status(worker_info)
-    if not ready and provider == "chatgpt-web":
+    if not ready and provider in scheduler.DESKTOP_PROVIDERS:
         ready, auth_detail = wake_chatgpt_worker(worker_info)
     if not ready:
         raise ValueError(f"{worker} is not authenticated/ready: {clip(auth_detail, 300)}")
@@ -663,7 +664,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     elif provider == "antigravity":
         cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
         resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
-    elif provider == "chatgpt-web":
+    elif provider in scheduler.DESKTOP_PROVIDERS:
         cmd, env, resume_cmd = [], {}, []
     else:
         raise ValueError(f"unsupported worker provider: {provider}")
@@ -703,11 +704,11 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             dispatch_queue()
         except Exception as exc:
             print("TEAMYRA dispatch error:", exc, file=sys.stderr, flush=True)
-    elif provider == "chatgpt-web":
+    elif provider in scheduler.DESKTOP_PROVIDERS:
         patch_job_meta(
             job_id,
             state="waiting_for_desktop",
-            last_event="queued for embedded ChatGPT",
+            last_event="queued for embedded " + ("Muse" if provider == "muse-web" else "ChatGPT"),
             runner_pid=None,
         )
     else:
@@ -1284,12 +1285,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "codex", "claude", "antigravity"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
     {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "codex", "claude", "antigravity", "google-media"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "codex", "claude", "antigravity", "google-media"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},

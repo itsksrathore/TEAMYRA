@@ -33,7 +33,7 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
     def test_auth_popups_stay_inside_teamyra(self):
         self.assertIn("createEmbeddedPopup", self.provider)
         self.assertIn("createWindow: options => this.createEmbeddedPopup(options)", self.provider)
-        self.assertIn("url === 'about:blank' || safeHttps(url)", self.provider)
+        self.assertIn("url === 'about:blank' || safeHttps(url, hosts)", self.provider)
         self.assertIn("new WebContentsView", self.provider)
         self.assertNotIn("new BrowserWindow", self.provider)
 
@@ -79,12 +79,14 @@ class ChatGPTWebAgentContractTests(unittest.TestCase):
 
     def test_runtime_state_and_backups_are_gitignored(self):
         self.assertIn("chatgpt/", self.gitignore)
+        self.assertIn("muse/", self.gitignore)
         self.assertIn("backups/", self.gitignore)
 
     def test_worker_is_desktop_backed_not_fake_cli(self):
-        self.assertIn('provider == "chatgpt-web"', self.server)
+        # ChatGPT and Muse are both desktop-backed web-chat workers.
+        self.assertIn('provider in scheduler.DESKTOP_PROVIDERS', self.server)
         self.assertIn('state="waiting_for_desktop"', self.server)
-        self.assertIn("queued for embedded ChatGPT", self.server)
+        self.assertIn('last_event="queued for embedded "', self.server)
 
     def test_automation_protocol_is_bounded(self):
         self.assertIn("TEAMYRA_TOOL_REQUEST", self.automation)

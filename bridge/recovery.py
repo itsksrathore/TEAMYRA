@@ -116,7 +116,7 @@ def recover_job(root, bridge, python_exe, job_dir):
     if state == "queued":
         return {"kind": "job", "id": job_dir.name, "action": "queued",
                 "queue_position": meta.get("queue_position")}
-    if state in DESKTOP_JOB_STATES or meta.get("provider") == "chatgpt-web":
+    if state in DESKTOP_JOB_STATES or meta.get("provider") in ("chatgpt-web", "muse-web"):
         return recover_desktop_job(job_dir, meta)
     runner_pid = meta.get("runner_pid")
     worker_pid = meta.get("worker_pid")

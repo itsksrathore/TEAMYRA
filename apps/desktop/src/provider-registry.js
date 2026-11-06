@@ -47,6 +47,16 @@ const PROVIDERS = [
     color: 'blue'
   },
   {
+    id: 'muse-web',
+    name: 'Muse',
+    kind: 'web',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'web' },
+    managed: { verified: true, env: null, webProfiles: true },
+    color: 'violet'
+  },
+  {
     id: 'google-media',
     name: 'Google Media',
     kind: 'media',
@@ -268,7 +278,7 @@ async function detectProviders() {
         managedProfileEnv: null,
         profiles: [{
           id: 'web',
-          name: 'Teamyra Worker — ChatGPT',
+          name: provider.id === 'muse-web' ? 'Teamyra Worker — Muse' : 'Teamyra Worker — ChatGPT',
           kind: 'web',
           path: '',
           signedIn: false,

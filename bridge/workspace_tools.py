@@ -367,6 +367,7 @@ class WorkspaceToolService:
         narrowed to the registry hives in System32\\config."""
         roots = [
             self.state_root,
+            self.root / "muse",
             self.root / "profiles",
             self.root / "jobs",
             self.root / "logs",
