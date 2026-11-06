@@ -68,6 +68,40 @@ async function adapterTests() {
   assert.ok(!adapter.isTransientReply('The server is busy today, so I used a cache.'));
 }
 
+// A reply that broke off (INCOMPLETE: thinking only, no answer) left the
+// page looking busy, and the job waited for ever (1106-213234).
+async function incompleteReplyTests() {
+  const { DEEPSEEK_BUSY_PREFIX } = require('../src/deepseek-automation-adapter');
+  const adapter = new DeepSeekAutomationAdapter({ isDestroyed: () => false });
+  adapter.drawFrame = async () => {};
+  adapter.statusCheckEveryMs = 0;
+  let page = { count: 5, text: '', messageId: '10', generating: false, activity: 'a' };
+  let status = 'INCOMPLETE';
+  let checks = 0;
+  adapter.pageSnapshot = async () => ({ ...page });
+  adapter.messageStatus = async () => { checks += 1; return status; };
+  const ended = await adapter.assistantSnapshot();
+  assert.equal(ended.generating, false);
+  assert.ok(ended.text.startsWith(DEEPSEEK_BUSY_PREFIX));
+  assert.ok(adapter.isTransientReply(ended.text), 'asked again by the job loop');
+  await adapter.assistantSnapshot();
+  assert.equal(checks, 1, 'one status read per reply');
+
+  // A normal finished reply is left as it is.
+  page = { count: 6, text: 'TEAMYRA_TOOL_REQUEST {}', messageId: '12', generating: false, activity: 'b' };
+  status = 'FINISHED';
+  assert.equal((await adapter.assistantSnapshot()).text, 'TEAMYRA_TOOL_REQUEST {}');
+
+  // The page says "writing" with no progress for 30 s: the data decides.
+  adapter.stallCheckMs = 0;
+  page = { count: 7, text: '', messageId: '14', generating: true, activity: 'c' };
+  status = 'WIP';
+  assert.equal((await adapter.assistantSnapshot()).generating, true, 'still writing');
+  status = 'FINISHED';
+  adapter.statusCache = null;
+  assert.equal((await adapter.assistantSnapshot()).generating, false, 'finished although the page looked busy');
+}
+
 // DOM-free DeepSeek page: each message gets one scripted reply. The page
 // text is rendered Markdown; rawReplyText gives the reply as written.
 class FakeDeepSeek extends DeepSeekAutomationAdapter {
@@ -150,6 +184,7 @@ async function main() {
   try {
     siteTests();
     await adapterTests();
+    await incompleteReplyTests();
     await jobLoopTests(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

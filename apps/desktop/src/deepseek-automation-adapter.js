@@ -22,6 +22,7 @@ const PROMPT_SELECTOR = 'textarea[placeholder*="DeepSeek"], textarea#chat-input'
 const SEND_SELECTOR = '.ds-button--primary.ds-button--filled.ds-button--circle';
 // Mode labels in English and Chinese.
 const MODE_LABELS = { think: ['DeepThink', '深度思考'], search: ['Search', 'Smart Search', '联网搜索', '智能搜索'] };
+const DEEPSEEK_BUSY_PREFIX = 'TEAMYRA_SITE_BUSY: ';
 const BUSY_REPLY = /^(the server is busy\.? please try again later\.?|服务器繁忙，请稍后再试。?)$/i;
 
 const PAGE_JS = `
@@ -38,11 +39,16 @@ const PAGE_JS = `
   const dsUserItems = () => dsItems().filter(node => !dsIsReply(node));
   const dsReplyText = node => [...node.querySelectorAll('.ds-assistant-message-main-content')]
     .map(part => (part.innerText || part.textContent || '').trim()).filter(Boolean).join('\\n\\n');
-  // Writing: the Stop button is enabled while the message box is empty.
+  // Writing: the round button shows the Stop icon (a rounded square, path
+  // "M2 4.88..."; Send is an arrow, "M8.31..."). An enabled button with an
+  // empty box alone also stayed true after a reply broke off (INCOMPLETE),
+  // so the job waited for ever.
   const dsGenerating = () => {
     const send = dsSend();
     const box = dsPrompt();
-    return !!send && !String(send.className).includes('ds-button--disabled') && !(box && box.value.trim());
+    if (!send || String(send.className).includes('ds-button--disabled') || (box && box.value.trim())) return false;
+    const icon = (send.querySelector('svg path') || { getAttribute: () => '' }).getAttribute('d') || '';
+    return icon ? icon.startsWith('M2 4.88') : true;
   };
   const dsContinueButton = () => [...document.querySelectorAll('.ds-button, button, [role=button]')]
     .find(node => dsVisible(node) && /^(continue|continue generating|继续|继续生成)$/i.test((node.innerText || '').trim()));
@@ -188,7 +194,59 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
   // A long answer can stop at DeepSeek's length limit with a "Continue"
   // button. The button is clicked here (up to 30 times per reply), and the
   // reply counts as still being written, so the wait goes on.
+  // The page can look as if DeepSeek were still writing, or show a finished
+  // empty reply, when the reply broke off (status INCOMPLETE; seen on
+  // 2026-11-06 with only thinking text and no answer). Once a reply has
+  // ended, or the page has shown no progress for 30 s, its status is read
+  // from DeepSeek's data; an INCOMPLETE reply becomes a busy reply, which the
+  // job loop asks again.
   async assistantSnapshot() {
+    const snap = await this.pageSnapshot();
+    if (!snap || !snap.messageId) return snap;
+    const now = Date.now();
+    if (snap.activity !== this.lastActivity) {
+      this.lastActivity = snap.activity;
+      this.activitySince = now;
+    }
+    const stalled = snap.generating && now - (this.activitySince || now) >= (this.stallCheckMs ?? 30000);
+    if (snap.generating && !stalled) return snap;
+    const cached = this.statusCache?.messageId === snap.messageId ? this.statusCache : null;
+    let status = cached?.status;
+    if (!status && now - (this.lastStatusCheckAt || 0) >= (this.statusCheckEveryMs ?? 5000)) {
+      this.lastStatusCheckAt = now;
+      status = await this.messageStatus(snap.messageId).catch(() => null);
+      if (status && status !== 'WIP') this.statusCache = { messageId: snap.messageId, status };
+    }
+    if (status === 'INCOMPLETE') {
+      return { ...snap, generating: false, text: DEEPSEEK_BUSY_PREFIX + 'DeepSeek stopped before finishing its reply' };
+    }
+    if (status === 'FINISHED' && stalled) return { ...snap, generating: false };
+    return snap;
+  }
+
+  async messageStatus(messageId) {
+    const wanted = Number(messageId);
+    if (!Number.isFinite(wanted) || wanted <= 0) return null;
+    const status = await this.evaluate(`(async () => {
+      try {
+        const match = location.pathname.match(new RegExp('/a/chat/s/([0-9a-f-]{36})', 'i'));
+        if (!match) return null;
+        const stored = localStorage.getItem('userToken');
+        let token = '';
+        try { token = JSON.parse(stored).value || ''; } catch { token = stored || ''; }
+        const response = await fetch('/api/v0/chat/history_messages?chat_session_id=' + match[1], {
+          credentials: 'include', headers: token ? { Authorization: 'Bearer ' + token } : {}
+        });
+        if (!response.ok) return null;
+        const messages = ((((await response.json()) || {}).data || {}).biz_data || {}).chat_messages || [];
+        const message = messages.find(item => item.message_id === ${wanted} && item.role === 'ASSISTANT');
+        return message ? String(message.status || '') : null;
+      } catch (error) { return null; }
+    })()`);
+    return typeof status === 'string' && status ? status : null;
+  }
+
+  async pageSnapshot() {
     return this.evaluate(`(() => {${PAGE_JS}
       const replies = dsReplies();
       const last = replies.at(-1) || null;
@@ -250,9 +308,11 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
     return typeof text === 'string' ? text : '';
   }
 
-  // "The server is busy" is not an answer: the message is asked again.
+  // "The server is busy", or a reply that broke off, is not an answer: the
+  // message is asked again.
   isTransientReply(text) {
-    return BUSY_REPLY.test(String(text || '').trim());
+    const value = String(text || '').trim();
+    return BUSY_REPLY.test(value) || value.startsWith(DEEPSEEK_BUSY_PREFIX);
   }
 
   async latestConversationUrl() {
@@ -263,4 +323,4 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
   }
 }
 
-module.exports = { DeepSeekAutomationAdapter, DEEPSEEK_HOME, PROMPT_SELECTOR, SEND_SELECTOR, BUSY_REPLY };
+module.exports = { DeepSeekAutomationAdapter, DEEPSEEK_HOME, PROMPT_SELECTOR, SEND_SELECTOR, BUSY_REPLY, DEEPSEEK_BUSY_PREFIX };
