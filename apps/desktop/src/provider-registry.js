@@ -57,6 +57,16 @@ const PROVIDERS = [
     color: 'violet'
   },
   {
+    id: 'deepseek-web',
+    name: 'DeepSeek',
+    kind: 'web',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'web' },
+    managed: { verified: true, env: null, webProfiles: true },
+    color: 'blue'
+  },
+  {
     id: 'google-media',
     name: 'Google Media',
     kind: 'media',
@@ -278,7 +288,7 @@ async function detectProviders() {
         managedProfileEnv: null,
         profiles: [{
           id: 'web',
-          name: provider.id === 'muse-web' ? 'Teamyra Worker — Muse' : 'Teamyra Worker — ChatGPT',
+          name: 'Teamyra Worker — ' + ({ 'muse-web': 'Muse', 'deepseek-web': 'DeepSeek' }[provider.id] || 'ChatGPT'),
           kind: 'web',
           path: '',
           signedIn: false,

@@ -46,14 +46,22 @@ const WORKER_META = {
   antigravity: { code: 'AG', icon: 'antigravity', cls: 'antigravity', label: 'Antigravity' },
   chatgpt: { code: 'GPT', icon: 'openai', cls: 'chatgpt', label: 'ChatGPT' },
   muse: { code: 'MU', icon: '', cls: 'antigravity', label: 'Muse' },
+  deepseek: { code: 'DS', icon: '', cls: 'codex', label: 'DeepSeek' },
   googleMedia: { code: 'GM', icon: '', cls: 'antigravity', label: 'Google Media' },
   other: { code: 'AI', icon: '', cls: '', label: 'Agent' }
 };
 
-// Web-chat providers: their accounts open in the embedded panel. Muse accounts
-// are addressed there as 'muse:<profile id>'.
-const WEB_CHAT_PREFIX = { 'chatgpt-web': '', 'muse-web': 'muse:' };
+// Web-chat sites: their accounts open in the embedded panel, addressed by
+// profile id for ChatGPT and '<prefix><profile id>' for the others.
+const WEB_CHAT_SITES = {
+  'chatgpt-web': { prefix: '', name: 'ChatGPT', title: 'ChatGPT Normal', meta: 'chatgpt', builtin: 'chatgpt-normal', workerPrefix: 'chatgpt-' },
+  'muse-web': { prefix: 'muse:', name: 'Muse', title: 'Muse', meta: 'muse', builtin: 'muse-normal', workerPrefix: 'muse-' },
+  'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', title: 'DeepSeek', meta: 'deepseek', builtin: 'deepseek-normal', workerPrefix: 'deepseek-' }
+};
+const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([id, site]) => [id, site.prefix]));
 const isWebChat = providerId => WEB_CHAT_PREFIX[providerId] !== undefined;
+const webChatSiteForKey = key => Object.values(WEB_CHAT_SITES).find(site => site.prefix && String(key || '').startsWith(site.prefix)) ||
+  WEB_CHAT_SITES['chatgpt-web'];
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -78,8 +86,8 @@ function workerIdForProfile(providerId, profileId) {
     return 'codex-' + safeSlug(profileId);
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
-  if (providerId === 'chatgpt-web') return profileId === 'web' ? 'chatgpt-normal' : 'chatgpt-' + safeSlug(profileId);
-  if (providerId === 'muse-web') return profileId === 'web' ? 'muse-normal' : 'muse-' + safeSlug(profileId);
+  const site = WEB_CHAT_SITES[providerId];
+  if (site) return profileId === 'web' ? site.builtin : site.workerPrefix + safeSlug(profileId);
   return '';
 }
 
@@ -87,6 +95,7 @@ function workerMeta(worker) {
   const value = String(worker || '').toLowerCase();
   if (value.includes('chatgpt')) return WORKER_META.chatgpt;
   if (value.startsWith('muse')) return WORKER_META.muse;
+  if (value.startsWith('deepseek')) return WORKER_META.deepseek;
   if (value.includes('claude')) return WORKER_META.claude;
   if (value.includes('codex')) return WORKER_META.codex;
   if (value.includes('antigravity') || value.includes('agy')) return WORKER_META.antigravity;
@@ -95,8 +104,7 @@ function workerMeta(worker) {
 
 function providerMeta(providerId) {
   if (providerId === 'elevenlabs') return { code: 'EL', icon: '', cls: 'chatgpt', label: 'ElevenLabs' };
-  if (providerId === 'chatgpt-web') return WORKER_META.chatgpt;
-  if (providerId === 'muse-web') return WORKER_META.muse;
+  if (WEB_CHAT_SITES[providerId]) return WORKER_META[WEB_CHAT_SITES[providerId].meta];
   if (providerId === 'google-media') return WORKER_META.googleMedia;
   return workerMeta(providerId);
 }
@@ -743,10 +751,10 @@ function syncChatgptBounds() {
 
 async function openChatgptDetail(profileId = 'web') {
   activeChatgptProfileId = profileId || 'web';
-  const muse = activeChatgptProfileId.startsWith('muse:');
-  const site = muse ? 'Muse' : 'ChatGPT';
-  $('#chatgptTitle').textContent = muse ? 'Muse' : 'ChatGPT Normal';
-  $('#chatgptAvatar').textContent = muse ? 'MU' : 'GPT';
+  const webSite = webChatSiteForKey(activeChatgptProfileId);
+  const site = webSite.name;
+  $('#chatgptTitle').textContent = webSite.title;
+  $('#chatgptAvatar').textContent = WORKER_META[webSite.meta].code;
   $('#chatgptPlaceholderTitle').textContent = site + ' stays inside Teamyra';
   $('#chatgptPlaceholderText').textContent = 'Open the agent to load your normal ' + site + ' account here.';
   $('#chatgptOpen').textContent = 'Open ' + site;

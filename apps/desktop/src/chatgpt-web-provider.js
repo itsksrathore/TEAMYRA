@@ -21,6 +21,7 @@ const MAX_PROTOCOL_RECOVERIES = 2;
 // available") or a status line was read while it was still thinking. It is
 // told what is missing and continues, at most this many times per job.
 const MAX_OUTPUT_NUDGES = 2;
+const MAX_TRANSIENT_RETRIES = 3;
 const SETTLE_RECHECK_MS = 6000;
 const CHALLENGE_POLL_MS = 3000;
 const PROGRESS_INTERVAL_MS = 30000;
@@ -393,6 +394,13 @@ class ChatGPTWebProvider {
     const manager = profileId === this.activeProfileId
       ? this.sessionManager
       : this.site.sessionManager(profileId);
+    if (this.site.sessionFromPage) {
+      // The login is kept in the page's own storage (DeepSeek), not in a
+      // cookie: use what the account's page showed when it was last loaded.
+      let last = {};
+      try { last = JSON.parse(fs.readFileSync(this.statusFile, 'utf8')).profiles?.[profileId] || {}; } catch {}
+      return { profileId, signedIn: last.session_present === true, cookieCount: 0 };
+    }
     const summary = await manager.cookieSummary().catch(() => ({ count: 0, hasSessionCookies: false }));
     return {
       profileId,
@@ -720,7 +728,11 @@ class ChatGPTWebProvider {
       }
     }
     const status = await this.getStatus();
+    // A site without a login cookie records what its loaded page shows.
+    const pageSession = this.site.sessionFromPage && this.loaded && this.lastProbe
+      ? { session_present: Boolean(this.lastProbe.promptFound && !this.lastProbe.loginVisible) } : {};
     this.writeStatus({
+      ...pageSession,
       automation_ready: status.automationReady,
       worker_ready: status.workerReady,
       workspace: status.workspace?.workspace || '',
@@ -1533,6 +1545,7 @@ class ChatGPTWebProvider {
       let protocolRecoveries = Number(resume?.protocol_recoveries) || 0;
       let successfulTools = Number(resume?.successful_tools) || 0;
       let outputNudges = Number(resume?.output_nudges) || 0;
+      let transientRetries = 0;
       const firstStep = Number(resume?.step) || 0;
       const counters = step => ({
         step, parse_failures: parseFailures, protocol_recoveries: protocolRecoveries, successful_tools: successfulTools,
@@ -1548,6 +1561,16 @@ class ChatGPTWebProvider {
           await this.stopGeneration().catch(() => {});
           state = 'cancelled';
           throw new Error('TEAMYRA job cancelled');
+        }
+        // "The server is busy" (DeepSeek) is not an answer: wait, ask again.
+        if (this.automation.isTransientReply?.(reply.text) && transientRetries < MAX_TRANSIENT_RETRIES) {
+          transientRetries += 1;
+          this.appendJobEvent(jobDir, 'info', `${this.site.name} was busy; asking again in a moment (${transientRetries}/${MAX_TRANSIENT_RETRIES})`);
+          this.writeJobMeta(jobDir, { last_event: `${this.site.name} busy; retrying` });
+          await sleep((this.transientRetryMs ?? 15000) * transientRetries);
+          this.checkJobActive(job);
+          reply = await this.jobExchange(job, 'Please answer my previous message again.');
+          continue;
         }
         let parsed = this.automation.parseToolRequestDetailed(reply.text);
         if (parsed.marker && typeof this.automation.rawReplyText === 'function') {

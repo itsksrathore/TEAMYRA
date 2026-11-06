@@ -38,6 +38,8 @@ build/
 dist/
 chatgpt/
 muse/
+deepseek/
+grok/
 backups/
 /.review-in/
 /.review-out/

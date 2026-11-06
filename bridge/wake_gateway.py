@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from web_sites import WEB_PROVIDERS
+
 PUBLIC_HOST = "127.0.0.1"
 PUBLIC_PORT = 8787
 BACKEND_HOST = "127.0.0.1"
@@ -104,7 +106,7 @@ def active_jobs(runtime_root, max_age=600):
         state = str(data.get("state") or "").lower()
         # An unfinished ChatGPT job needs the core's scheduler however long it
         # has waited: the scheduler is what restarts TEAMYRA Desktop for it.
-        if (data.get("provider") in ("chatgpt-web", "muse-web") and state in CHATGPT_ACTIVE_STATES
+        if (data.get("provider") in WEB_PROVIDERS and state in CHATGPT_ACTIVE_STATES
                 and not (meta.parent / "DONE").exists()):
             return True
         if state not in ACTIVE_JOB_STATES:

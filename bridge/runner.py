@@ -16,7 +16,7 @@ import json, os, subprocess, sys, threading, time
 from pathlib import Path
 from expected_outputs import missing_outputs
 from runtime_paths import share_codex_sandbox
-from scheduler import DESKTOP_PROVIDERS
+from scheduler import DESKTOP_PROVIDERS, site_name
 
 LIMIT_MARKERS = ["rate limit", "usage limit", "quota", "too many requests",
                  "resource exhausted", "limit reached", "insufficient quota"]
@@ -304,10 +304,10 @@ class Job:
         spec = self.spec
         provider = self.meta.get("provider") or spec.get("provider")
         if provider in DESKTOP_PROVIDERS:
-            # A web-chat job (ChatGPT, Muse) runs inside TEAMYRA Desktop. An
+            # A web-chat job (ChatGPT, Muse, DeepSeek, Grok) runs inside TEAMYRA Desktop. An
             # older core process may still dispatch it to a runner; hand it
             # to the desktop instead of trying to start an empty command.
-            site = "Muse" if provider == "muse-web" else "ChatGPT"
+            site = site_name(provider)
             self.emit("info", f"handed to TEAMYRA Desktop ({provider} runs in the embedded {site} view)")
             self.save_meta(state="waiting_for_desktop", runner_pid=None,
                            last_event="queued for embedded " + site)

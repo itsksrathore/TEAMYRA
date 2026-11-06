@@ -106,6 +106,7 @@ const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary, 
 const { callCore } = require('./core-api');
 const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
 const { MuseWebProvider } = require('./muse-web-provider');
+const { DeepSeekWebProvider } = require('./deepseek-web-provider');
 const { GoogleMediaEngine } = require('./media/google-media-engine');
 const {
   ensureTeamyraMcp,
@@ -218,7 +219,7 @@ async function providersCached(force = false) {
       try {
         await syncChatgptProviders();
         for (const provider of data.filter(item => WEB_CHAT_PREFIX[item.id] !== undefined)) {
-          const name = provider.id === 'muse-web' ? 'Muse' : 'ChatGPT';
+          const name = WEB_CHAT_SITES[provider.id].name;
           const statuses = await Promise.all((provider.profiles || []).map(async profile => {
             const instance = await ensureChatgptProvider(WEB_CHAT_PREFIX[provider.id] + profile.id);
             const [sessionStatus, liveStatus] = await Promise.all([
@@ -300,9 +301,15 @@ async function providersCached(force = false) {
   return PROVIDER_CACHE.pending;
 }
 
-// Web-chat workers share one map: ChatGPT accounts by profile id, Muse
-// accounts as 'muse:<profile id>', so every embedded-view control serves both.
-const WEB_CHAT_PREFIX = { 'chatgpt-web': '', 'muse-web': 'muse:' };
+// Web-chat sites. Their accounts share one map, keyed by profile id for
+// ChatGPT and '<prefix><profile id>' for the others ('muse:web',
+// 'deepseek:web'), so every embedded-view control serves all of them.
+const WEB_CHAT_SITES = {
+  'chatgpt-web': { prefix: '', name: 'ChatGPT', Provider: ChatGPTWebProvider, builtin: 'chatgpt-normal', workerPrefix: 'chatgpt-' },
+  'muse-web': { prefix: 'muse:', name: 'Muse', Provider: MuseWebProvider, builtin: 'muse-normal', workerPrefix: 'muse-' },
+  'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', Provider: DeepSeekWebProvider, builtin: 'deepseek-normal', workerPrefix: 'deepseek-' }
+};
+const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([id, site]) => [id, site.prefix]));
 
 // Tabs (lanes) per web-chat account: several jobs of one account run at once,
 // each in its own chat. TEAMYRA_WEB_LANES sets the default (5); an account's
@@ -322,9 +329,10 @@ function webLaneCount(providerId, profileId) {
 
 function parseWebChatKey(key) {
   const [base, laneText] = String(key || 'web').split('#');
-  const muse = base.startsWith('muse:');
-  const profileId = (muse ? base.slice('muse:'.length) : base) || 'web';
-  return { base, muse, profileId, providerId: muse ? 'muse-web' : 'chatgpt-web', lane: Math.max(1, Number(laneText) || 1) - 1 };
+  const [providerId, site] = Object.entries(WEB_CHAT_SITES).find(([, item]) => item.prefix && base.startsWith(item.prefix)) ||
+    ['chatgpt-web', WEB_CHAT_SITES['chatgpt-web']];
+  const profileId = base.slice(site.prefix.length) || 'web';
+  return { base, profileId, providerId, site, lane: Math.max(1, Number(laneText) || 1) - 1 };
 }
 
 function chatgptProfileIds() {
@@ -352,7 +360,7 @@ async function ensureChatgptProvider(profileId = 'web') {
   const key = parseWebChatKey(id);
   const options = { window: mainWindow, runtimeRoot: ROOT, profileId: key.profileId, lane: key.lane,
     laneCount: webLaneCount(key.providerId, key.profileId) };
-  provider = key.muse ? new MuseWebProvider(options) : new ChatGPTWebProvider(options);
+  provider = new key.site.Provider(options);
   chatgptProviders.set(id, provider);
   try {
     await provider.initialize();
@@ -400,8 +408,8 @@ function workerIdForProfile(providerId, profileId) {
     return 'codex-' + safeWorkerPart(profileId);
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
-  if (providerId === 'chatgpt-web') return profileId === 'web' ? 'chatgpt-normal' : 'chatgpt-' + safeWorkerPart(profileId);
-  if (providerId === 'muse-web') return profileId === 'web' ? 'muse-normal' : 'muse-' + safeWorkerPart(profileId);
+  const site = WEB_CHAT_SITES[providerId];
+  if (site) return profileId === 'web' ? site.builtin : site.workerPrefix + safeWorkerPart(profileId);
   return '';
 }
 

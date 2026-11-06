@@ -52,6 +52,25 @@ class MuseWorkerTests(unittest.TestCase):
             self.assertEqual(registry["muse-team-1a2b"]["label"], "Muse Team")
             self.assertEqual(registry["chatgpt-normal"]["provider"], "chatgpt-web")
 
+    def test_deepseek_and_grok_are_web_workers_with_their_own_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            account = Path(td) / "profiles" / "deepseek-web" / "ds-2-ab12"
+            account.mkdir(parents=True)
+            (account / "teamyra-profile.json").write_text(json.dumps({"name": "DeepSeek 2", "provider": "deepseek-web"}),
+                                                          encoding="utf-8")
+            registry = build_worker_registry(td, home=td)
+            self.assertEqual(registry["deepseek-normal"]["provider"], "deepseek-web")
+            self.assertEqual(registry["deepseek-ds-2-ab12"]["label"], "DeepSeek 2")
+            self.assertEqual(registry["grok-normal"]["provider"], "grok-web")
+            info = {"id": "deepseek-normal", "provider": "deepseek-web", "profile_id": "web"}
+            write_status(td, "muse", automation_ready=True)
+            self.assertFalse(scheduler.chatgpt_ready(td, info), "another site's status never counts")
+            write_status(td, "deepseek", automation_ready=True, lanes=5)
+            self.assertTrue(scheduler.chatgpt_ready(td, info))
+            self.assertEqual(scheduler.worker_capacity(td, info), 5)
+            self.assertEqual(scheduler.site_name("deepseek-web"), "DeepSeek")
+            self.assertIn(Path(td).resolve() / "deepseek", server.workspace_tools.WorkspaceToolService(td)._sensitive_roots())
+
     def test_readiness_comes_from_muses_own_status_file(self):
         with tempfile.TemporaryDirectory() as td:
             info = {"id": "muse-normal", "provider": "muse-web", "profile_id": "web"}

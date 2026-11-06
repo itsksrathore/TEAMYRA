@@ -17,6 +17,8 @@ import time
 import uuid
 from pathlib import Path
 
+from web_sites import WEB_SITES
+
 DEFAULT_PERMISSIONS = {
     "read": True,
     "search": True,
@@ -367,7 +369,7 @@ class WorkspaceToolService:
         narrowed to the registry hives in System32\\config."""
         roots = [
             self.state_root,
-            self.root / "muse",
+            *(self.root / site["folder"] for site in WEB_SITES.values()),
             self.root / "profiles",
             self.root / "jobs",
             self.root / "logs",

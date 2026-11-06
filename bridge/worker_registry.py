@@ -7,6 +7,8 @@ import json
 import re
 from pathlib import Path
 
+from web_sites import WEB_SITES
+
 
 def safe_worker_part(value):
     value = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
@@ -84,18 +86,22 @@ def build_worker_registry(root, home=None):
             "enabled": True,
             "priority": 250,
         },
-        "muse-normal": {
-            "id": "muse-normal",
-            "provider": "muse-web",
-            "label": "Muse",
+    }
+    # Every other web-chat site's default account (Muse, DeepSeek, Grok).
+    for provider, site in WEB_SITES.items():
+        if provider == "chatgpt-web":
+            continue
+        workers[site["builtin"]] = {
+            "id": site["builtin"],
+            "provider": provider,
+            "label": site["label"],
             "profile_id": "web",
             "home": None,
             "native": True,
             "execution": "desktop-web",
             "enabled": True,
-            "priority": 260,
-        },
-    }
+            "priority": site["priority"],
+        }
 
     legacy = profiles / "codex2"
     if legacy.exists():
@@ -153,7 +159,7 @@ def build_worker_registry(root, home=None):
                 "settings": {k: meta[k] for k in ("model", "effort", "permission_mode") if meta[k] is not None},
             }
 
-    for provider, prefix in (("chatgpt-web", "chatgpt-"), ("muse-web", "muse-")):
+    for provider, prefix in ((provider, site["prefix"]) for provider, site in WEB_SITES.items()):
         web_profiles = profiles / provider
         if not web_profiles.exists():
             continue

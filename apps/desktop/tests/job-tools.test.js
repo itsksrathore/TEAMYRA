@@ -29,7 +29,7 @@ async function testProcessSessions(root) {
 
   // Nothing new yet: a short read returns no output and the program runs on.
   const quiet = await processes.call(jobA, 'process.read', { session_id: server.session_id, wait_seconds: 0.2 }, ctx);
-  assert.equal(quiet.output, '');
+  assert.equal(quiet.output.trim(), '', 'nothing new but the end of the ready line');
   assert.equal(quiet.running, true);
 
   // Another job cannot see or touch it.
@@ -80,7 +80,12 @@ function testPageUrlsStayOnThisPc() {
     if (process.platform === 'win32') await testProcessSessions(root);
     console.log('job process and page-url tests passed');
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    // A stopped program's folder can stay in use for a moment on Windows.
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch (error) {
+      console.warn('could not remove the test folder yet (' + error.code + '): ' + root);
+    }
   }
 })().catch(error => {
   console.error(error);

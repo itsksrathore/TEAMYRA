@@ -30,7 +30,9 @@ QUEUED = "queued"
 ACTIVE_STATES = {"starting", "running", "waiting", "waiting_for_desktop", "needs_user"}
 # Web-chat workers run inside TEAMYRA Desktop; each writes its readiness to
 # ROOT/<folder>/status.json.
-WEB_STATUS_DIRS = {"chatgpt-web": "chatgpt", "muse-web": "muse"}
+from web_sites import WEB_SITES, site_name
+
+WEB_STATUS_DIRS = {provider: site["folder"] for provider, site in WEB_SITES.items()}
 DESKTOP_PROVIDERS = set(WEB_STATUS_DIRS)
 COOLDOWN_SECONDS = 1800
 LOCK_NAME = "_scheduler.lock"
@@ -459,7 +461,7 @@ def _dispatch_job(root, meta, spawn):
     waited = int(now - float(fresh.get("queued_at") or fresh.get("created") or now))
     common = dict(queue_position=None, dispatched_at=now, queue_wait_s=waited)
     if provider in DESKTOP_PROVIDERS:
-        site = "Muse" if provider == "muse-web" else "ChatGPT"
+        site = site_name(provider)
         fresh.update(state="waiting_for_desktop", last_event="queued for embedded " + site, runner_pid=None,
                      **common)
         _write_meta(job_dir, fresh)

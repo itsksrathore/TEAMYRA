@@ -146,7 +146,7 @@ def _probe_worker_auth(info, now):
             detail = (out + err).strip()
             ready = rc == 0 and bool(out.strip())
         elif provider in scheduler.DESKTOP_PROVIDERS:
-            site = "Muse" if provider == "muse-web" else "ChatGPT"
+            site = scheduler.site_name(provider)
             status_file = ROOT / scheduler.WEB_STATUS_DIRS[provider] / "status.json"
             try:
                 status = json.loads(status_file.read_text(encoding="utf-8"))
@@ -725,7 +725,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
         patch_job_meta(
             job_id,
             state="waiting_for_desktop",
-            last_event="queued for embedded " + ("Muse" if provider == "muse-web" else "ChatGPT"),
+            last_event="queued for embedded " + scheduler.site_name(provider),
             runner_pid=None,
         )
     else:
@@ -1302,12 +1302,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "codex", "claude", "antigravity"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "codex", "claude", "antigravity"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
     {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "codex", "claude", "antigravity", "google-media"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "codex", "claude", "antigravity", "google-media"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},
