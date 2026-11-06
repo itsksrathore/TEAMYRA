@@ -108,6 +108,7 @@ const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
 const { MuseWebProvider } = require('./muse-web-provider');
 const { DeepSeekWebProvider } = require('./deepseek-web-provider');
 const { QwenWebProvider } = require('./qwen-web-provider');
+const { GrokWebProvider } = require('./grok-web-provider');
 const { GoogleMediaEngine } = require('./media/google-media-engine');
 const {
   ensureTeamyraMcp,
@@ -309,7 +310,8 @@ const WEB_CHAT_SITES = {
   'chatgpt-web': { prefix: '', name: 'ChatGPT', Provider: ChatGPTWebProvider, builtin: 'chatgpt-normal', workerPrefix: 'chatgpt-' },
   'muse-web': { prefix: 'muse:', name: 'Muse', Provider: MuseWebProvider, builtin: 'muse-normal', workerPrefix: 'muse-' },
   'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', Provider: DeepSeekWebProvider, builtin: 'deepseek-normal', workerPrefix: 'deepseek-' },
-  'qwen-web': { prefix: 'qwen:', name: 'Qwen', Provider: QwenWebProvider, builtin: 'qwen-normal', workerPrefix: 'qwen-' }
+  'qwen-web': { prefix: 'qwen:', name: 'Qwen', Provider: QwenWebProvider, builtin: 'qwen-normal', workerPrefix: 'qwen-' },
+  'grok-web': { prefix: 'grok:', name: 'Grok', Provider: GrokWebProvider, builtin: 'grok-normal', workerPrefix: 'grok-' }
 };
 const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([id, site]) => [id, site.prefix]));
 

@@ -14,6 +14,7 @@ Module._load = function (request, ...rest) {
 };
 const { QwenWebProvider, QWEN_SITE } = require('../src/qwen-web-provider');
 const { ChatSiteAdapter } = require('../src/chat-site-adapter');
+const { GrokWebProvider, GROK_SITE, GROK_BUSY_PREFIX } = require('../src/grok-web-provider');
 Module._load = originalLoad;
 
 function qwenSiteTests() {
@@ -131,16 +132,60 @@ async function jobLoopTests(root, Provider, site, providerId) {
   assert.deepEqual(provider.toolCalls, [{ tool: 'git.status', args: {} }]);
 }
 
+async function grokTests(root) {
+  assert.equal(GROK_SITE.provider, 'grok-web');
+  assert.equal(GROK_SITE.workerId('web'), 'grok-normal');
+  for (const host of ['grok.com', 'accounts.x.ai', 'x.com', 'accounts.google.com']) assert.ok(GROK_SITE.hosts.has(host), host);
+  assert.ok(!GROK_SITE.hosts.has('evilgrok.com'));
+  // Grok's login cookies are sso / sso-rw.
+  const manager = GROK_SITE.sessionManager('web');
+  assert.ok(manager.sessionCookie.test('sso') && manager.sessionCookie.test('sso-rw') && !manager.sessionCookie.test('session'));
+
+  // Build mode: the menu is opened with a real click, then Build is picked.
+  const adapter = GROK_SITE.adapter({ isDestroyed: () => false }, {});
+  adapter.drawFrame = async () => {};
+  const clicks = [];
+  adapter.trustedClick = async (x, y) => { clicks.push([x, y]); };
+  let label = 'Model: Fast';
+  adapter.evaluate = async source => {
+    if (source.includes('getBoundingClientRect')) return { found: true, label, x: 10, y: 20 };
+    if (source.includes("[role=menu] [role^=menuitem]")) { label = 'Model: Build'; return true; }
+    return label;
+  };
+  assert.deepEqual(await adapter.ensureSettings(), { mode: 'on' });
+  assert.deepEqual(clicks, [[10, 20]]);
+  assert.deepEqual(await adapter.ensureSettings(), { mode: 'on' }, 'already on: no click');
+  assert.equal(clicks.length, 1);
+
+  // An empty reply whose data holds a server error is a busy reply.
+  adapter.evaluate = async source => source.includes('streamErrors')
+    ? 'Service temporarily unavailable. Please try again later.'
+    : { count: 1, text: '', messageId: 'r1', generating: false, challenged: false };
+  const snap = await adapter.assistantSnapshot();
+  assert.equal(snap.text, GROK_BUSY_PREFIX + 'Service temporarily unavailable. Please try again later.');
+  assert.ok(adapter.isTransientReply(snap.text));
+  assert.ok(!adapter.isTransientReply('TEAMYRA_TOOL_REQUEST {}'));
+
+  // The "You" label before a user message is not part of it.
+  let asked = '';
+  adapter.evaluate = async source => { asked = source; return ''; };
+  await adapter.lastUserMessage();
+  assert.ok(asked.includes('const prefix = "You"'));
+
+  await jobLoopTests(root, GrokWebProvider, GROK_SITE, 'grok-web');
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chat-sites-'));
   try {
     const adapter = qwenSiteTests();
     await adapterTests(adapter);
     await jobLoopTests(root, QwenWebProvider, QWEN_SITE, 'qwen-web');
+    await grokTests(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-  console.log('chat site (Qwen) settings, send, exact reply and job loop tests passed');
+  console.log('chat site (Qwen, Grok) settings, send, exact reply, busy and job loop tests passed');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

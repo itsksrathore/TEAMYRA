@@ -80,10 +80,25 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
   }
 
   async lastUserMessage() {
+    // `userPrefix`: a label the site shows before your message ("You").
+    const prefix = JSON.stringify(this.chatSite.userPrefix || '');
     return this.evaluate(`(() => {${this.pageHelpers()}
       const last = csUsers().at(-1);
-      return last ? (last.innerText || last.textContent || '').trim() : '';
+      const text = last ? (last.innerText || last.textContent || '').trim() : '';
+      const prefix = ${prefix};
+      return prefix && text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
     })()`);
+  }
+
+  // A real mouse click at page coordinates, for menus that ignore scripted
+  // clicks (Grok's model menu).
+  async trustedClick(x, y) {
+    const contents = this.webContents;
+    if (!contents || contents.isDestroyed?.()) throw new Error(`${this.siteName} view is unavailable`);
+    const point = { x: Math.round(x), y: Math.round(y) };
+    contents.sendInputEvent({ type: 'mouseMove', ...point });
+    contents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+    contents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
   }
 
   async ensureSettings() {

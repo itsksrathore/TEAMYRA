@@ -27,11 +27,21 @@ A Continue button at a site's length limit is clicked automatically, and "busy" 
 
 ## Grok (`grok-web`, worker `grok-normal`)
 
-Planned. Page findings so far:
-- The message box is a rich editor (`[contenteditable][aria-label="Message Grok"]`).
-- The model menu (`Model: <name>`) offers Fast, **Build**, Auto, Expert and Heavy. Grok's Build Mode makes and previews websites and apps. Grok's model menu ignores scripted clicks, so TEAMYRA has to choose Build with real input events.
-- A new chat starts on the saved mode (`modes-selected-id`).
-- The page draws nothing, and its app does not start, while its window is hidden or covered; it needs the frame drawing used for Muse.
+`apps/desktop/src/grok-web-provider.js` (`GrokAutomationAdapter`). Page checked on 2026-11-06.
+
+- **Mode:** **Build** by default (`TEAMYRA_GROK_MODE` picks Expert, Heavy, Auto or Fast instead).
+  - The model menu (`Model: <name>`) offers Fast, Build, Auto, Expert and Heavy, and every new chat starts on Fast.
+  - The menu ignores scripted clicks, so TEAMYRA opens it with a real mouse click (`sendInputEvent`) and picks the mode before every message.
+- **Page:**
+  - message box `[contenteditable][aria-label="Message Grok"]` (rich editor, filled with `insertText`);
+  - `button[data-testid="chat-submit"]` sends; `button[data-testid="composer-stop"]` shows while Grok writes;
+  - user messages `[data-testid="user-message"]` (with a "You" label);
+  - replies `#response-<id>` holding `[data-testid="assistant-message"]`, answer `.response-content-markdown`.
+- **Exact text:** `/rest/app-chat/conversations/<id>/responses` gives `message` for each `responseId`, with `partial` while it is being written.
+- **Signed in:** cookies `sso` / `sso-rw`.
+- **Server errors:** a reply that ends empty with `streamErrors` (for example "Service temporarily unavailable") shows nothing on the page. TEAMYRA reads the error and asks again.
+- **Build behaviour:** in a test, Build Mode started a terminal in Grok's own cloud sandbox (`InitTerminalSession`, a grok-sandbox.com preview) instead of answering with a tool request, and then failed with "Service temporarily unavailable". The bootstrap prompt tells it to work only through TEAMYRA tools. If it keeps building in its sandbox, Expert is the mode to use for local projects.
+- **Hidden views:** the page draws nothing and its app does not start while its window is hidden or covered, so the adapter draws frames like the Muse one.
 
 ## GLM (z.ai): not added as a web worker
 
