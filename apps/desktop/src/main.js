@@ -305,13 +305,14 @@ async function providersCached(force = false) {
 const WEB_CHAT_PREFIX = { 'chatgpt-web': '', 'muse-web': 'muse:' };
 
 // Tabs (lanes) per web-chat account: several jobs of one account run at once,
-// each in its own chat. TEAMYRA_WEB_LANES sets the default (2); an account's
+// each in its own chat. TEAMYRA_WEB_LANES sets the default (5); an account's
 // teamyra-profile.json may set its own "lanes". Extra tabs are keyed
 // '<account key>#<n>' (n = 2, 3, ...) and are never shown in the panel.
-const MAX_WEB_LANES = 4;
+const DEFAULT_WEB_LANES = 5;
+const MAX_WEB_LANES = 8;
 
 function webLaneCount(providerId, profileId) {
-  let lanes = Number(process.env.TEAMYRA_WEB_LANES) || 2;
+  let lanes = Number(process.env.TEAMYRA_WEB_LANES) || DEFAULT_WEB_LANES;
   try {
     const meta = JSON.parse(fs.readFileSync(path.join(PROFILES_ROOT, providerId, profileId, 'teamyra-profile.json'), 'utf8'));
     if (Number.isInteger(meta.lanes)) lanes = meta.lanes;

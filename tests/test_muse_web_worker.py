@@ -130,6 +130,8 @@ class MuseWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             # No lane count published yet: one at a time.
             self.assertEqual(scheduler.worker_capacity(td, {"provider": "chatgpt-web", "profile_id": "web"}), 1)
+            write_status(td, "chatgpt", lanes=5)
+            self.assertEqual(scheduler.worker_capacity(td, {"provider": "chatgpt-web", "profile_id": "web"}), 5)
             write_status(td, "chatgpt", lanes=99)
             self.assertEqual(scheduler.worker_capacity(td, {"provider": "chatgpt-web", "profile_id": "web"}),
                              scheduler.MAX_WEB_LANES)

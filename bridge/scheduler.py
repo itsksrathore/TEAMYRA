@@ -215,7 +215,7 @@ def active_jobs(root, worker=None, metas=None):
     return [m for m in metas if is_active(m) and (worker is None or m.get("worker") == worker)]
 
 
-MAX_WEB_LANES = 4
+MAX_WEB_LANES = 8  # keep equal to MAX_WEB_LANES in apps/desktop/src/main.js
 
 
 def worker_capacity(root, info):
