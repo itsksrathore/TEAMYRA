@@ -1798,11 +1798,31 @@ def recover_incomplete_jobs(root, *, worker_alive=False):
               "skipped_live_worker": bool(worker_alive)}
     for path in _jobs_dir(root).glob("media-*.json"):
         try:
+            # Most jobs are long finished and nothing changes for them: decide
+            # that without the state lock. Taking it for each of thousands of
+            # jobs, while desktop tabs keep claiming work, made a core start
+            # take 16 s, longer than the wake gateway waits for it.
+            job = _read_json(path, None)
+            if not _may_recover(job, worker_alive):
+                if isinstance(job, dict):
+                    report["unchanged"].append(job.get("job_id") or path.stem)
+                continue
             with _state_lock(root):
                 _recover_one(root, path, report, worker_alive=worker_alive)
         except Exception as exc:
             report["errors"].append({"path": str(path), "error": str(exc)[:1000]})
     return report
+
+
+def _may_recover(job, worker_alive):
+    """Could _recover_one change this job? (It re-reads it under the lock.)"""
+    if not isinstance(job, dict):
+        return False
+    state = job.get("state")
+    stale_cancel = state in {"queued", "waiting_for_browser"} or (not worker_alive and state not in TERMINAL_STATES)
+    if job.get("cancel_requested") and stale_cancel:
+        return True
+    return not worker_alive and state in RUNTIME_IN_PROGRESS
 
 
 def _recover_one(root, path, report, *, worker_alive=False):
