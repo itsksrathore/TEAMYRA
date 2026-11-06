@@ -258,6 +258,60 @@ def scheduler_worker_ready(worker):
     return bool(entry.get("ready"))
 
 
+DESKTOP_WAKE_INTERVAL_SECONDS = 60
+_DESKTOP_WAKE = {"at": 0.0, "running": False}
+_DESKTOP_WAKE_LOCK = threading.Lock()
+
+
+def _wake_desktop_async(root):
+    with _DESKTOP_WAKE_LOCK:
+        if _DESKTOP_WAKE["running"] or time.time() - _DESKTOP_WAKE["at"] < DESKTOP_WAKE_INTERVAL_SECONDS:
+            return False
+        _DESKTOP_WAKE.update(running=True, at=time.time())
+
+    def task():
+        try:
+            desktop_runtime.ensure_desktop_ready(root)
+        except Exception as exc:
+            print("TEAMYRA desktop wake for ChatGPT jobs failed:", exc, file=sys.stderr, flush=True)
+        finally:
+            with _DESKTOP_WAKE_LOCK:
+                _DESKTOP_WAKE["running"] = False
+
+    threading.Thread(target=task, daemon=True, name="teamyra-desktop-wake").start()
+    return True
+
+
+def chatgpt_desktop_watch(root, wake=None, desktop_ready=None):
+    """Scheduler tick: keep ChatGPT jobs moving when TEAMYRA Desktop is down.
+
+    ChatGPT jobs are run by the desktop. If it exited or crashed, nothing else
+    restarts it for them (media and control calls wake it on their own), so
+    queued and waiting jobs used to sit until somebody opened the app. While
+    the desktop is down, a waiting job whose time budget has run out is failed
+    here with an honest reason instead of staying active forever.
+    """
+    root = Path(root)
+    desktop_ready = desktop_runtime.desktop_ready if desktop_ready is None else desktop_ready
+    wake = _wake_desktop_async if wake is None else wake
+    pending = scheduler.chatgpt_jobs_needing_desktop(scheduler.load_jobs(root))
+    if not pending or desktop_ready(root):
+        return {"pending": len(pending), "woke": False, "expired": []}
+    expired = []
+    for meta in pending:
+        if meta.get("state") != "waiting_for_desktop":
+            continue
+        job_dir = root / "jobs" / meta["id"]
+        if (job_dir / "DONE").exists():
+            continue
+        clean = {k: v for k, v in meta.items() if k != "_done"}
+        if recovery.recover_desktop_job(job_dir, clean).get("action") == "timeout":
+            expired.append(meta["id"])
+    alive = [m for m in pending if m["id"] not in expired]
+    woke = bool(alive) and bool(wake(root))
+    return {"pending": len(alive), "woke": woke, "expired": expired}
+
+
 def start_background_services(scheduler_interval=5.0, auth_interval=AUTH_REFRESH_SECONDS):
     """Start the queue dispatcher and the readiness refresher once per process."""
     if _BACKGROUND_STARTED.is_set():
@@ -265,7 +319,7 @@ def start_background_services(scheduler_interval=5.0, auth_interval=AUTH_REFRESH
     _BACKGROUND_STARTED.set()
     scheduler.start_background_dispatcher(
         jobs_root(), BRIDGE, PYTHON, spawn=scheduler_spawn, is_ready=scheduler_worker_ready,
-        interval=scheduler_interval,
+        interval=scheduler_interval, on_tick=chatgpt_desktop_watch,
     )
 
     def auth_loop():
@@ -540,6 +594,22 @@ def dispatch_queue(workers=None):
                                    is_ready=scheduler_worker_ready, workers=workers, registry=worker_registry())
 
 
+def wake_chatgpt_worker(worker_info, heartbeat_wait=20.0):
+    """A ChatGPT worker looks not ready when TEAMYRA Desktop is simply not
+    running (no fresh heartbeat). Start the desktop and look again instead of
+    refusing the task."""
+    try:
+        desktop_runtime.ensure_desktop_ready(ROOT)
+    except Exception as exc:
+        return False, f"TEAMYRA Desktop could not be started for ChatGPT: {exc}"
+    deadline = time.time() + max(0.0, float(heartbeat_wait))
+    while True:
+        ready, detail = worker_auth_status(worker_info, use_cache=False)
+        if ready or time.time() >= deadline:
+            return ready, detail
+        time.sleep(1)
+
+
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
@@ -559,6 +629,8 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     # The desktop bridge validates that path and sandboxes every tool call to it.
     # enabled controls automatic routing only; explicit/manual worker selection remains allowed.
     ready, auth_detail = worker_auth_status(worker_info)
+    if not ready and provider == "chatgpt-web":
+        ready, auth_detail = wake_chatgpt_worker(worker_info)
     if not ready:
         raise ValueError(f"{worker} is not authenticated/ready: {clip(auth_detail, 300)}")
     settings = worker_settings(worker_info)
@@ -751,8 +823,15 @@ def follow_info(job_id):
             "transcript": str(JOBS / job_id / "transcript.md")}
 
 
-def job_result(job_id):
+FINAL_MESSAGE_CHARS = 6000
+
+
+def job_result(job_id, max_chars=FINAL_MESSAGE_CHARS):
     requested_job_id = job_id
+    try:
+        max_chars = max(500, min(int(max_chars), 200000))
+    except (TypeError, ValueError):
+        max_chars = FINAL_MESSAGE_CHARS
     chain = failover_chain(job_id)
     terminal = chain[-1]
     job_id = terminal["id"]
@@ -763,7 +842,13 @@ def job_result(job_id):
     if len(chain) > 1:
         res["failover_chain"] = [summary(item, events=False) for item in chain]
     final = JOBS / job_id / "final.txt"
-    res["final_message"] = clip(final.read_text(encoding="utf-8", errors="replace"), 6000) if final.exists() else None
+    final_text = final.read_text(encoding="utf-8", errors="replace") if final.exists() else None
+    res["final_message"] = clip(final_text, max_chars) if final_text is not None else None
+    if final_text is not None:
+        # Long reports are never silently cut: say so and where the rest is.
+        res["final_message_chars"] = len(final_text)
+        res["final_message_truncated"] = len(final_text) > max_chars
+        res["final_path"] = str(final)
     cwd, head = m.get("cwd"), m.get("head_start")
     if cwd and head:
         res["commits"] = (git(cwd, "log", "--oneline", f"{head}..HEAD") or "").splitlines()[:40]
@@ -1600,8 +1685,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"},
                      "since": {"type": "integer", "default": 0}, "limit": {"type": "integer", "default": 40}},
                      "required": ["job_id"], "additionalProperties": False}},
-    {"name": "job_result", "description": "Final result of the terminal job in a failover chain, with chain lineage when reassignment occurred.",
-     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
+    {"name": "job_result", "description": "Final result of the terminal job in a failover chain, with chain lineage when reassignment occurred. final_message is clipped to max_chars (default 6000); final_message_chars and final_path give the full report.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"},
+         "max_chars": {"type": "integer", "minimum": 500, "maximum": 200000, "default": 6000,
+                       "description": "Characters of the final report to return; raise it to read a long report in full."}},
+         "required": ["job_id"], "additionalProperties": False}},
     {"name": "job_chain", "description": "Inspect root/child lineage for automatic failover and the current terminal job.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
     {"name": "job_wait", "description": "Block until all (or any) of the jobs end, or timeout_seconds pass (max 3000; progress is reported every minute).",
@@ -2056,7 +2144,7 @@ def tool_call(name, a):
     if name == "job_events":
         return job_events(a["job_id"], a.get("since", 0), a.get("limit", 40))
     if name == "job_result":
-        return job_result(a["job_id"])
+        return job_result(a["job_id"], a.get("max_chars", FINAL_MESSAGE_CHARS))
     if name == "job_chain":
         return chain_summary(a["job_id"])
     if name == "job_wait":

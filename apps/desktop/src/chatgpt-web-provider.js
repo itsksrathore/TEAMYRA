@@ -13,7 +13,34 @@ const MAX_TOOL_PARSE_FAILURES = 3;
 const MAX_PROTOCOL_RECOVERIES = 2;
 const CHALLENGE_POLL_MS = 3000;
 const PROGRESS_INTERVAL_MS = 30000;
+// A page recovery reloads the job conversation. A long job may need several
+// over hours, so the limit is on recoveries in a row (reset by every reply)
+// plus a generous total, not a fixed two per job.
+const MAX_CONSECUTIVE_PAGE_RECOVERIES = 3;
+const MAX_PAGE_RECOVERIES = 12;
+const PAGE_RECOVERY_BACKOFF_MS = 5000;
+// A job interrupted by a desktop restart continues in its own conversation.
+const MAX_DESKTOP_RESUMES = 3;
+// Waiting jobs: a worker that stays not-ready this long is reloaded, at most
+// once per HEAL_INTERVAL_MS, instead of leaving the jobs waiting for hours.
+const NOT_READY_HEAL_MS = 45000;
+const HEAL_INTERVAL_MS = 60000;
+const QUEUE_NUDGE_MS = 30000;
+const PROMPT_WAIT_MS = 30000;
+const RENDER_WAIT_MS = 25000;
+const JOB_STATE_FILE = 'chatgpt-state.json';
+const UNKNOWN_TOOL_OUTCOME = 'TEAMYRA Desktop restarted while this tool was running, so its outcome is unknown. ' +
+  'Check the current state first (read the file, list the folder or run git status) and repeat the step only if it did not happen.';
 const VERIFICATION_MESSAGE = 'ChatGPT asks for human verification. Open TEAMYRA Desktop, select the ChatGPT worker and complete the check; the job resumes automatically.';
+const SIGN_IN_MESSAGE = 'This ChatGPT account is signed out. Open TEAMYRA Desktop, select the ChatGPT worker and sign in; the job resumes automatically.';
+const USER_ACTIONS = {
+  verification: { kind: 'chatgpt_verification', message: VERIFICATION_MESSAGE, title: 'TEAMYRA: ChatGPT verification needed',
+    waiting: 'waiting: ChatGPT verification required in TEAMYRA Desktop', paused: 'needs_user: ChatGPT verification required',
+    resumed: 'ChatGPT verification cleared; resuming the same conversation' },
+  sign_in: { kind: 'chatgpt_sign_in', message: SIGN_IN_MESSAGE, title: 'TEAMYRA: ChatGPT sign-in needed',
+    waiting: 'waiting: ChatGPT sign-in required in TEAMYRA Desktop', paused: 'needs_user: ChatGPT sign-in required',
+    resumed: 'ChatGPT signed in again; resuming the same conversation' }
+};
 const TOOL_ERROR_HINT = 'Reply with one line: TEAMYRA_TOOL_REQUEST {"tool":"<name>","args":{...}} using valid JSON and forward slashes in paths (D:/dir/file). If the task is complete, reply with the final answer without the TEAMYRA_TOOL_REQUEST marker.';
 const READ_ONLY_BLOCKED_TOOLS = new Set([
   'filesystem.create', 'filesystem.write', 'filesystem.patch', 'filesystem.move',
@@ -69,6 +96,18 @@ function looksLikeProtocolLoss(text, successfulTools) {
   const completed = /(?:^|\n)\s*(?:done\b|finished\b|completed\b|implemented\b|fixed\b|I (?:have |successfully )?(?:completed|implemented|fixed)\b)/i.test(reply);
   const unfinished = /\b(?:cannot|can't|unable to)\s+(?:complete|finish)|\b(?:task|work)\s+(?:is\s+)?(?:unfinished|incomplete)/i.test(reply);
   return unfinished || !successfulTools || !completed;
+}
+
+// 'verification' / 'sign_in' when the error means a human must act in the
+// embedded view, else null.
+function userActionKind(error) {
+  if (error?.code === 'TEAMYRA_CHALLENGED') return 'verification';
+  if (error?.code === 'TEAMYRA_SIGNED_OUT') return 'sign_in';
+  return null;
+}
+
+function snapBaseline(snap) {
+  return snap ? { count: snap.count || 0, text: snap.text || '', messageId: snap.messageId || '' } : null;
 }
 
 class ChatGPTWebProvider {
@@ -181,7 +220,24 @@ class ChatGPTWebProvider {
       if (meta.provider !== 'chatgpt-web' || !['running', 'needs_user'].includes(meta.state) ||
           String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId ||
           fs.existsSync(path.join(dir, 'DONE'))) continue;
-      const detail = 'ChatGPT desktop restarted; partial workspace changes are preserved. Resume with a new job.';
+      const saved = this.loadJobState(dir);
+      const resumes = Number(meta.desktop_resumes) || 0;
+      // Resumable: under the resume limit, and either nothing ran yet or the
+      // conversation is known (tools ran in it, so it must be the same one).
+      const resumable = resumes < MAX_DESKTOP_RESUMES && !fs.existsSync(path.join(dir, 'CANCEL')) &&
+        (saved?.conversation_url || !(Number(saved?.successful_tools) > 0 || saved?.phase === 'tool'));
+      if (resumable) {
+        const note = `TEAMYRA Desktop restarted; resuming the job in the same ChatGPT conversation (${resumes + 1}/${MAX_DESKTOP_RESUMES})`;
+        this.appendJobEvent(dir, 'info', note);
+        this.writeJobMeta(dir, {
+          state: 'waiting_for_desktop', reason: null, attention: null, resume_requested: true,
+          desktop_resumes: resumes + 1, dispatched_at: Date.now() / 1000, last_event: note
+        });
+        continue;
+      }
+      const detail = resumes >= MAX_DESKTOP_RESUMES
+        ? `ChatGPT desktop restarted ${resumes + 1} times during this job; partial workspace changes are preserved. Resume with a new job.`
+        : 'ChatGPT desktop restarted; partial workspace changes are preserved. Resume with a new job.';
       this.appendJobEvent(dir, 'error', detail);
       this.writeJobMeta(dir, {
         state: 'failed', reason: 'desktop_interrupted', exit_code: 1, attention: null,
@@ -254,7 +310,12 @@ class ChatGPTWebProvider {
       this.loaded = true;
       this.refreshStatus().catch(() => {});
     });
-    this.view.webContents.on('did-fail-load', (_event, code, description) => {
+    this.view.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+      // A failed iframe (analytics, a challenge widget) or an aborted
+      // navigation (-3, superseded by a redirect) leaves the page usable.
+      // Treating them as an unloaded page stopped every probe, and waiting
+      // jobs then waited for hours for a worker that never became ready.
+      if (isMainFrame === false || Number(code) === -3) return;
       this.loaded = false;
       this.writeStatus({ detail: `ChatGPT page failed to load (${code}): ${description}` });
     });
@@ -488,7 +549,8 @@ class ChatGPTWebProvider {
       visible: this.visible,
       loaded: this.loaded,
       automationReady: Boolean(!this.pageUnresponsiveSince && this.lastProbe?.promptFound && !this.lastProbe?.challenged),
-      workerReady: Boolean(!this.pageUnresponsiveSince && this.lastProbe?.promptFound && !this.lastProbe?.challenged),
+      workerReady: Boolean(!this.pageUnresponsiveSince && this.lastProbe?.promptFound && !this.lastProbe?.challenged &&
+        !this.lastProbe?.loginVisible),
       pageUnresponsiveSince: this.pageUnresponsiveSince,
       detail: this.pageUnresponsiveSince ? 'page unresponsive since ' + new Date(this.pageUnresponsiveSince).toISOString() : '',
       loginVisible: Boolean(this.lastProbe?.loginVisible),
@@ -631,18 +693,21 @@ class ChatGPTWebProvider {
     if (!this.loaded) await this.ensureLoaded({ visible: this.visible });
 
     let probe = null;
-    const deadline = Date.now() + 15000;
+    const deadline = Date.now() + (this.promptWaitMs ?? PROMPT_WAIT_MS);
     while (Date.now() < deadline) {
       probe = await this.automation.probe();
       if (probe.challenged) {
         throw teamyraError('ChatGPT requires user verification in the embedded view', 'TEAMYRA_CHALLENGED', 'chatgpt_verification');
       }
-      if (probe.loginVisible) throw new Error('ChatGPT sign-in is required');
+      if (probe.loginVisible) throw teamyraError('ChatGPT sign-in is required', 'TEAMYRA_SIGNED_OUT', 'chatgpt_sign_in');
       if (probe.promptFound) break;
       await sleep(250);
     }
 
-    if (!probe?.promptFound) throw new Error('ChatGPT prompt is unavailable');
+    // A prompt that never appears is a page problem (still hydrating, a
+    // stuck overlay): the job loop reloads the conversation and checks
+    // whether the message arrived, instead of failing the job.
+    if (!probe?.promptFound) throw teamyraError('ChatGPT prompt is unavailable', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
     return this.automation.sendTask(text);
   }
 
@@ -695,29 +760,84 @@ class ChatGPTWebProvider {
     return this.pendingJobsPromise;
   }
 
-  async processPendingJobsOnce() {
-    if (this.busy) return;
+  // Jobs this profile owns and has not finished: { waiting, owned } plus
+  // whether any ChatGPT job anywhere is still queued.
+  scanJobs() {
     const jobsRoot = path.join(this.runtimeRoot, 'jobs');
-    if (!fs.existsSync(jobsRoot)) return;
-    const candidates = [];
+    const waiting = [];
+    let owned = 0;
+    let queued = 0;
+    if (!fs.existsSync(jobsRoot)) return { waiting, owned, queued };
     for (const entry of fs.readdirSync(jobsRoot, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const dir = path.join(jobsRoot, entry.name);
       try {
         const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
-        if (meta.provider === 'chatgpt-web' && meta.state === 'waiting_for_desktop' && !fs.existsSync(path.join(dir, 'DONE')) &&
-            String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) === this.activeProfileId) {
-          candidates.push({ dir, meta });
-        }
+        if (meta.provider !== 'chatgpt-web' || fs.existsSync(path.join(dir, 'DONE'))) continue;
+        if (meta.state === 'queued') { queued += 1; continue; }
+        if (String(meta.profile_id || DEFAULT_CHATGPT_PROFILE_ID) !== this.activeProfileId) continue;
+        if (['waiting_for_desktop', 'running', 'needs_user'].includes(meta.state)) owned += 1;
+        if (meta.state === 'waiting_for_desktop') waiting.push({ dir, meta });
       } catch {}
     }
-    candidates.sort((a, b) => (a.meta.created || 0) - (b.meta.created || 0));
-    if (!candidates.length) return;
+    // A job resumed after a desktop restart goes first; then oldest first.
+    waiting.sort((a, b) => (b.meta.resume_requested ? 1 : 0) - (a.meta.resume_requested ? 1 : 0) ||
+      (a.meta.created || 0) - (b.meta.created || 0));
+    return { waiting, owned, queued };
+  }
+
+  // True while this profile has unfinished ChatGPT work; the desktop must not
+  // idle-exit then, however long the jobs have been waiting.
+  hasPendingWork() {
+    return this.busy || (this.pendingJobCount || 0) > 0;
+  }
+
+  // Fails a waiting job whose time budget ran out while the worker was not
+  // ready, with the reason it waited, so it never sits for hours unnoticed.
+  expireWaitingJob({ dir, meta }) {
+    const start = Number(meta.dispatched_at || meta.created || 0);
+    const timeout = Number(meta.timeout_s || 0);
+    if (!start || !timeout || Date.now() / 1000 <= start + timeout) return false;
+    const detail = 'timed out waiting for the embedded ChatGPT worker' +
+      (meta.last_event && /^waiting: /.test(meta.last_event) ? ' (' + meta.last_event.slice(9) + ')' : '');
+    this.appendJobEvent(dir, 'error', detail);
+    this.writeJobMeta(dir, {
+      state: 'failed', reason: 'timeout', exit_code: 1, attention: null, ended: Date.now() / 1000,
+      last_event: detail, recovery_state: 'timed_out_waiting_for_desktop'
+    });
+    fs.writeFileSync(path.join(dir, 'DONE'), 'failed', 'utf8');
+    return true;
+  }
+
+  async processPendingJobsOnce() {
+    if (this.busy) return;
+    const scan = this.scanJobs();
+    this.pendingJobCount = scan.owned;
+    let candidates = scan.waiting;
+    if (candidates.some(job => this.expireWaitingJob(job))) {
+      candidates = candidates.filter(job => !fs.existsSync(path.join(job.dir, 'DONE')));
+      this.dispatchQueuedJobs();
+    }
+    if (!candidates.length) {
+      this.notReadySince = null;
+      // Queued ChatGPT jobs normally start from the core's scheduler. If the
+      // core is not running, an idle worker asks for the next job itself.
+      if (scan.queued && !scan.owned && Date.now() - (this.lastQueueNudge || 0) >= QUEUE_NUDGE_MS) {
+        this.lastQueueNudge = Date.now();
+        this.dispatchQueuedJobs();
+      }
+      return;
+    }
     if (this.pageUnresponsiveSince) await this.reconnect().catch(() => {});
     if (!this.view || this.view.webContents.isDestroyed()) {
       await this.wakeBackground();
     }
-    const status = await this.refreshStatus();
+    let status = await this.refreshStatus();
+    if (!status.workerReady && !status.challenged && !status.loginVisible) {
+      status = await this.healNotReady(status);
+    } else if (status.workerReady) {
+      this.notReadySince = null;
+    }
     if (!status.workerReady) {
       // Keep the jobs waiting, but explain on each of them why they wait.
       this.markWaitingJobs(candidates, status);
@@ -727,26 +847,46 @@ class ChatGPTWebProvider {
     await this.runDelegatedJob(candidates[0].dir);
   }
 
+  // The page is loaded (or should be) but has no usable prompt: still
+  // hydrating, an error page, a stuck overlay. Reload it after a grace period.
+  async healNotReady(status) {
+    const now = Date.now();
+    this.notReadySince ||= now;
+    const graceMs = this.notReadyHealMs ?? NOT_READY_HEAL_MS;
+    const unloaded = this.view && !this.loaded;
+    if ((now - this.notReadySince < graceMs && !unloaded) ||
+        now - (this.lastHealAt || 0) < (this.healIntervalMs ?? HEAL_INTERVAL_MS)) return status;
+    this.lastHealAt = now;
+    this.heals = (this.heals || 0) + 1;
+    try { await this.reconnect(); } catch {}
+    return this.refreshStatus();
+  }
+
   // Writes attention / last_event on jobs that wait for this worker. `status`
   // is the not-ready worker status, or null when the worker is ready again.
   markWaitingJobs(candidates, status) {
-    let newlyChallenged = 0;
+    const action = status?.challenged ? USER_ACTIONS.verification : status?.loginVisible ? USER_ACTIONS.sign_in : null;
+    let notify = false;
     for (const { dir, meta } of candidates) {
-      const verification = meta.attention?.kind === 'chatgpt_verification';
+      const userKinds = [USER_ACTIONS.verification.kind, USER_ACTIONS.sign_in.kind];
+      const current = userKinds.includes(meta.attention?.kind) ? meta.attention.kind : null;
       const patch = {};
-      if (status?.challenged) {
-        if (!verification) {
-          patch.attention = { kind: 'chatgpt_verification', since: Date.now() / 1000, message: VERIFICATION_MESSAGE };
-          patch.last_event = 'waiting: ChatGPT verification required in TEAMYRA Desktop';
-          newlyChallenged += 1;
+      if (action) {
+        if (current !== action.kind) {
+          patch.attention = { kind: action.kind, since: Date.now() / 1000, message: action.message };
+          patch.last_event = action.waiting;
+          notify = true;
         }
       } else {
-        if (verification) patch.attention = null;
+        if (current) patch.attention = null;
         if (status) {
-          const detail = status.loginVisible
-            ? 'waiting: ChatGPT sign-in required in TEAMYRA Desktop'
-            : 'waiting: embedded ChatGPT worker is not ready';
+          const seconds = this.notReadySince ? Math.round((Date.now() - this.notReadySince) / 1000) : 0;
+          const detail = 'waiting: embedded ChatGPT worker is not ready' +
+            (this.heals ? ` (reloaded ${this.heals}x)` : '') + (status.detail ? ': ' + status.detail : '');
           if (meta.last_event !== detail) patch.last_event = detail;
+          if (seconds && !meta.not_ready_since) patch.not_ready_since = this.notReadySince / 1000;
+        } else if (meta.not_ready_since) {
+          patch.not_ready_since = null;
         }
       }
       if (!Object.keys(patch).length) continue;
@@ -755,7 +895,7 @@ class ChatGPTWebProvider {
         Object.assign(meta, updated);
       } catch {}
     }
-    if (newlyChallenged) this.notifyUser('TEAMYRA: ChatGPT verification needed', VERIFICATION_MESSAGE);
+    if (notify) this.notifyUser(action.title, action.message);
   }
 
   notifyUser(title, body) {
@@ -805,16 +945,20 @@ class ChatGPTWebProvider {
 
   // Pauses the job as needs_user until the ChatGPT verification is gone. The
   // job keeps its conversation; it fails only on cancel or deadline.
-  async waitForChallengeResolution(job) {
+  // Pauses the job as needs_user until the user acted (verification passed,
+  // or signed in again). The job keeps its conversation; it fails only on
+  // cancel or deadline. `kind` is 'verification' or 'sign_in'.
+  async waitForChallengeResolution(job, kind = 'verification') {
+    const action = USER_ACTIONS[kind] || USER_ACTIONS.verification;
     const since = Date.now() / 1000;
-    this.appendJobEvent(job.dir, 'attention', VERIFICATION_MESSAGE);
+    this.appendJobEvent(job.dir, 'attention', action.message);
     this.writeJobMeta(job.dir, {
       state: 'needs_user',
-      reason: 'chatgpt_verification',
-      attention: { kind: 'chatgpt_verification', since, message: VERIFICATION_MESSAGE },
-      last_event: 'needs_user: ChatGPT verification required'
+      reason: action.kind,
+      attention: { kind: action.kind, since, message: action.message },
+      last_event: action.paused
     });
-    this.notifyUser('TEAMYRA: ChatGPT verification needed', VERIFICATION_MESSAGE);
+    this.notifyUser(action.title, action.message);
     this.awaitingUser = true;
     await this.setInteractionLocked(false).catch(() => {});
     try {
@@ -824,7 +968,7 @@ class ChatGPTWebProvider {
         try { probe = await this.automation.probe(); } catch (error) {
           if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') throw error;
         }
-        if (probe && !probe.challenged && probe.promptFound) break;
+        if (probe && !probe.challenged && !probe.loginVisible && probe.promptFound) break;
         await sleep(Math.max(1, Math.min(this.challengePollMs ?? CHALLENGE_POLL_MS, job.deadline - Date.now())));
       }
     } finally {
@@ -835,9 +979,14 @@ class ChatGPTWebProvider {
       state: 'running',
       reason: null,
       attention: null,
-      last_event: 'resumed after ChatGPT verification'
+      last_event: kind === 'sign_in' ? 'resumed after ChatGPT sign-in' : 'resumed after ChatGPT verification'
     });
-    this.appendJobEvent(job.dir, 'info', 'ChatGPT verification cleared; resuming the same conversation');
+    this.appendJobEvent(job.dir, 'info', action.resumed);
+    // A sign-in may land on a new page; go back to the job conversation.
+    if (job.conversationUrl) {
+      const current = await this.getCurrentConversation().catch(() => null);
+      if (current?.conversationId !== job.conversationId) await this.openConversation(job.conversationUrl).catch(() => {});
+    }
     await this.refreshStatus().catch(() => {});
   }
 
@@ -855,44 +1004,103 @@ class ChatGPTWebProvider {
         this.recordJobUsage(job);
         return snap;
       } catch (error) {
-        if (error?.code !== 'TEAMYRA_CHALLENGED') throw error;
-        await this.waitForChallengeResolution(job);
+        const kind = userActionKind(error);
+        if (!kind) throw error;
+        await this.waitForChallengeResolution(job, kind);
       }
     }
   }
 
-  // After a verification pause: back in the job conversation, was the last
-  // message delivered? If not, it has to be sent again.
+  // Is `text` the last user message of the open conversation? Right after a
+  // reload or a cold desktop start the conversation can take many seconds to
+  // render; "no user message yet" is not an answer, so wait for the render
+  // (up to RENDER_WAIT_MS) and only then compare. Deciding too early made a
+  // live resume send an already delivered tool result a second time.
+  async lastUserMessageMatches(text) {
+    const expected = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    const deadline = Date.now() + (this.renderWaitMs ?? RENDER_WAIT_MS);
+    let differing = 0;
+    for (;;) {
+      const last = String(await this.automation.lastUserMessage().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+      if (last && expected && last.startsWith(expected)) return true;
+      // A rendered conversation whose last user message is another one,
+      // seen a few times in a row: the message was not delivered.
+      if (last) differing += 1;
+      if (differing >= 3 || Date.now() >= deadline) return false;
+      await sleep(this.resumePollMs ?? 1000);
+    }
+  }
+
+  // After a pause, reload or desktop restart: back in the job conversation,
+  // was the last message delivered? If not, it has to be sent again. This
+  // check is what keeps a recovery from submitting the same message twice.
   async lastMessageDelivered(job, text) {
     const current = await this.getCurrentConversation();
     if (job.conversationUrl && current?.conversationId !== job.conversationId) {
       await this.openConversation(job.conversationUrl);
     }
-    const expected = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 160);
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const last = String(await this.automation.lastUserMessage() || '').replace(/\s+/g, ' ').trim();
-      if (last && expected && last.startsWith(expected)) return true;
-      await sleep(this.resumePollMs ?? 1000);
+    if (await this.lastUserMessageMatches(text)) return true;
+    if (job.conversationUrl || typeof this.automation.latestConversationUrl !== 'function') return false;
+    // The conversation URL was never seen (the page hung right after Send).
+    // This profile runs one job at a time, so a delivered first message is
+    // the newest conversation in the sidebar; adopt it only if it matches.
+    const latest = await this.automation.latestConversationUrl().catch(() => '');
+    if (!latest || latest === current?.url) return false;
+    await this.openConversation(latest);
+    if (await this.lastUserMessageMatches(text)) {
+      const conversation = await this.getCurrentConversation();
+      this.rememberConversation(job, conversation);
+      return true;
     }
+    await this.createConversation();
     return false;
   }
 
-  // Sends one message and waits for its reply, surviving verification pauses.
-  async jobExchange(job, text) {
-    let snap = null;
+  rememberConversation(job, conversation) {
+    if (!conversation?.conversationId || conversation.conversationId === job.conversationId) return;
+    job.conversationId = conversation.conversationId;
+    job.conversationUrl = conversation.url;
+    this.saveJobState(job, { conversation_id: job.conversationId, conversation_url: job.conversationUrl });
+    try { this.writeJobMeta(job.dir, { session_id: job.conversationId, chatgpt_url: job.conversationUrl }); } catch {}
+  }
+
+  // Durable per-job progress (jobs/<id>/chatgpt-state.json): the
+  // conversation, the message being exchanged, the reply being processed and
+  // the tool being run. A desktop restart resumes the job from it.
+  loadJobState(jobDir) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(jobDir, JOB_STATE_FILE), 'utf8'));
+      return data && typeof data === 'object' ? data : null;
+    } catch { return null; }
+  }
+
+  saveJobState(job, patch) {
+    try {
+      const file = path.join(job.dir, JOB_STATE_FILE);
+      job.state = { ...(job.state || this.loadJobState(job.dir) || {}), ...patch, updated: Date.now() / 1000 };
+      const temp = file + '.tmp-' + process.pid;
+      fs.writeFileSync(temp, JSON.stringify(job.state), 'utf8');
+      fs.renameSync(temp, file);
+    } catch {}
+  }
+
+  // Sends one message and waits for its reply, surviving verification pauses
+  // and page recoveries. With `resumeSnap` the message was already delivered
+  // (desktop restart) and only its reply is awaited.
+  async jobExchange(job, text, resumeSnap = null) {
+    let snap = resumeSnap;
     for (;;) {
       this.checkJobActive(job);
       try {
         if (!snap) {
           // Keep the baseline even if sending hangs after clicking Send.
           snap = await this.automation.assistantSnapshot();
+          this.saveJobState(job, { phase: 'sending', message: text, baseline: snapBaseline(snap) });
           await this.sendJobMessage(job, text);
+          this.saveJobState(job, { phase: 'awaiting' });
         }
         const current = await this.getCurrentConversation();
-        if (current?.conversationId) {
-          job.conversationId = current.conversationId;
-          job.conversationUrl = current.url;
-        }
+        this.rememberConversation(job, current);
         const reply = await this.automation.waitForAssistantReply({
           previousCount: snap.count,
           previousText: snap.text,
@@ -914,22 +1122,35 @@ class ChatGPTWebProvider {
         job.usage.chars_received += String(reply.text || '').length;
         this.recordJobUsage(job);
         const conversation = await this.getCurrentConversation().catch(() => null);
-        if (conversation?.conversationId) {
-          job.conversationId = conversation.conversationId;
-          job.conversationUrl = conversation.url;
-        }
+        this.rememberConversation(job, conversation);
+        // A reply arrived: the page works again, so a later hang gets a fresh
+        // set of recoveries.
+        job.consecutiveRecoveries = 0;
+        this.saveJobState(job, { phase: 'reply', reply: reply.text || '', message: null, baseline: null });
         return reply;
-      } catch (error) {
+      } catch (caught) {
+        let error = caught;
         if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') {
-          const delivered = await this.recoverJobPage(job, () => snap ? this.lastMessageDelivered(job, text) : false);
-          if (!delivered) snap = null;
-          continue;
+          try {
+            const delivered = await this.recoverJobPage(job, () => snap ? this.lastMessageDelivered(job, text) : false);
+            if (!delivered) {
+              if (snap) this.appendJobEvent(job.dir, 'info', 'the last message did not reach ChatGPT before the page hung; sending it again');
+              snap = null;
+            }
+            continue;
+          } catch (recoveryError) {
+            // The reload showed a verification or sign-in page: pause below.
+            if (!userActionKind(recoveryError)) throw recoveryError;
+            error = recoveryError;
+          }
         }
-        if (error?.code !== 'TEAMYRA_CHALLENGED') throw error;
-        await this.waitForChallengeResolution(job);
+        const kind = userActionKind(error);
+        if (!kind) throw error;
+        await this.waitForChallengeResolution(job, kind);
         if (!await this.lastMessageDelivered(job, text)) {
-          this.appendJobEvent(job.dir, 'info', 'last message was lost during verification; sending it again');
+          this.appendJobEvent(job.dir, 'info', 'last message was lost during the pause; sending it again');
           snap = await this.sendJobMessage(job, text);
+          this.saveJobState(job, { phase: 'awaiting', message: text, baseline: snapBaseline(snap) });
         }
       }
     }
@@ -937,17 +1158,22 @@ class ChatGPTWebProvider {
 
   async recoverJobPage(job, afterReload = null) {
     this.markPageUnresponsive();
-    while ((job.pageRecoveries || 0) < 2) {
+    const limit = this.maxConsecutiveRecoveries ?? MAX_CONSECUTIVE_PAGE_RECOVERIES;
+    const total = this.maxPageRecoveries ?? MAX_PAGE_RECOVERIES;
+    while ((job.consecutiveRecoveries || 0) < limit && (job.pageRecoveries || 0) < total) {
       this.checkJobActive(job);
       job.pageRecoveries = (job.pageRecoveries || 0) + 1;
+      job.consecutiveRecoveries = (job.consecutiveRecoveries || 0) + 1;
       this.writeJobMeta(job.dir, { page_recoveries: job.pageRecoveries, last_event: 'recovering unresponsive ChatGPT page' });
-      this.appendJobEvent(job.dir, 'page_recovery', `reloading profile (${job.pageRecoveries}/2)`);
+      this.appendJobEvent(job.dir, 'page_recovery',
+        `reloading the job conversation (attempt ${job.consecutiveRecoveries}/${limit}, ${job.pageRecoveries} this job)`);
+      if (job.consecutiveRecoveries > 1) {
+        await sleep(Math.min((this.recoveryBackoffMs ?? PAGE_RECOVERY_BACKOFF_MS) * (job.consecutiveRecoveries - 1),
+          Math.max(1, job.deadline - Date.now())));
+      }
       try {
         const current = await this.getCurrentConversation();
-        if (!job.conversationUrl && current?.conversationId) {
-          job.conversationId = current.conversationId;
-          job.conversationUrl = current.url;
-        }
+        if (!job.conversationUrl) this.rememberConversation(job, current);
         await this.reconnect();
         if (job.conversationUrl) await this.openConversation(job.conversationUrl);
         this.checkJobActive(job);
@@ -957,10 +1183,37 @@ class ChatGPTWebProvider {
         return result;
       } catch (error) {
         this.checkJobActive(job);
-        if (error?.code === 'TEAMYRA_CHALLENGED') throw error;
+        if (userActionKind(error)) throw error;
       }
     }
-    throw teamyraError('ChatGPT page unresponsive after two recoveries', 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+    throw teamyraError(`ChatGPT page unresponsive after ${job.consecutiveRecoveries || 0} reloads in a row` +
+      ` (${job.pageRecoveries || 0} this job)`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
+  }
+
+  // First exchange of a job resumed after a desktop restart, from its saved
+  // state. Nothing that already happened is repeated: a delivered message is
+  // not sent again, a received reply is processed as is, and a tool that was
+  // running is reported to ChatGPT as having an unknown outcome.
+  async resumeExchange(job, saved, bootstrap) {
+    if (saved.phase === 'reply' && typeof saved.reply === 'string' && saved.reply) {
+      this.appendJobEvent(job.dir, 'info', 'resume: processing the reply received before the restart');
+      return { text: saved.reply };
+    }
+    if (saved.phase === 'tool' && saved.request?.tool) {
+      this.appendJobEvent(job.dir, 'info', `resume: ${saved.request.tool} was running during the restart; reporting an unknown outcome`);
+      return this.jobExchange(job, 'TEAMYRA_TOOL_RESULT ' + JSON.stringify({
+        tool: saved.request.tool, result: { ok: false, error: UNKNOWN_TOOL_OUTCOME }
+      }) + '\nContinue the task.');
+    }
+    if ((saved.phase === 'sending' || saved.phase === 'awaiting') && saved.message) {
+      if (await this.lastMessageDelivered(job, saved.message)) {
+        this.appendJobEvent(job.dir, 'info', 'resume: the last message was delivered; waiting for its reply');
+        return this.jobExchange(job, saved.message, saved.baseline || { count: 0, text: '', messageId: '' });
+      }
+      this.appendJobEvent(job.dir, 'info', 'resume: the last message was not delivered; sending it again');
+      return this.jobExchange(job, saved.message);
+    }
+    return this.jobExchange(job, bootstrap);
   }
 
   dispatchQueuedJobs() {
@@ -981,12 +1234,23 @@ class ChatGPTWebProvider {
       usage: { chars_sent: 0, chars_received: 0, turns: 0 },
       isCancelled: () => fs.existsSync(path.join(jobDir, 'CANCEL')),
       conversationId: null,
-      conversationUrl: null
+      conversationUrl: null,
+      state: {},
+      pageRecoveries: 0,
+      consecutiveRecoveries: 0
     };
     try {
       const spec = JSON.parse(fs.readFileSync(path.join(jobDir, 'spec.json'), 'utf8'));
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
-      job.deadline = Date.now() + Number(spec.timeout || 3600) * 1000;
+      let startMeta = {};
+      try { startMeta = JSON.parse(fs.readFileSync(path.join(jobDir, 'meta.json'), 'utf8')); } catch {}
+      // A job interrupted by a desktop restart continues where it stopped,
+      // in the same conversation and within its original time budget.
+      const resume = startMeta.resume_requested === true ? this.loadJobState(jobDir) : null;
+      if (resume) job.state = resume;
+      job.usage = { ...job.usage, ...(resume && startMeta.usage ? startMeta.usage : {}) };
+      const startedMs = resume && Number(startMeta.started) ? Number(startMeta.started) * 1000 : Date.now();
+      job.deadline = startedMs + Number(spec.timeout || 3600) * 1000;
       const workspaceState = await this.workspaceBridge.status().catch(() => null);
       const assignedWorkspace = path.resolve(spec.cwd || '');
       if (!assignedWorkspace || !fs.existsSync(assignedWorkspace) || !fs.statSync(assignedWorkspace).isDirectory()) {
@@ -998,11 +1262,13 @@ class ChatGPTWebProvider {
       };
       const fullAccess = taskPermissions.full_access === true || workspaceState?.full_access === true;
 
-      const requestedConversation = spec.session_id
-        ? { conversationId: spec.session_id }
-        : null;
+      const requestedConversation = resume?.conversation_id
+        ? { conversationId: resume.conversation_id, url: resume.conversation_url }
+        : spec.session_id ? { conversationId: spec.session_id } : null;
       job.conversationId = requestedConversation?.conversationId || null;
-      job.conversationUrl = job.conversationId ? CHATGPT_HOME + 'c/' + job.conversationId : null;
+      job.conversationUrl = requestedConversation?.url ||
+        (job.conversationId ? CHATGPT_HOME + 'c/' + job.conversationId : null);
+      if (job.conversationId) this.saveJobState(job, { conversation_id: job.conversationId, conversation_url: job.conversationUrl });
       try {
         if (job.conversationUrl) await this.openConversation(job.conversationUrl);
         else await this.createConversation();
@@ -1012,9 +1278,13 @@ class ChatGPTWebProvider {
         await this.recoverJobPage(job);
       }
       this.writeJobMeta(jobDir, {
-        state: 'running', started: Date.now() / 1000, runner_pid: null, attention: null, usage: { ...job.usage }
+        state: 'running', ...(resume ? {} : { started: Date.now() / 1000 }), runner_pid: null, attention: null,
+        resume_requested: false, not_ready_since: null, usage: { ...job.usage },
+        last_event: resume ? 'running: resumed after a desktop restart' : 'running: embedded ChatGPT worker started'
       });
-      this.appendJobEvent(jobDir, 'info', 'embedded ChatGPT worker started');
+      this.appendJobEvent(jobDir, 'info', resume
+        ? 'embedded ChatGPT worker resumed the job in its conversation after a desktop restart'
+        : 'embedded ChatGPT worker started');
 
       const bootstrap = [
         'You are Teamyra Worker — ChatGPT, operating on a local project through controlled TEAMYRA tools.',
@@ -1039,12 +1309,19 @@ class ChatGPTWebProvider {
         task
       ].join('\n');
 
-      let reply = await this.jobExchange(job, bootstrap);
-      let parseFailures = 0;
-      let protocolRecoveries = 0;
-      let successfulTools = 0;
+      let parseFailures = Number(resume?.parse_failures) || 0;
+      let protocolRecoveries = Number(resume?.protocol_recoveries) || 0;
+      let successfulTools = Number(resume?.successful_tools) || 0;
+      const firstStep = Number(resume?.step) || 0;
+      const counters = step => ({
+        step, parse_failures: parseFailures, protocol_recoveries: protocolRecoveries, successful_tools: successfulTools
+      });
+      let reply = resume?.phase
+        ? await this.resumeExchange(job, resume, bootstrap)
+        : await this.jobExchange(job, bootstrap);
 
-      for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
+      for (let step = firstStep; step < MAX_TOOL_STEPS; step += 1) {
+        this.saveJobState(job, counters(step));
         if (job.isCancelled()) {
           await this.stopGeneration().catch(() => {});
           state = 'cancelled';
@@ -1104,6 +1381,9 @@ class ChatGPTWebProvider {
         const request = parsed.request;
 
         this.appendJobEvent(jobDir, 'command', request.tool + ' ' + JSON.stringify(request.args).slice(0, 1000));
+        // Recorded before the tool runs: a restart mid-tool must not run it
+        // a second time; ChatGPT is told its outcome is unknown instead.
+        this.saveJobState(job, { phase: 'tool', request, reply: null });
         let toolResult;
         try {
           if (spec.write === false && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {

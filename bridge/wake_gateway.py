@@ -29,6 +29,7 @@ SHUTDOWN_PATH = "/__teamyra_shutdown"
 DEFAULT_IDLE_SECONDS = 600
 MAX_BODY = 4 * 1024 * 1024
 ACTIVE_JOB_STATES = {"queued", "starting", "running", "waiting", "waiting_for_desktop"}
+CHATGPT_ACTIVE_STATES = {"queued", "starting", "running", "waiting_for_desktop", "needs_user"}
 
 
 def _json_bytes(value):
@@ -100,7 +101,13 @@ def active_jobs(runtime_root, max_age=600):
             data = json.loads(meta.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(data.get("state") or "").lower() not in ACTIVE_JOB_STATES:
+        state = str(data.get("state") or "").lower()
+        # An unfinished ChatGPT job needs the core's scheduler however long it
+        # has waited: the scheduler is what restarts TEAMYRA Desktop for it.
+        if (data.get("provider") == "chatgpt-web" and state in CHATGPT_ACTIVE_STATES
+                and not (meta.parent / "DONE").exists()):
+            return True
+        if state not in ACTIVE_JOB_STATES:
             continue
         if process_alive(data.get("runner_pid")) or process_alive(data.get("worker_pid")):
             return True

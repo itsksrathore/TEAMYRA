@@ -16,6 +16,54 @@ const CHALLENGE_DETECT_JS = `((promptPresent) => {
   if ([...document.querySelectorAll('[role="dialog"], dialog[open]')].some(node => has(node.innerText || node.textContent))) return true;
   return !promptPresent && has((document.body?.innerText || '').slice(0, 12000));
 })`;
+// Browser-side conversation turns. ChatGPT has rendered turns in several
+// ways: `data-message-author-role` nodes, and (current, Nov 2026) unit
+// containers `[data-content-search-unit-key$=":user|:assistant"]` that carry
+// the message id in `data-chatgpt-search-message-ids` and contain a
+// `[data-markdown-text-style]` body only once the reply is rendered. History
+// is virtualized ("Loading older messages…"), so counts are unreliable and
+// the message id is what identifies a turn. `teamyraTurns(role)` returns the
+// turn containers of that role in document order.
+const TURNS_JS = `
+  const teamyraUnitSelector = role => '[data-content-search-unit-key$=":' + role + '"], [data-chatgpt-search-unit-key$=":' + role + '"], [data-message-author-role="' + role + '"]';
+  const teamyraTurns = role => {
+    const seen = new Set();
+    const out = [];
+    for (const node of document.querySelectorAll(teamyraUnitSelector(role))) {
+      const unit = node.closest('[data-content-search-unit-key], [data-chatgpt-search-unit-key]') || node;
+      if (!seen.has(unit)) { seen.add(unit); out.push(unit); }
+    }
+    return out;
+  };
+  const teamyraTurnId = unit => {
+    const ids = (unit.getAttribute('data-chatgpt-search-message-ids') || '').trim().split(/\\s+/).filter(Boolean);
+    const inner = unit.querySelector('[data-message-id]');
+    const turn = unit.closest('[data-testid^="conversation-turn-"], [data-turn-id], article');
+    return ids[0] || unit.getAttribute('data-message-id') || inner?.getAttribute('data-message-id') ||
+      unit.closest('[data-message-id]')?.getAttribute('data-message-id') ||
+      turn?.getAttribute('data-turn-id') || turn?.getAttribute('data-testid') || turn?.id || '';
+  };
+  const teamyraText = (unit, prefix) => {
+    const bodies = [...unit.querySelectorAll('[data-markdown-text-style="assistant-message"]')];
+    const text = bodies.length
+      ? bodies.map(node => (node.innerText || node.textContent || '').trim()).filter(Boolean).join('\\n\\n')
+      : (unit.innerText || unit.textContent || '').trim();
+    return text.replace(prefix, '').trim();
+  };
+`;
+// Browser-side signed-out detection. Only ChatGPT's own sign-in controls count,
+// never conversation content: a task, file or reply may well say "log in" or
+// link to an OAuth page (that used to fail jobs with "sign-in is required").
+const LOGIN_DETECT_JS = `(() => {
+  if (/^https:\\/\\/auth(0)?\\.openai\\.com\\//.test(location.href)) return true;
+  const inContent = node => !!node.closest('[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key], [data-testid^="conversation-turn-"], article, .markdown, [class*="markdown"]');
+  const visible = node => { const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const controls = [...document.querySelectorAll('button[data-testid="login-button"], button[data-testid="signup-button"], a[data-testid="login-button"], a[data-testid="signup-button"]')];
+  if (controls.some(node => !inContent(node) && visible(node))) return true;
+  const labels = /^(log in|sign up|sign up for free|sign in)$/i;
+  return [...document.querySelectorAll('header button, header a, nav button, nav a, [role="banner"] button, [role="banner"] a, [role="dialog"] button')]
+    .some(node => !inContent(node) && visible(node) && labels.test((node.innerText || node.textContent || '').trim()));
+})()`;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -96,13 +144,29 @@ function repairStringBody(raw, pathLike) {
       out += '\\\\';
       continue;
     }
-    if (char === '\n') out += '\\n';
+    if (char === '"') out += '\\"';
+    else if (char === '\n') out += '\\n';
     else if (char === '\r') out += '\\r';
     else if (char === '\t') out += '\\t';
     else if (char < ' ') out += '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0');
     else out += char;
   }
   return out;
+}
+
+// A quote at `at` ends a JSON string only if what follows is JSON structure:
+// a colon, a closing bracket, the end, or a comma before the next key/value.
+function closesJsonString(text, at) {
+  let index = at + 1;
+  while (index < text.length && /\s/.test(text[index])) index += 1;
+  if (index >= text.length) return true;
+  const next = text[index];
+  if (next === ':' || next === '}' || next === ']') return true;
+  if (next !== ',') return false;
+  index += 1;
+  while (index < text.length && /\s/.test(text[index])) index += 1;
+  if (index >= text.length || /["{[\]}\d-]/.test(text[index])) return true;
+  return /^(?:true|false|null)\s*[,}\]]/.test(text.slice(index, index + 8));
 }
 
 // Re-serializes JSON-ish object text: repairs invalid escapes and raw control
@@ -115,7 +179,11 @@ function repairToolJson(text) {
     const char = text[index];
     if (char === '"') {
       let end = index + 1;
-      while (end < text.length && text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+      for (;;) {
+        while (end < text.length && text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+        if (end >= text.length || closesJsonString(text, end)) break;
+        end += 1; // an unescaped quote inside the value ("say "hi"") is content
+      }
       const raw = text.slice(index + 1, Math.min(end, text.length));
       const frame = stack[stack.length - 1];
       let rest = end + 1;
@@ -214,9 +282,8 @@ class ChatGPTAutomationAdapter {
   async probe() {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
-      const bodyText = (document.body?.innerText || '').slice(0, 12000).toLowerCase();
       const challenged = ${CHALLENGE_DETECT_JS}(!!prompt);
-      const loginVisible = !!document.querySelector('a[href*="auth"], button[data-testid*="login"]') || /log in|sign up/.test(bodyText.slice(0, 3000));
+      const loginVisible = ${LOGIN_DETECT_JS};
       return { promptFound: !!prompt, challenged, loginVisible, url: location.href, title: document.title };
     })()`);
   }
@@ -233,18 +300,17 @@ class ChatGPTAutomationAdapter {
   }
 
   async lastUserMessage() {
-    return this.evaluate(`(() => {
-      const nodes = [...document.querySelectorAll('[data-message-author-role="user"]')];
-      const last = nodes.filter(node => (node.innerText || node.textContent || '').trim()).at(-1);
-      return last ? (last.innerText || last.textContent || '').trim() : '';
+    return this.evaluate(`(() => {${TURNS_JS}
+      const texts = teamyraTurns('user').map(unit => teamyraText(unit, /^You said:\\s*/i)).filter(Boolean);
+      return texts.at(-1) || '';
     })()`);
   }
 
   async sendTask(text) {
     const payload = JSON.stringify(String(text || ''));
-    const initial = await this.evaluate(`(() => {
+    const initial = await this.evaluate(`(() => {${TURNS_JS}
       const value = ${payload};
-      const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+      const assistantCount = teamyraTurns('assistant').length;
       const prompt = document.querySelector(
         '#prompt-textarea, textarea[data-testid*="prompt"], [contenteditable="true"][data-testid*="prompt"], [contenteditable="true"].ProseMirror, main form [contenteditable="true"], main [contenteditable="true"]'
       );
@@ -306,14 +372,14 @@ class ChatGPTAutomationAdapter {
     } catch {}
 
     await sleep(350);
-    const fallback = await this.evaluate(`(() => {
+    const fallback = await this.evaluate(`(() => {${TURNS_JS}
       const prompt = document.querySelector(
         '#prompt-textarea, textarea[data-testid*="prompt"], [contenteditable="true"][data-testid*="prompt"], [contenteditable="true"].ProseMirror, main form [contenteditable="true"], main [contenteditable="true"]'
       );
       const currentText = prompt
         ? (prompt instanceof HTMLTextAreaElement || prompt instanceof HTMLInputElement ? prompt.value : prompt.innerText || prompt.textContent || '')
         : '';
-      const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+      const assistantCount = teamyraTurns('assistant').length;
       const generating = !!document.querySelector(
         'button[data-testid="stop-button"], button[data-testid*="stop"], button[aria-label*="Stop generating"], button[aria-label*="Stop"], button[aria-label*="stop"]'
       );
@@ -337,40 +403,67 @@ class ChatGPTAutomationAdapter {
   }
 
   async assistantSnapshot() {
-    return this.evaluate(`(() => {
-      let nodes = [...document.querySelectorAll('[data-markdown-text-style="assistant-message"]')];
-      let messages = nodes.map(node => (node.innerText || node.textContent || '').trim()).filter(Boolean);
-
-      if (!messages.length) {
-        nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-        messages = nodes.map(node => (node.innerText || node.textContent || '').trim()).filter(Boolean);
+    return this.evaluate(`(() => {${TURNS_JS}
+      const turnOf = node => node?.closest('[data-content-search-unit-key], [data-chatgpt-search-unit-key], [data-testid^="conversation-turn-"], [data-turn-id], article');
+      // Generated images count as reply content: an image-only reply has no
+      // text, and used to be treated as "no reply yet" until the job failed.
+      const imagesOf = node => {
+        const scope = turnOf(node) || node;
+        return scope ? [...scope.querySelectorAll('img')].filter(img => {
+          const rect = img.getBoundingClientRect();
+          return Math.max(rect.width, img.naturalWidth || 0) >= 128 && Math.max(rect.height, img.naturalHeight || 0) >= 128;
+        }).length : 0;
+      };
+      const withImages = (node, text) => {
+        const images = imagesOf(node);
+        return !text && images ? '[ChatGPT replied with ' + images + ' generated image' + (images === 1 ? '' : 's') + ']' : text;
+      };
+      // Turn containers first: they exist for every reply, including the one
+      // streaming now. Picking "the first selector that matches anything"
+      // read a stale older message while a new reply had no markdown body yet.
+      let nodes = teamyraTurns('assistant');
+      let messages = nodes.map(unit => withImages(unit, teamyraText(unit, /^ChatGPT said:\\s*/i)));
+      if (!messages.some(Boolean)) {
+        nodes = [...document.querySelectorAll('[data-markdown-text-style="assistant-message"], main .markdown.prose, main [class*="markdown"][class*="prose"]')];
+        messages = nodes.map(node => withImages(node, (node.innerText || node.textContent || '').trim()));
       }
-
-      if (!messages.length) {
-        nodes = [...document.querySelectorAll(
-          '[data-content-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":assistant"]'
-        )];
-        messages = nodes.map(node => {
-          const text = (node.innerText || node.textContent || '').trim();
-          return text.replace(/^ChatGPT said:\\s*/i, '').trim();
-        }).filter(Boolean);
-      }
-
-      if (!messages.length) {
-        nodes = [...document.querySelectorAll('main .markdown.prose, main [class*="markdown"][class*="prose"]')];
-        messages = nodes.map(node => (node.innerText || node.textContent || '').trim()).filter(Boolean);
-      }
+      const kept = nodes.map((node, index) => [node, messages[index]]).filter(([, text]) => text);
+      nodes = kept.map(([node]) => node);
+      messages = kept.map(([, text]) => text);
 
       const generating = !!document.querySelector(
         'button[data-testid="stop-button"], button[data-testid*="stop"], button[aria-label*="Stop generating"], button[aria-label*="Stop"], button[aria-label*="stop"]'
       );
-      const last = nodes.filter(node => (node.innerText || node.textContent || '').trim()).at(-1);
-      const turn = last?.closest('[data-testid^="conversation-turn-"], [data-turn-id], article');
-      const messageId = last?.getAttribute('data-message-id') ||
-        last?.closest('[data-message-id]')?.getAttribute('data-message-id') ||
-        turn?.getAttribute('data-turn-id') || turn?.getAttribute('data-testid') || turn?.id || '';
+      const last = nodes.at(-1);
+      const messageId = last ? teamyraTurnId(turnOf(last) || last) || teamyraTurnId(last) : '';
+      // Any change in the newest turn (thinking text, an image rendering in)
+      // is progress, even before the reply has text.
+      const turns = [...teamyraTurns('user'), ...teamyraTurns('assistant')];
+      const legacy = document.querySelectorAll('[data-testid^="conversation-turn-"], [data-turn-id]');
+      const newest = teamyraTurns('assistant').at(-1) || legacy[legacy.length - 1];
+      const activity = (turns.length || legacy.length) + ':' + (newest ? newest.innerHTML.length : 0);
       const challenged = ${CHALLENGE_DETECT_JS}(!!document.querySelector(${JSON.stringify(PROMPT_SELECTOR)}));
-      return { count:messages.length, text:messages[messages.length - 1] || '', messageId, generating, challenged };
+      return { count:messages.length, text:messages[messages.length - 1] || '', messageId, generating, challenged,
+        images: last ? imagesOf(last) : 0, activity };
+    })()`);
+  }
+
+  // URL of the newest conversation in the sidebar, or ''. Used after a reload
+  // when the job's conversation URL was never observed.
+  async latestConversationUrl() {
+    // Pinned chats are listed first; the newest chat is the first link after
+    // the "Recents" heading (or after "Chats" in older layouts).
+    return this.evaluate(`(() => {
+      const links = [...document.querySelectorAll('nav a[href*="/c/"], aside a[href*="/c/"]')];
+      // The sidebar also holds hidden copies of the headings before the
+      // pinned list; the section heading is the last one.
+      const heading = [...document.querySelectorAll('nav *, aside *')].filter(node =>
+        node.children.length === 0 && /^(recents|chats)$/i.test((node.textContent || '').trim())).at(-1);
+      const after = heading
+        ? links.find(link => heading.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING)
+        : null;
+      const link = after || (heading ? null : links[0]);
+      return link ? new URL(link.getAttribute('href'), location.href).href : '';
     })()`);
   }
 
@@ -401,7 +494,7 @@ class ChatGPTAutomationAdapter {
       }
       const snap = await this.assistantSnapshot();
       lastSnap = snap;
-      const signature = JSON.stringify([snap.count, snap.messageId, snap.text]);
+      const signature = JSON.stringify([snap.count, snap.messageId, snap.text, snap.activity ?? null]);
       if (signature !== lastSignature || snap.generating) lastProgressAt = Date.now();
       lastSignature = signature;
       if (shouldRecover?.() || (!snap.generating && Date.now() - lastProgressAt >= noProgressMs)) {

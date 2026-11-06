@@ -98,6 +98,16 @@ def chatgpt_ready(root, info):
     return bool(account.get("automation_ready") or account.get("session_present"))
 
 
+# States in which an unfinished chatgpt-web job needs TEAMYRA Desktop running.
+DESKTOP_NEEDED_STATES = {QUEUED, "waiting_for_desktop", "needs_user", "running", "starting"}
+
+
+def chatgpt_jobs_needing_desktop(metas):
+    """Unfinished chatgpt-web jobs that only TEAMYRA Desktop can move forward."""
+    return [m for m in metas if m.get("provider") in DESKTOP_PROVIDERS and not m.get("_done")
+            and str(m.get("state") or "") in DESKTOP_NEEDED_STATES]
+
+
 def _reassign_job(root, meta, worker, info):
     """Publish spec before meta while the dispatch lock protects the pair.
 
@@ -564,8 +574,13 @@ _LOOP_STARTED = {}
 _LOOP_GUARD = threading.Lock()
 
 
-def start_background_dispatcher(root, bridge=None, python_exe=None, spawn=None, is_ready=None, interval=5.0):
-    """Start one daemon thread per root that calls dispatch_once every ``interval`` seconds."""
+def start_background_dispatcher(root, bridge=None, python_exe=None, spawn=None, is_ready=None, interval=5.0,
+                                on_tick=None):
+    """Start one daemon thread per root that calls dispatch_once every ``interval`` seconds.
+
+    ``on_tick(root)`` runs after every dispatch (for example to wake TEAMYRA
+    Desktop for ChatGPT jobs); its errors are logged and never stop the loop.
+    """
     key = str(Path(root).resolve())
     with _LOOP_GUARD:
         if _LOOP_STARTED.get(key):
@@ -579,6 +594,11 @@ def start_background_dispatcher(root, bridge=None, python_exe=None, spawn=None, 
                 dispatch_once(root, bridge, python_exe, spawn=spawn, is_ready=is_ready, lock_timeout=2)
             except Exception as exc:
                 print("TEAMYRA scheduler error:", exc, file=sys.stderr, flush=True)
+            if on_tick is not None:
+                try:
+                    on_tick(root)
+                except Exception as exc:
+                    print("TEAMYRA scheduler tick error:", exc, file=sys.stderr, flush=True)
             stop.wait(max(0.5, float(interval)))
 
     threading.Thread(target=loop, daemon=True, name="teamyra-scheduler").start()

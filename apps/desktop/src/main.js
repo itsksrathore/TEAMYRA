@@ -409,7 +409,9 @@ function listJobs(limit = 30) {
           heartbeatAt: data.heartbeat_at || 0,
           runnerPid: data.runner_pid || 0,
           workerPid: data.worker_pid || 0,
-          lastEvent: data.last_event || ''
+          lastEvent: data.last_event || '',
+          provider: data.provider || '',
+          done: fs.existsSync(path.join(JOBS, entry.name, 'DONE'))
         };
       } catch {
         return null;
@@ -432,6 +434,11 @@ function pidAlive(pid) {
 }
 
 function jobBlocksDesktopSleep(job) {
+  // An unfinished ChatGPT job needs this desktop however long it has waited:
+  // its worker lives here, and an idle exit used to strand queued and
+  // waiting jobs for hours with nothing left to pick them up.
+  if (job?.provider === 'chatgpt-web' && !job.done &&
+      ['queued', 'starting', 'running', 'waiting_for_desktop', 'needs_user'].includes(job.state)) return true;
   const activeStates = new Set(['queued', 'starting', 'running', 'waiting_for_desktop', 'waiting']);
   if (!activeStates.has(job?.state)) return false;
   if (pidAlive(job.runnerPid) || pidAlive(job.workerPid)) return true;
@@ -454,7 +461,7 @@ function hasActiveDesktopWork() {
     })) return true;
   } catch {}
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
-  if ([...chatgptProviders.values()].some(provider => provider.busy === true)) return true;
+  if ([...chatgptProviders.values()].some(provider => provider.busy === true || provider.hasPendingWork?.())) return true;
   if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumers?.().some(consumer => consumer.busy === true) || runtime.vidsConsumers?.().some(consumer => consumer.busy === true) || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
   // Google Vids work (and the developer Vids tool) keeps the desktop awake.
   if (Date.now() - (globalThis.__teamyraVidsActiveAt || 0) < DESKTOP_IDLE_SECONDS * 1000) return true;

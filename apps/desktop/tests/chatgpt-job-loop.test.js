@@ -39,6 +39,14 @@ class FakeChat extends ChatGPTAutomationAdapter {
   }
 
   async probe() {
+    if (this.signedOutProbes > 0) {
+      this.signedOutProbes -= 1;
+      return { promptFound: true, challenged: false, loginVisible: true };
+    }
+    if (this.promptMissingProbes > 0) {
+      this.promptMissingProbes -= 1;
+      return { promptFound: false, challenged: false, loginVisible: false };
+    }
     if (this.challengeProbes > 0) {
       this.challengeProbes -= 1;
       return { promptFound: false, challenged: true, loginVisible: false };
@@ -51,6 +59,8 @@ class FakeChat extends ChatGPTAutomationAdapter {
     this.users.push(text);
     const item = this.script.shift();
     this.pending = typeof item === 'string' ? { text: item } : { ...item };
+    // `hang`: the next N page calls after sending time out (a hung page).
+    if (this.pending.hang) this.hangSnaps = this.pending.hang;
     if (this.pending.challenge) {
       this.challengeSnaps = this.pending.challenge.snaps ?? 1;
       this.challengeProbes = this.pending.challenge.probes ?? 2;
@@ -63,6 +73,12 @@ class FakeChat extends ChatGPTAutomationAdapter {
   }
 
   async assistantSnapshot() {
+    if (this.hangSnaps > 0) {
+      this.hangSnaps -= 1;
+      const error = new Error('ChatGPT executeJavaScript timed out');
+      error.code = 'TEAMYRA_PAGE_UNRESPONSIVE';
+      throw error;
+    }
     if (this.challengeSnaps > 0) {
       this.challengeSnaps -= 1;
       return { ...this.current, generating: false, challenged: true };
@@ -100,6 +116,11 @@ function makeProvider(fake, { permissions } = {}) {
   provider.view = { webContents: { isDestroyed: () => false } };
   provider.automation = fake;
   provider.replyPollMs = 1;
+  provider.promptWaitMs = 5;
+  provider.renderWaitMs = 200;
+  provider.recoveryBackoffMs = 1;
+  provider.reconnects = 0;
+  provider.reconnect = async () => { provider.reconnects += 1; };
   provider.challengePollMs = 1;
   provider.resumePollMs = 1;
   provider.progressIntervalMs = 1;
@@ -389,16 +410,235 @@ async function testWorkerChallengedBeforePickupMarksWaitingJobs() {
   assert.equal(provider.notes.length, 1, 'notify once, not on every scan');
   assert.deepEqual(ran, []);
 
+  // Signed out: a human must act, so the waiting job says so in attention.
   provider.refreshStatus = async () => ({ workerReady: false, challenged: false, loginVisible: true });
   await provider.processPendingJobsOnce();
   meta = readMeta(dir);
-  assert.equal(meta.attention, null);
+  assert.equal(meta.attention.kind, 'chatgpt_sign_in');
   assert.match(meta.last_event, /sign-in/);
+  assert.equal(provider.notes.at(-1), 'TEAMYRA: ChatGPT sign-in needed');
 
   provider.refreshStatus = async () => ({ workerReady: true });
   await provider.processPendingJobsOnce();
   assert.deepEqual(ran, [dir]);
   fs.writeFileSync(path.join(dir, 'DONE'), 'done');
+}
+
+// Regression (8 jobs, e.g. 1008-104822-...-c230): a sign-out mid-job used to
+// fail the job. Now it pauses as needs_user and resumes in the conversation.
+async function testSignOutMidJobPausesAndResumes() {
+  const fake = new FakeChat([
+    'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"a.txt"}}',
+    'Finished after signing in again.'
+  ]);
+  const provider = makeProvider(fake);
+  const exec = provider.workspaceBridge.executeInWorkspace;
+  // Signed out exactly when the tool result is about to be sent.
+  provider.workspaceBridge.executeInWorkspace = async (...args) => { fake.signedOutProbes = 3; return exec(...args); };
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  const paused = provider.metaHistory.find(patch => patch.state === 'needs_user');
+  assert.equal(paused.reason, 'chatgpt_sign_in');
+  assert.equal(paused.attention.kind, 'chatgpt_sign_in');
+  assert.equal(fake.sent.length, 2, 'the tool result is sent once, after sign-in');
+  assert.ok(provider.notes.includes('TEAMYRA: ChatGPT sign-in needed'));
+}
+
+// Regression (1006-154556-...-7b29, 1007-070442-...-c9c0): "ChatGPT prompt is
+// unavailable" 20 s after start failed the job. Now the page is reloaded.
+async function testMissingPromptReloadsInsteadOfFailing() {
+  const fake = new FakeChat(['Finished.']);
+  fake.promptMissingProbes = 1000;
+  const provider = makeProvider(fake);
+  provider.reconnect = async () => { provider.reconnects += 1; fake.promptMissingProbes = 0; };
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.equal(provider.reconnects, 1);
+  assert.equal(fake.sent.length, 1, 'the message was not delivered before, so it is sent exactly once');
+}
+
+// Regression (1027-183622-...-4112: chars_sent 7179 over 3 turns): a hung page
+// after Send must not submit the same message again once it was delivered.
+async function testHangAfterDeliveredMessageDoesNotResend() {
+  const fake = new FakeChat([{ text: 'Done once.', hang: 2 }]);
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'done');
+  assert.equal(fake.sent.length, 1);
+  assert.equal(meta.usage.turns, 1);
+  assert.equal(provider.reconnects, 2);
+  assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Done once.');
+}
+
+// Regression (4112: "page unresponsive after two recoveries"): the budget is
+// per hang streak, so a long job survives several separate hangs ...
+async function testRecoveryBudgetResetsAfterEachReply() {
+  const request = 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"a.txt"}}';
+  const fake = new FakeChat([{ text: request, hang: 2 }, { text: request, hang: 2 }, { text: 'Finished.', hang: 2 }]);
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'done');
+  assert.equal(meta.page_recoveries, 6);
+  assert.equal(fake.sent.length, 3);
+  // ... but a page that never comes back still fails honestly.
+  const stuck = new FakeChat([{ text: 'never', hang: 1000 }]);
+  const stuckDir = makeJob();
+  await makeProvider(stuck).runDelegatedJob(stuckDir);
+  const failed = readMeta(stuckDir);
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.reason, 'page_unresponsive');
+  assert.match(failed.last_event, /3 reloads in a row/);
+  assert.equal(stuck.sent.length, 1);
+}
+
+function interruptedJob(state, meta = {}) {
+  const dir = makeJob({}, { state: 'running', started: Date.now() / 1000,
+    usage: { chars_sent: 10, chars_received: 5, turns: 1 }, ...meta });
+  if (state) fs.writeFileSync(path.join(dir, 'chatgpt-state.json'), JSON.stringify(state));
+  return dir;
+}
+
+// Regression (desktop_interrupted, e.g. 1006-154557-...-04cc after 11 h): a
+// desktop restart now resumes the job in its conversation, without repeating
+// a delivered message or a tool that was running.
+async function testDesktopRestartResumesTheJob() {
+  const conversation = { conversation_id: 'conv1', conversation_url: 'https://chatgpt.com/c/conv1', successful_tools: 2, step: 4 };
+  // A tool was running when the desktop died: it is not run again.
+  const toolDir = interruptedJob({ ...conversation, phase: 'tool', request: { tool: 'terminal.run', args: { argv: ['npm', 'test'] } } });
+  makeProvider(new FakeChat([])).recoverInterruptedJobs();
+  let meta = readMeta(toolDir);
+  assert.equal(meta.state, 'waiting_for_desktop');
+  assert.equal(meta.resume_requested, true);
+  assert.equal(meta.desktop_resumes, 1);
+  assert.ok(!fs.existsSync(path.join(toolDir, 'DONE')));
+  const fake = new FakeChat(['Finished after the restart.']);
+  const provider = makeProvider(fake);
+  await provider.runDelegatedJob(toolDir);
+  meta = readMeta(toolDir);
+  assert.equal(meta.state, 'done');
+  assert.equal(provider.toolCalls.length, 0, 'the interrupted tool must not run twice');
+  assert.ok(fake.sent[0].startsWith('TEAMYRA_TOOL_RESULT '));
+  assert.match(fake.sent[0], /outcome is unknown/);
+  assert.deepEqual(provider.opened, ['https://chatgpt.com/c/conv1']);
+  assert.equal(meta.resume_requested, false);
+  assert.equal(meta.usage.turns, 2, 'usage continues from before the restart');
+
+  // The last message was delivered: only its reply is awaited.
+  const message = 'TEAMYRA_TOOL_RESULT {"tool":"x"}';
+  const sentDir = interruptedJob({ ...conversation, phase: 'awaiting', message,
+    baseline: { count: 3, text: 'before', messageId: 'turn-3' } });
+  makeProvider(new FakeChat([])).recoverInterruptedJobs();
+  const delivered = new FakeChat([]);
+  delivered.users.push(message);
+  delivered.current = { count: 4, text: 'Reply that arrived during the restart.', messageId: 'turn-4' };
+  await makeProvider(delivered).runDelegatedJob(sentDir);
+  assert.equal(readMeta(sentDir).state, 'done');
+  assert.equal(delivered.sent.length, 0, 'a delivered message is never sent twice');
+  assert.equal(fs.readFileSync(path.join(sentDir, 'final.txt'), 'utf8'), 'Reply that arrived during the restart.');
+
+  // Regression (live run 1106-092925-...-ad0b): after a cold desktop start the
+  // conversation rendered after the delivered-check gave up, so a delivered
+  // tool result was sent twice. An empty conversation is waited for.
+  const lateDir = interruptedJob({ ...conversation, phase: 'awaiting', message,
+    baseline: { count: 3, text: 'before', messageId: 'turn-3' } });
+  makeProvider(new FakeChat([])).recoverInterruptedJobs();
+  const late = new FakeChat([]);
+  late.users.push(message);
+  late.current = { count: 4, text: 'Reply rendered late.', messageId: 'turn-4' };
+  let renders = 0;
+  const lastUser = late.lastUserMessage.bind(late);
+  late.lastUserMessage = async () => (++renders <= 6 ? '' : lastUser());
+  const lateProvider = makeProvider(late);
+  lateProvider.renderWaitMs = 5000;
+  await lateProvider.runDelegatedJob(lateDir);
+  assert.equal(readMeta(lateDir).state, 'done');
+  assert.equal(late.sent.length, 0, 'a delivered message that renders late is not sent again');
+  assert.ok(renders > 6);
+  assert.equal(readMeta(lateDir).last_event, 'done: embedded ChatGPT completed');
+
+  // A reply that was received but not processed yet is processed as is.
+  const replyDir = interruptedJob({ ...conversation, phase: 'reply',
+    reply: 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"b.txt"}}' });
+  makeProvider(new FakeChat([])).recoverInterruptedJobs();
+  const replyProvider = makeProvider(new FakeChat(['Finished.']));
+  await replyProvider.runDelegatedJob(replyDir);
+  assert.equal(readMeta(replyDir).state, 'done');
+  assert.deepEqual(replyProvider.toolCalls.map(call => call.args), [{ path: 'b.txt' }]);
+
+  // Tools ran but the conversation is unknown, or too many restarts: fail honestly.
+  const lostDir = interruptedJob({ phase: 'tool', successful_tools: 3, request: { tool: 'git.status', args: {} } });
+  const limitDir = interruptedJob({ ...conversation, phase: 'reply', reply: 'x' }, { desktop_resumes: 3 });
+  makeProvider(new FakeChat([])).recoverInterruptedJobs();
+  for (const dir of [lostDir, limitDir]) {
+    meta = readMeta(dir);
+    assert.equal(meta.state, 'failed');
+    assert.equal(meta.reason, 'desktop_interrupted');
+    assert.ok(fs.existsSync(path.join(dir, 'DONE')));
+  }
+}
+
+// Regression (1027-191533-...-e9f9 waited 13 h; 1008-130743-...-0318 7 h): a
+// waiting job past its time budget fails with the reason it waited.
+async function testWaitingJobPastDeadlineFailsWithReason() {
+  const provider = makeProvider(new FakeChat([]));
+  provider.refreshStatus = async () => ({ workerReady: false });
+  const old = makeJob({}, { dispatched_at: Date.now() / 1000 - 7200, timeout_s: 3600,
+    last_event: 'waiting: embedded ChatGPT worker is not ready' });
+  await provider.processPendingJobsOnce();
+  const meta = readMeta(old);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'timeout');
+  assert.match(meta.last_event, /timed out waiting for the embedded ChatGPT worker \(embedded ChatGPT worker is not ready\)/);
+  assert.ok(fs.existsSync(path.join(old, 'DONE')));
+}
+
+// Regression (e9f9): a worker that is loaded but never shows a usable prompt
+// is reloaded instead of leaving the jobs waiting; and while jobs wait, the
+// provider reports pending work so the desktop does not idle-exit.
+async function testNotReadyWorkerIsReloaded() {
+  const provider = makeProvider(new FakeChat([]));
+  provider.notReadyHealMs = 0;
+  provider.healIntervalMs = 0;
+  let ready = false;
+  provider.reconnect = async () => { provider.reconnects += 1; ready = true; };
+  provider.refreshStatus = async () => ({ workerReady: ready, challenged: false, loginVisible: false });
+  const ran = [];
+  provider.runDelegatedJob = async dir => { ran.push(dir); fs.writeFileSync(path.join(dir, 'DONE'), 'done'); };
+  const dir = makeJob({}, { dispatched_at: Date.now() / 1000, timeout_s: 3600 });
+  await provider.processPendingJobsOnce();
+  assert.equal(provider.reconnects, 1);
+  assert.deepEqual(ran, [dir]);
+
+  const waiting = makeProvider(new FakeChat([]));
+  waiting.notReadyHealMs = 60000;
+  waiting.refreshStatus = async () => ({ workerReady: false, detail: 'still loading' });
+  const second = makeJob({}, { dispatched_at: Date.now() / 1000, timeout_s: 3600 });
+  await waiting.processPendingJobsOnce();
+  assert.equal(waiting.reconnects, 0, 'no reload during the grace period');
+  assert.equal(waiting.hasPendingWork(), true);
+  assert.match(readMeta(second).last_event, /not ready: still loading/);
+  fs.writeFileSync(path.join(second, 'DONE'), 'done');
+  await waiting.processPendingJobsOnce();
+  assert.equal(waiting.hasPendingWork(), false);
+}
+
+// With nothing of its own to do, an idle worker asks the scheduler to start
+// queued ChatGPT jobs (the core may not be running), rate-limited.
+async function testIdleWorkerNudgesTheQueue() {
+  const provider = makeProvider(new FakeChat([]));
+  const queued = makeJob({}, { state: 'queued', worker: 'chatgpt-normal' });
+  const before = dispatchCalls.length;
+  await provider.processPendingJobsOnce();
+  await provider.processPendingJobsOnce();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(dispatchCalls.length, before + 1);
+  fs.writeFileSync(path.join(queued, 'DONE'), 'cancelled');
 }
 
 async function main() {
@@ -417,6 +657,14 @@ async function main() {
     await testCancelSetsExitCode();
     await testDispatchNeverBlocksAndLogsRejections();
     await testWorkerChallengedBeforePickupMarksWaitingJobs();
+    await testSignOutMidJobPausesAndResumes();
+    await testMissingPromptReloadsInsteadOfFailing();
+    await testHangAfterDeliveredMessageDoesNotResend();
+    await testRecoveryBudgetResetsAfterEachReply();
+    await testDesktopRestartResumesTheJob();
+    await testWaitingJobPastDeadlineFailsWithReason();
+    await testNotReadyWorkerIsReloaded();
+    await testIdleWorkerNudgesTheQueue();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {
