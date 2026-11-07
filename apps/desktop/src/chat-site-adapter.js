@@ -1,5 +1,6 @@
 const { ChatGPTAutomationAdapter, teamyraError } = require('./chatgpt-automation-adapter');
 const { MuseAutomationAdapter } = require('./muse-automation-adapter');
+const { challengeScript } = require('./challenge-detect');
 
 // A page driver described by settings instead of code, for web-chat sites
 // whose page is "a message box, a send button, a stop button while writing,
@@ -82,7 +83,7 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(site.prompt)});
       let challenged = false; let loginVisible = false;
-      try { challenged = Boolean(${site.challengeJs || 'false'}) || Boolean(${COMMON_CHALLENGE_JS}); } catch {}
+      try { challenged = Boolean(${site.challengeJs || 'false'}) || Boolean(${COMMON_CHALLENGE_JS}) || Boolean(${challengeScript(site.prompt)}); } catch {}
       try { loginVisible = !prompt && !challenged && Boolean(${site.loginJs || 'false'}); } catch {}
       return { promptFound: !!prompt, challenged, loginVisible, url: location.href, title: document.title };
     })()`);
@@ -248,7 +249,7 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
         }
       }
       let challenged = false;
-      try { challenged = Boolean(${site.challengeJs || 'false'}) || Boolean(${COMMON_CHALLENGE_JS}); } catch {}
+      try { challenged = Boolean(${site.challengeJs || 'false'}) || Boolean(${COMMON_CHALLENGE_JS}) || Boolean(${challengeScript(site.prompt)}); } catch {}
       return {
         count: replies.length,
         text: last ? csAnswer(last) : '',

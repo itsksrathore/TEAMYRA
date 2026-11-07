@@ -3,6 +3,9 @@ const { ChatGPTAutomationAdapter, teamyraError } = require('./chatgpt-automation
 const MUSE_HOME = 'https://muse.ai/';
 const NEW_THREAD_URL = 'https://muse.ai/thread/new';
 const PROMPT_SELECTOR = 'textarea[aria-label="Message"]';
+
+// Every kind of human check (challenge-detect.js), next to this site's own.
+const SHARED_CHALLENGE_JS = require('./challenge-detect').challengeScript(PROMPT_SELECTOR);
 // Browser-side conversation reading for muse.ai (checked 2026-11-06). Messages
 // are `[data-message-item]` with `data-message-role` user/assistant. A reply
 // is everything the assistant wrote after the last user message (it can span
@@ -71,7 +74,7 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
   async probe() {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
-      return { promptFound: !!prompt, challenged: ${CHALLENGE_DETECT_JS}, loginVisible: ${LOGIN_DETECT_JS},
+      return { promptFound: !!prompt, challenged: (${CHALLENGE_DETECT_JS} || Boolean(${SHARED_CHALLENGE_JS})), loginVisible: ${LOGIN_DETECT_JS},
         url: location.href, title: document.title };
     })()`);
   }
@@ -188,7 +191,7 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
         text,
         messageId: reply.length ? userId + ':' + reply.length : '',
         generating: museGenerating(),
-        challenged: ${CHALLENGE_DETECT_JS},
+        challenged: (${CHALLENGE_DETECT_JS} || Boolean(${SHARED_CHALLENGE_JS})),
         images: 0,
         activity: museItems().length + ':' + (newest ? newest.innerHTML.length : 0)
       };

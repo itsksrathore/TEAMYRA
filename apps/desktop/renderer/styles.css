@@ -643,6 +643,15 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   box-shadow: inset 0 1px 6px rgba(255,255,255,.65), 0 10px 22px rgb(var(--shadow) / .12);
 }
 
+/* The Agents screen's wrapper: a column that fills the view, so the card
+   grid below scrolls instead of growing past the window and being cut off. */
+#agentsShelf {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .agent-grid {
   flex: 1;
   min-height: 0;

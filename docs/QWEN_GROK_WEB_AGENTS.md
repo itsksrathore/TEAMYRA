@@ -56,3 +56,18 @@ A Continue button at a site's length limit is clicked automatically, and "busy" 
   - answer `#response-content-container > .markdown-prose` without `.thinking-chain-container` ("Thought Process"), or the red error box.
 - **Exact text:** none. Z.ai's chat data did not hold reply text, so tool requests are read from the page. The page drops a backslash before punctuation, so GLM is told to write backslashes, quotes and `*`, `_`, backtick and `$` inside tool-request JSON as JSON unicode escapes (backslash-u codes).
 - **Human check:** Z.ai shows an Alibaba Cloud slider captcha often; in the test it appeared for every message, even within one chat. Each time, the job pauses (`needs_user`), TEAMYRA notifies the user, and the job continues after the user solves it in TEAMYRA. TEAMYRA does not solve captchas. For work without these pauses, Z.ai's official API (API key) is the alternative.
+
+## Human checks on every site, and keeping TEAMYRA calm
+
+- **One detector** (`apps/desktop/src/challenge-detect.js`) runs on every web-chat site, next to the site's own check. It recognises:
+  - Cloudflare (Turnstile, "Just a moment"), reCAPTCHA, hCaptcha, Arkose/FunCaptcha, GeeTest;
+  - Alibaba Cloud (the slider, the nc slider, the baxia block page), AWS WAF, Tencent, DataDome and PerimeterX;
+  - any element named "captcha", and check wording in English and Chinese.
+
+  Widgets count only when shown and in view. Wording counts only inside dialogs, or on a page without a message box. When one is found, the job pauses as `needs_user`, and the Tasks view shows **Captcha required** and plays the captcha sound.
+- **Qwen on 2026-11-06 evening:** Qwen kept asking for its captcha. TEAMYRA was then reloading the page every few seconds (up to 19 counted reloads in one job), loading up to 5 tabs at once, and the same account was being tested in another browser at the same time. The next morning Qwen opened normally. The most likely cause is that the site's risk score for the account rose with that activity and fell back overnight; this is inferred, not confirmed.
+- **What TEAMYRA does now to stay calm** (no disguise, nothing that hides it from a site's checks):
+  - background reloads are never done on a page you are looking at, happen at most once a minute and at most 3 in a row;
+  - extra tabs start only after the account's first tab works, and at least 15 s apart;
+  - a tab with waiting work is not unloaded only to be loaded again;
+  - a page showing a check waits for the user instead of being reloaded.

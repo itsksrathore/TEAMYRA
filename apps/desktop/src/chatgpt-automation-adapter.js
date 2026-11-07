@@ -4,6 +4,9 @@ const PATH_LIKE_KEYS = new Set(['path', 'paths', 'cwd', 'root', 'file', 'workspa
 const VALID_JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't']);
 const DEFAULT_PROGRESS_INTERVAL_MS = 30000;
 const PROMPT_SELECTOR = '#prompt-textarea, textarea[data-testid*="prompt"], [contenteditable="true"][data-testid*="prompt"], [contenteditable="true"].ProseMirror, main form [contenteditable="true"], main [contenteditable="true"]';
+
+// Every kind of human check (challenge-detect.js), next to this site's own.
+const SHARED_CHALLENGE_JS = require('./challenge-detect').challengeScript(PROMPT_SELECTOR);
 // Browser-side human-verification detection shared by probe() and
 // assistantSnapshot(). A conversation may legitimately mention "verify you are
 // human", so the phrase only counts when the prompt is gone or it is in a dialog.
@@ -321,7 +324,7 @@ class ChatGPTAutomationAdapter {
   async probe() {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
-      const challenged = ${CHALLENGE_DETECT_JS}(!!prompt);
+      const challenged = ${CHALLENGE_DETECT_JS}(!!prompt) || Boolean(${SHARED_CHALLENGE_JS});
       const loginVisible = ${LOGIN_DETECT_JS};
       return { promptFound: !!prompt, challenged, loginVisible, url: location.href, title: document.title };
     })()`);
@@ -481,7 +484,7 @@ class ChatGPTAutomationAdapter {
       const legacy = document.querySelectorAll('[data-testid^="conversation-turn-"], [data-turn-id]');
       const newest = teamyraTurns('assistant').at(-1) || legacy[legacy.length - 1];
       const activity = (turns.length || legacy.length) + ':' + (newest ? newest.innerHTML.length : 0);
-      const challenged = ${CHALLENGE_DETECT_JS}(!!document.querySelector(${JSON.stringify(PROMPT_SELECTOR)}));
+      const challenged = ${CHALLENGE_DETECT_JS}(!!document.querySelector(${JSON.stringify(PROMPT_SELECTOR)})) || Boolean(${SHARED_CHALLENGE_JS});
       return { count:messages.length, text:messages[messages.length - 1] || '', messageId, generating, challenged,
         images: last ? imagesOf(last) : 0, activity };
     })()`);

@@ -19,6 +19,9 @@ const { MuseAutomationAdapter } = require('./muse-automation-adapter');
 //   FINISHED, incomplete_message) come from /api/v0/chat/history_messages.
 const DEEPSEEK_HOME = 'https://chat.deepseek.com/';
 const PROMPT_SELECTOR = 'textarea[placeholder*="DeepSeek"], textarea#chat-input';
+
+// Every kind of human check (challenge-detect.js), next to this site's own.
+const SHARED_CHALLENGE_JS = require('./challenge-detect').challengeScript(PROMPT_SELECTOR);
 const SEND_SELECTOR = '.ds-button--primary.ds-button--filled.ds-button--circle';
 // Mode labels in English and Chinese.
 const MODE_LABELS = { think: ['DeepThink', '深度思考'], search: ['Search', 'Smart Search', '联网搜索', '智能搜索'] };
@@ -83,7 +86,7 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
   async probe() {
     return this.evaluate(`(() => {
       const prompt = document.querySelector(${JSON.stringify(PROMPT_SELECTOR)});
-      return { promptFound: !!prompt, challenged: ${CHALLENGE_DETECT_JS}, loginVisible: ${LOGIN_DETECT_JS},
+      return { promptFound: !!prompt, challenged: (${CHALLENGE_DETECT_JS} || Boolean(${SHARED_CHALLENGE_JS})), loginVisible: ${LOGIN_DETECT_JS},
         url: location.href, title: document.title };
     })()`);
   }
@@ -270,7 +273,7 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
         messageId: key,
         generating,
         continued,
-        challenged: ${CHALLENGE_DETECT_JS},
+        challenged: (${CHALLENGE_DETECT_JS} || Boolean(${SHARED_CHALLENGE_JS})),
         images: 0,
         // Thinking text counts as progress before the answer starts.
         activity: items.length + ':' + (last ? last.innerHTML.length : 0)

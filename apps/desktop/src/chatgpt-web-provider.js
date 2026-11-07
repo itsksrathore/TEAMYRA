@@ -38,6 +38,9 @@ const MAX_DESKTOP_RESUMES = 3;
 const NOT_READY_HEAL_MS = 45000;
 const MAX_NOT_READY_RELOADS = 3;
 const RELOAD_INTERVAL_MS = 60000;
+const LANE_START_GAP_MS = 15000;
+// When an account's extra tab last opened the site.
+const LANE_STARTS = new Map();
 const HEAL_INTERVAL_MS = 60000;
 const QUEUE_NUDGE_MS = 30000;
 const PROMPT_WAIT_MS = 30000;
@@ -1050,6 +1053,13 @@ class ChatGPTWebProvider {
       await this.reconnect().catch(() => {});
     }
     if (!this.view || this.view.webContents.isDestroyed()) {
+      // Extra tabs of one account open the site at least LANE_START_GAP_MS
+      // apart, not all in the same moment.
+      if (this.lane > 0) {
+        const account = this.site.id + ':' + this.activeProfileId;
+        if (Date.now() - (LANE_STARTS.get(account) || 0) < (this.laneStartGapMs ?? LANE_START_GAP_MS)) return;
+        LANE_STARTS.set(account, Date.now());
+      }
       await this.wakeBackground();
     }
     let status = await this.refreshStatus();
