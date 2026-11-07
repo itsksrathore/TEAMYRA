@@ -5,9 +5,11 @@ duplicating it inside Electron. One invocation handles one action and prints one
 JSON response to stdout.
 """
 import contextvars
+import datetime
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -31,6 +33,28 @@ import media_engine
 # many desktop calls at once, each with its own token).
 _REQUEST_ENV = contextvars.ContextVar("teamyra_request_env", default=None)
 
+_LEAD_TOOLS = frozenset((
+    "start_task", "job_status", "job_wait", "job_result", "job_cancel",
+    "job_message", "worker_status", "team_report", "queue_list",
+    "worktree_create", "worktree_diff", "worktree_merge", "worktree_discard",
+    "test_run", "memory_search", "memory_add",
+))
+_LEAD_AUDIT_LOCK = threading.Lock()
+
+def _audit_lead_tool(name, outcome, args_count=0):
+    # Never log caller-provided names, arguments, or exception messages.
+    entry = {
+        "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "name": name if isinstance(name, str) and name in _LEAD_TOOLS else "denied",
+        "outcome": outcome,
+        "args_count": min(args_count, 100),
+    }
+    path = ROOT / "logs" / "lead-tools.jsonl"
+    with _LEAD_AUDIT_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
 
 def _bridge_token(payload):
     request_env = _REQUEST_ENV.get() or {}
@@ -40,6 +64,44 @@ def _bridge_token(payload):
 
 def handle(action, payload):
     payload = payload if isinstance(payload, dict) else {}
+
+    if action == "lead.tool":
+        name = None
+        args_count = 0
+        outcome = "denied"
+        try:
+            if not isinstance(payload.get("name"), str):
+                raise ValueError("lead tool name is required")
+            name = payload["name"]
+            if name.startswith("lead."):
+                name = name[5:]
+            if name not in _LEAD_TOOLS:
+                raise ValueError("unsupported lead tool")
+            args = payload.get("args", {})
+            if not isinstance(args, dict) or any(not isinstance(key, str) for key in args):
+                raise ValueError("lead tool args must be an object with string keys")
+            args_count = len(args)
+            forwarded = dict(args)
+            if name == "job_wait":
+                timeout = forwarded.get("timeout_seconds", 120)
+                if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not -1e999 < timeout < float("inf"):
+                    raise ValueError("job_wait timeout_seconds must be a finite number")
+                forwarded["timeout_seconds"] = min(timeout, 120)
+            outcome = 'error'
+            import server
+            outcome = "error"
+            result = server.tool_call(name, forwarded)
+            if isinstance(result, dict) and result.get('ok') is False:
+                outcome = 'error'
+            else:
+                outcome = 'success'
+            return result
+        except Exception:
+            if outcome != "denied":
+                outcome = "error"
+            raise
+        finally:
+            _audit_lead_tool(name, outcome, args_count)
 
     if action == "scheduler.dispatch":
         import scheduler

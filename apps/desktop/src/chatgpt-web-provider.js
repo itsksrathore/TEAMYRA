@@ -1809,7 +1809,9 @@ class ChatGPTWebProvider {
         'When you need a local tool, reply with exactly one line and nothing else (no code fence):',
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Send one tool request per reply and wait for its TEAMYRA_TOOL_RESULT. The JSON must be valid; write paths with forward slashes (D:/project/file.txt), never backslashes.',
-        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, process.start, process.read, process.write, process.stop, process.list, page.check, screen.capture, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
+        'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, code.map, code.symbol, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, process.start, process.read, process.write, process.stop, process.list, page.check, screen.capture, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
+        'Start with code.map to see the project, and use code.symbol to read one function instead of a whole file.',
+        'code.map {path, budget_chars?, focus?}; code.symbol {path, name}.',
         'terminal.run waits for its command to finish, 60 s by default; for test suites and builds pass "timeout_seconds" (up to 1800), e.g. {"argv":["npm","run","check"],"timeout_seconds":600}. For a program that keeps running (dev server, the app, a watcher, an interactive program) use process.start {"command":"<PowerShell command>","cwd":"...","wait_for":"<regex of a ready line>","wait_seconds":30}: it returns a session_id and the output so far, and the program keeps running. Then process.read {"session_id","wait_for","wait_seconds"} for new output, process.write {"session_id","input"} to type into it, process.stop {"session_id"}; process.list shows them. They stop when the job ends.',
         'To see what you built: page.check {"url":"http://localhost:<port>/","wait_for":"<text or CSS selector>"} opens a local page and returns its text, controls, console errors, failed requests and a screenshot; screen.capture {"window":"<part of a window title>"} screenshots an open window. A screenshot is attached to the next message when it can be. Test changes this way (start the server, check the page, read the errors) instead of guessing.',
         'filesystem.read is paged: use offset and max_bytes (at most 30000) for large files, then next_offset when clipped. Keep command output short (filter it); a tool result is cut to about 40000 characters.',
@@ -1972,10 +1974,12 @@ class ChatGPTWebProvider {
           } else if (JobInspector.handles(request.tool)) {
             toolResult = await this.inspector.call(jobDir, request.tool, request.args, { workspace: assignedWorkspace });
           } else {
-            toolResult = await this.workspaceBridge.executeInWorkspace(
+            // Trusted job id: terminal output is grouped by job, and only the runtime job directory basename is trustworthy, not a model-supplied value. The copy leaves the original request unchanged.
+ const dispatchArgs = request.tool === 'terminal.run' ? { ...(request.args || {}), job: path.basename(jobDir) } : request.args;
+ toolResult = await this.workspaceBridge.executeInWorkspace(
               assignedWorkspace,
               request.tool,
-              request.args,
+              dispatchArgs,
               taskPermissions,
               false
             );

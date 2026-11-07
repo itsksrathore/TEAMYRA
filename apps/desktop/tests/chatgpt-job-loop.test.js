@@ -898,6 +898,58 @@ async function testOpenShowsAPageThatIsStillLoading() {
   assert.equal(shown.at(-1), true, 'the page is shown while it still loads');
 }
 
+async function testBootstrapListsCodeTools() {
+ const fake = new FakeChat(['Done.']);
+ const provider = makeProvider(fake);
+ const dir = makeJob();
+ await provider.runDelegatedJob(dir);
+ assert.equal(readMeta(dir).state, 'done');
+ const bootstrap = fake.sent[0];
+ assert.ok(bootstrap.includes('code.map'));
+ assert.ok(bootstrap.includes('code.symbol'));
+ assert.ok(bootstrap.includes('Start with code.map to see the project, and use code.symbol to read one function instead of a whole file.'));
+ assert.ok(bootstrap.includes('code.map {path, budget_chars?, focus?}; code.symbol {path, name}.'));
+ assert.ok(bootstrap.includes('Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, code.map, code.symbol, filesystem.create'));
+}
+
+async function testTerminalRunGetsTrustedJobId() {
+ const spoofed = JSON.stringify({ tool: 'terminal.run', args: { job: 'spoofed-job', digest: false, argv: ['npm', 'test'] } });
+ const fake = new FakeChat(['TEAMYRA_TOOL_REQUEST ' + spoofed, 'Finished.']);
+ const provider = makeProvider(fake);
+ const captured = [];
+ const originalSave = provider.saveJobState.bind(provider);
+ provider.saveJobState = function (job, patch) { if (patch && patch.request) captured.push(patch.request); return originalSave(job, patch); };
+ const dir = makeJob();
+ await provider.runDelegatedJob(dir);
+ assert.equal(readMeta(dir).state, 'done');
+ assert.equal(provider.toolCalls.length, 1);
+ assert.equal(provider.toolCalls[0].tool, 'terminal.run');
+ assert.equal(provider.toolCalls[0].args.job, path.basename(dir));
+ assert.equal(provider.toolCalls[0].args.digest, false);
+ assert.deepEqual(provider.toolCalls[0].args.argv, ['npm', 'test']);
+ assert.equal(captured.length, 1);
+ assert.equal(captured[0].args.job, 'spoofed-job');
+ assert.notEqual(captured[0].args, provider.toolCalls[0].args);
+ const plain = JSON.stringify({ tool: 'terminal.run', args: { argv: ['node', '--version'] } });
+ const plainFake = new FakeChat(['TEAMYRA_TOOL_REQUEST ' + plain, 'Finished.']);
+ const plainProvider = makeProvider(plainFake);
+ const plainDir = makeJob();
+ await plainProvider.runDelegatedJob(plainDir);
+ assert.equal(plainProvider.toolCalls[0].args.job, path.basename(plainDir));
+ assert.deepEqual(plainProvider.toolCalls[0].args.argv, ['node', '--version']);
+}
+
+async function testNonTerminalRequestGetsNoJobField() {
+ const request = JSON.stringify({ tool: 'filesystem.read', args: { path: 'a.txt' } });
+ const fake = new FakeChat(['TEAMYRA_TOOL_REQUEST ' + request, 'Finished.']);
+ const provider = makeProvider(fake);
+ const dir = makeJob();
+ await provider.runDelegatedJob(dir);
+ assert.equal(readMeta(dir).state, 'done');
+ assert.deepEqual(provider.toolCalls[0].args, { path: 'a.txt' });
+ assert.equal('job' in provider.toolCalls[0].args, false);
+}
+
 async function main() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chatgpt-loop-'));
   try {
@@ -933,6 +985,9 @@ async function main() {
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();
     await testDeliveredMessageWithoutReplyGetsANudge();
+ await testBootstrapListsCodeTools();
+ await testTerminalRunGetsTrustedJobId();
+ await testNonTerminalRequestGetsNoJobField();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {
