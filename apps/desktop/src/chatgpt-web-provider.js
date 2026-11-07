@@ -1994,8 +1994,22 @@ class ChatGPTWebProvider {
           reply = await this.jobExchange(job, 'TEAMYRA_TOOL_ERROR ' + JSON.stringify({ error: parsed.error, hint: TOOL_ERROR_HINT }));
           continue;
         }
-        parseFailures = 0;
         const request = parsed.request;
+        if (this.site.writesNeedCodeBlock && reply.requestOutsideCode && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
+          // Not run: the page already dropped any <...> text from it.
+          parseFailures += 1;
+          const error = 'this write request was outside a code block, so the page removed every <...> part of it ' +
+            '(JSX/HTML tags, <T> generics); nothing was written';
+          this.appendJobEvent(jobDir, 'error', `tool request refused ${parseFailures}/${MAX_TOOL_PARSE_FAILURES}: ${error}`);
+          if (parseFailures >= MAX_TOOL_PARSE_FAILURES) {
+            reason = 'tool_parse_error';
+            throw new Error(`${this.site.name} sent ${parseFailures} write requests outside a code block in a row`);
+          }
+          reply = await this.jobExchange(job, 'TEAMYRA_TOOL_ERROR ' + JSON.stringify({ error,
+            hint: 'Send it again inside a fenced code block: a line with ```text, the TEAMYRA_TOOL_REQUEST line, a line with ```.' }));
+          continue;
+        }
+        parseFailures = 0;
 
         this.appendJobEvent(jobDir, 'command', request.tool + ' ' + JSON.stringify(request.args).slice(0, 1000));
         // Recorded before the tool runs: a restart mid-tool must not run it

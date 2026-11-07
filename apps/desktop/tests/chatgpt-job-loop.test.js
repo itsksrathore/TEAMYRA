@@ -832,6 +832,26 @@ async function testProgressNoteIsNotAFinalReport() {
   assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: all edits made.');
 }
 
+// Muse, 2026-11-06: a write request outside a code block lost every <...>
+// part (JSX tags, <T> generics) and the broken file was written.
+async function testWriteOutsideCodeBlockIsRefusedOnMuse() {
+  class MarkdownChat extends FakeChat {
+    async assistantSnapshot() {
+      const snap = await super.assistantSnapshot();
+      return { ...snap, requestOutsideCode: this.turn === 1 && /TEAMYRA_TOOL_REQUEST/.test(snap.text || '') };
+    }
+  }
+  const write = 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.write","args":{"path":"page.tsx","content":"x"}}';
+  const fake = new MarkdownChat([write, write, 'Finished: wrote page.tsx.']);
+  const provider = makeProvider(fake);
+  provider.site = { ...provider.site, writesNeedCodeBlock: true };
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.ok(fake.sent[1].startsWith('TEAMYRA_TOOL_ERROR') && fake.sent[1].includes('code block'), 'the first write is refused');
+  assert.equal(provider.toolCalls.length, 1, 'only the request from the code block ran');
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -1043,6 +1063,7 @@ async function main() {
     await testSiteErrorResendsAndAgentTraceGetsReminder();
     await testSiteThatKeepsFailingEndsAsSiteDown();
     await testProgressNoteIsNotAFinalReport();
+    await testWriteOutsideCodeBlockIsRefusedOnMuse();
     await testNoSendButtonAfterSiteErrorEndsAsSiteDown();
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();

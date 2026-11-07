@@ -23,6 +23,10 @@ const MUSE_SITE = {
   home: MUSE_HOME,
   hosts: MUSE_HOSTS,
   conversationHost: 'muse.ai',
+  // Outside a code block this page renders <Tag> text as HTML and drops it:
+  // a file written from such a request lost its JSX tags and <T> generics
+  // (ISS-20261107-164052). Write requests must come from a code block.
+  writesNeedCodeBlock: true,
   workerId: profileId => profileId === DEFAULT_CHATGPT_PROFILE_ID ? 'muse-normal' : 'muse-' + profileId,
   conversationUrl: id => MUSE_HOME + 'thread/' + id,
   sessionManager: profileId => new ChatGPTSessionManager(profileId, {

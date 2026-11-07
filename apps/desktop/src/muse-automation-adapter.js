@@ -183,12 +183,19 @@ class MuseAutomationAdapter extends ChatGPTAutomationAdapter {
     return this.evaluate(`(() => {${MESSAGES_JS}
       const reply = museReplyItems();
       const text = reply.map(node => museText(node, /^Muse:\\s*/i)).filter(Boolean).join('\\n\\n');
+      // Is a TEAMYRA_TOOL_REQUEST in the rendered Markdown, not in a code block?
+      const requestOutsideCode = reply.some(node => {
+        const copy = node.cloneNode(true);
+        copy.querySelectorAll('pre, code').forEach(block => block.remove());
+        return (copy.textContent || '').includes('TEAMYRA_TOOL_REQUEST');
+      });
       const lastUser = museLastUser();
       const userId = lastUser ? (lastUser.getAttribute('data-message-id') || String(museItems().indexOf(lastUser))) : 'none';
       const newest = museItems().at(-1);
       return {
         count: museItems().filter(node => node.getAttribute('data-message-role') === 'assistant').length,
         text,
+        requestOutsideCode,
         messageId: reply.length ? userId + ':' + reply.length : '',
         generating: museGenerating(),
         challenged: (${CHALLENGE_DETECT_JS} || Boolean(${SHARED_CHALLENGE_JS})),
