@@ -30,5 +30,15 @@ class StaleCodeNoticeTests(unittest.TestCase):
         self.assertIsNone(server.stale_code_notice())
 
 
+class FollowUpSettingsTests(unittest.TestCase):
+    def test_follow_up_keeps_the_parent_settings(self):
+        parent = {"pin": True, "pool": False, "transfer": False, "write": True, "account_fixed": True}
+        got = server.follow_up_settings(parent, {})
+        self.assertEqual((got["pin"], got["pool"], got["transfer"], got["account_fixed"], got["write"]),
+                         (True, False, False, True, True))
+        self.assertFalse(server.follow_up_settings(parent, {"pin": False})["pin"])
+        self.assertIsNone(server.follow_up_settings({}, {})["transfer"])
+
+
 if __name__ == "__main__":
     unittest.main()

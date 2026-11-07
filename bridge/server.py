@@ -335,6 +335,19 @@ def chatgpt_desktop_watch(root, wake=None, desktop_ready=None):
     return {"pending": len(alive), "woke": woke, "expired": expired}
 
 
+def follow_up_settings(meta, args):
+    """job_message: the follow-up runs like its parent (pinned to the same
+    account, same pool, transfer and write rules) unless the call says
+    otherwise. It lost pin=True, 2026-11-07 (ISS-20261107-153207)."""
+    out = {"write": meta.get("write", True), "pin": bool(meta.get("pin")), "pool": bool(meta.get("pool")),
+           "transfer": meta.get("transfer"), "account_fixed": bool(meta.get("account_fixed")),
+           "teamyra_mcp": bool(meta.get("teamyra_mcp"))}
+    for key in ("write", "pin", "pool", "transfer", "account_fixed"):
+        if args.get(key) is not None:
+            out[key] = args[key]
+    return out
+
+
 def move_job_now(job_id, worker=None, provider=None, stop_wait_seconds=90):
     """job_move: stop the chain's current job if it still runs, then continue
     it elsewhere with the hand-over context pack (job_transfer.move_job)."""
@@ -1801,9 +1814,14 @@ TOOLS = [
          "target_worker": {"type": "string"},
          "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500}},
          "additionalProperties": False}},
-    {"name": "job_message", "description": "Send a follow-up message to a finished job's worker session (resumes the same Codex thread or Antigravity conversation in the same folder). Returns a new job_id.",
+    {"name": "job_message", "description": (
+        "Send a follow-up message to a finished job's worker session (resumes the same Codex thread or "
+        "Antigravity conversation in the same folder). The follow-up keeps the job's pin, pool, transfer, "
+        "account_fixed, write and teamyra_mcp settings unless you pass them. Returns a new job_id."),
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "message": {"type": "string"},
-                     "timeout_minutes": {"type": "integer", "default": 60}},
+                     "timeout_minutes": {"type": "integer", "default": 60},
+                     "pin": {"type": "boolean"}, "pool": {"type": "boolean"}, "transfer": {"type": "boolean"},
+                     "account_fixed": {"type": "boolean"}, "write": {"type": "boolean"}},
                      "required": ["job_id", "message"], "additionalProperties": False}},
     {"name": "job_cancel", "description": "Stop a running job (kills the worker process tree).",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
@@ -2325,7 +2343,8 @@ def tool_call(name, a):
         if not m.get("session_id"):
             raise ValueError("that job has no worker session id to resume")
         job_id, worker = start_job(m["worker"], a["message"], m["cwd"], f"follow-up: {m['label']}"[:80],
-                                   a.get("timeout_minutes", 60), m.get("write", True), m["session_id"], m["id"])
+                                   a.get("timeout_minutes", 60), **follow_up_settings(m, a),
+                                   session_id=m["session_id"], parent=m["id"])
         return {"job_id": job_id, "worker": worker, **follow_info(job_id)}
     if name == "job_cancel":
         terminal_id = failover_terminal_job_id(a["job_id"])
