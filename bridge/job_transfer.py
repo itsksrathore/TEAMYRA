@@ -570,6 +570,10 @@ def _unusable(root, worker, info, metas):
         return "is cooling down after a usage limit"
     if scheduler.web_account_blocked(scheduler._web_account_status(root, info)):
         return "needs a sign-in or a human check"
+    # Its page never became ready (DeepSeek 5, 2026-11-07: "page loaded;
+    # waiting for an interactive prompt" for 8 min, the job never started).
+    if not scheduler.chatgpt_ready(root, info):
+        return "did not get its page ready"
     return ""
 
 

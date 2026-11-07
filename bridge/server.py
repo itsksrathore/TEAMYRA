@@ -2505,8 +2505,11 @@ def handle(msg):
         params = msg.get("params", {})
         try:
             result = tool_call(canonical_tool_name(params.get("name")), params.get("arguments") or {})
-            return {"jsonrpc": "2.0", "id": req_id, "result": {
-                "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=1)}], "isError": False}}
+            content = [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=1)}]
+            notice = stale_code_notice()
+            if notice:
+                content.append({"type": "text", "text": notice})
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": content, "isError": False}}
         except Exception as e:
             return {"jsonrpc": "2.0", "id": req_id, "result": {
                 "content": [{"type": "text", "text": json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)}],
@@ -2514,6 +2517,32 @@ def handle(msg):
     if req_id is not None:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
     return None
+
+
+SERVER_STARTED_AT = time.time()
+_STALE_CHECK = {"at": 0.0, "stale": False, "told_at": 0.0}
+
+
+def stale_code_notice(now=None):
+    """A note for the MCP client when TEAMYRA's code changed after this server
+    process started. A client (Codex, Claude) keeps its stdio MCP server for
+    the whole session, so a TEAMYRA restart does not update it: the lead kept
+    old tools (no job_move, no code.map) for hours, 2026-11-07. Said at most
+    once every 10 minutes."""
+    now = time.time() if now is None else now
+    if now - _STALE_CHECK["at"] > 30:
+        _STALE_CHECK["at"] = now
+        try:
+            newest = max(path.stat().st_mtime for path in Path(__file__).resolve().parent.glob("*.py"))
+        except (OSError, ValueError):
+            newest = 0
+        _STALE_CHECK["stale"] = newest > SERVER_STARTED_AT + 1
+    if not _STALE_CHECK["stale"] or now - _STALE_CHECK["told_at"] < 600:
+        return None
+    _STALE_CHECK["told_at"] = now
+    return ("TEAMYRA notice: this TEAMYRA MCP server process started before TEAMYRA's code was updated, so "
+            "some tools or fixes are missing here. Ask the user to reload the TEAMYRA MCP server in this client "
+            "(or start a new session); restarting TEAMYRA Desktop alone does not update it.")
 
 
 def handle_and_send(msg):

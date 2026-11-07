@@ -278,6 +278,15 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(read_meta(self.root, "w2")["worker"], "chatgpt-normal")
         self.assertEqual(read_meta(self.root, "fresh")["worker"], "chatgpt-normal")
 
+    def test_unstarted_job_leaves_an_account_whose_page_never_got_ready(self):
+        write_status(self.root, "chatgpt", {"web": {"automation_ready": False, "session_present": False}})
+        write_status(self.root, "muse", {"web": ready()})
+        write_job(self.root, "w1", state="waiting_for_desktop", done=False, dispatched_at=time.time() - 6 * 60)
+        moved = job_transfer.move_unstarted(self.root, CONFIG)
+        self.assertEqual([item["job_id"] for item in moved], ["w1"])
+        self.assertEqual(read_meta(self.root, "w1")["worker"], "muse-normal")
+        self.assertIn("did not get its page ready", read_meta(self.root, "w1")["last_event"])
+
     def test_pause_over(self):
         now = time.time()
         self.assertFalse(job_transfer.pause_over({"attention": {"since": now - 60}}, CONFIG, now))
