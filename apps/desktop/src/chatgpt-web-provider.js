@@ -1905,11 +1905,23 @@ class ChatGPTWebProvider {
             'TEAMYRA_SITE_DOWN', 'site_down');
         }
         let parsed = this.automation.parseToolRequestDetailed(reply.text);
+        let exactMissing = false;
         if (parsed.marker && typeof this.automation.rawReplyText === 'function') {
-          // Parse the reply as written, not as rendered on the page.
-          const raw = await this.automation.rawReplyText(reply.messageId).catch(() => '');
+          // Parse the reply as written, not as rendered on the page. On a busy
+          // PC the read can time out (2026-11-07: a "*/" lost its "*" in the
+          // rendered Markdown and the file was written that way): try again.
+          let raw = '';
+          for (let attempt = 0; attempt < (job.exactTextWorks ? 3 : 1) && !raw; attempt += 1) {
+            if (attempt) await sleep(this.rawRetryMs ?? 2000 * attempt);
+            raw = await this.automation.rawReplyText(reply.messageId).catch(() => '');
+          }
           const exact = raw && raw.includes('TEAMYRA_TOOL_REQUEST') ? this.automation.parseToolRequestDetailed(raw) : null;
-          if (exact?.request) parsed = exact;
+          if (exact?.request) {
+            parsed = exact;
+            job.exactTextWorks = true;
+          } else if (!raw && job.exactTextWorks) {
+            exactMissing = true; // this site gives the exact text, but not now
+          }
         }
         if (!parsed.marker) {
           if (looksLikeProtocolLoss(reply.text, successfulTools)) {
@@ -2001,6 +2013,19 @@ class ChatGPTWebProvider {
           continue;
         }
         const request = parsed.request;
+        if (exactMissing && READ_ONLY_BLOCKED_TOOLS.has(request.tool) && request.tool !== 'terminal.run') {
+          // A write from the rendered page can lose *, _ and \ characters.
+          parseFailures += 1;
+          const error = 'TEAMYRA could not read the exact text of this write request (the page was too busy), ' +
+            'and the rendered text can lose characters such as * _ \; nothing was written';
+          this.appendJobEvent(jobDir, 'error', `tool request refused ${parseFailures}/${MAX_TOOL_PARSE_FAILURES}: ${error}`);
+          if (parseFailures >= MAX_TOOL_PARSE_FAILURES) {
+            reason = 'page_unresponsive';
+            throw new Error(`${this.site.name}: the exact text of ${parseFailures} write requests in a row could not be read`);
+          }
+          reply = await this.jobExchange(job, 'TEAMYRA_TOOL_ERROR ' + JSON.stringify({ error, hint: 'Send the same request again.' }));
+          continue;
+        }
         if (this.site.writesNeedCodeBlock && reply.requestOutsideCode && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
           // Not run: the page already dropped any <...> text from it.
           parseFailures += 1;

@@ -883,6 +883,22 @@ async function testSelfWrittenToolResultGetsAReminder() {
   assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: nothing to change.');
 }
 
+// ChatGPT, 2026-11-07, PC at 100 % CPU: the exact reply text could not be
+// read, the rendered Markdown was used, and a "*/" lost its "*" in a file.
+async function testWriteWithoutExactTextIsRefused() {
+  const read = 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"a.ts"}}';
+  const write = 'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.write","args":{"path":"a.ts","content":"/* x */"}}';
+  const fake = new FakeChat([read, write, write, 'Finished: wrote a.ts.']);
+  fake.rawReplyText = async () => (fake.turn === 1 || fake.turn === 3) ? fake.current.text : '';
+  const provider = makeProvider(fake);
+  provider.rawRetryMs = 1;
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.deepEqual(provider.toolCalls.map(call => call.tool), ['filesystem.read', 'filesystem.write']);
+  assert.ok(fake.sent[2].startsWith('TEAMYRA_TOOL_ERROR') && fake.sent[2].includes('exact text'));
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -1097,6 +1113,7 @@ async function main() {
     await testWriteOutsideCodeBlockIsRefusedOnMuse();
     await testReadOnlyJobRunsTestsButNoShell();
     await testSelfWrittenToolResultGetsAReminder();
+    await testWriteWithoutExactTextIsRefused();
     await testNoSendButtonAfterSiteErrorEndsAsSiteDown();
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();
