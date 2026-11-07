@@ -204,6 +204,14 @@ class _lock:
             try:
                 self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 return self
+            except PermissionError:
+                # Windows: the lock file is being deleted by its last holder
+                # ("delete pending"). That is "busy", not an error: the error
+                # used to end the image's thread before it wrote its result.
+                if time.time() > deadline:
+                    raise TimeoutError("codex image batch is busy")
+                time.sleep(0.05)
+                continue
             except FileExistsError:
                 try:
                     if time.time() - self.path.stat().st_mtime > 30:
@@ -217,10 +225,15 @@ class _lock:
 
     def __exit__(self, *exc):
         os.close(self.fd)
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+        # A scanner or a waiting opener can hold the file for a moment.
+        for _ in range(40):
+            try:
+                self.path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                time.sleep(0.05)
 
 
 # --- runner ------------------------------------------------------------------------------
