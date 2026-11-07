@@ -309,6 +309,17 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(len(start.calls), 1, "no second continuation")
         self.assertFalse((self.root / "jobs" / "j1" / job_transfer.CLAIM_FILE).exists(), "the claim is released")
 
+    def test_an_account_that_keeps_hanging_is_skipped(self):
+        write_status(self.root, "chatgpt", {"web": ready()})
+        write_status(self.root, "muse", {"web": ready()})
+        for job_id in ("h1", "h2"):
+            write_job(self.root, job_id, reason="page_unresponsive", transfer=False)
+        write_job(self.root, "w1", state="waiting_for_desktop", done=False, dispatched_at=time.time() - 6 * 60)
+        moved = job_transfer.move_unstarted(self.root, CONFIG)
+        self.assertEqual([item["job_id"] for item in moved], ["w1"])
+        self.assertEqual(read_meta(self.root, "w1")["worker"], "muse-normal")
+        self.assertIn("kept hanging", read_meta(self.root, "w1")["last_event"])
+
     def test_pause_over(self):
         now = time.time()
         self.assertFalse(job_transfer.pause_over({"attention": {"since": now - 60}}, CONFIG, now))

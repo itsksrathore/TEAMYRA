@@ -165,6 +165,19 @@ def blocked_sites(metas, now=None):
             if m.get("reason") in ("site_blocked", "site_down") and now - float(m.get("ended") or 0) < SITE_BLOCK_SECONDS}
 
 
+HANG_LIMIT = 2
+
+
+def account_hanging(metas, worker, now=None):
+    """The account's page hung (page_unresponsive) on HANG_LIMIT jobs in the
+    last 30 min: skip it for now (Qwen 2, 2026-11-07: two jobs in a row, and
+    more were still queued for it)."""
+    now = time.time() if now is None else now
+    hangs = [m for m in metas if m.get("worker") == worker and m.get("reason") == "page_unresponsive"
+             and now - float(m.get("ended") or 0) < SITE_BLOCK_SECONDS]
+    return len(hangs) >= HANG_LIMIT
+
+
 def site_block_left(metas, provider, now=None):
     """Seconds this site stays skipped after a job ended site_blocked/site_down (0 = usable)."""
     now = time.time() if now is None else now
@@ -201,6 +214,8 @@ def candidates(root, meta, config=None, metas=None, registry=None):
         if allowed and worker not in allowed:
             continue
         if not scheduler.chatgpt_ready(root, info) or scheduler.cooldown_left(root, worker, metas):
+            continue
+        if account_hanging(metas, worker):
             continue
         active = len(scheduler.active_jobs(root, worker, metas))
         queued = len(scheduler.queued_jobs(root, worker, metas))
@@ -601,6 +616,8 @@ def _unusable(root, worker, info, metas):
         return "is on a site that refuses this PC for now"
     if scheduler.cooldown_left(root, worker, metas):
         return "is cooling down after a usage limit"
+    if account_hanging(metas, worker):
+        return "kept hanging (its page stopped responding on recent jobs)"
     if scheduler.web_account_blocked(scheduler._web_account_status(root, info)):
         return "needs a sign-in or a human check"
     # Its page never became ready (DeepSeek 5, 2026-11-07: "page loaded;
