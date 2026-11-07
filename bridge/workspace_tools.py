@@ -1308,7 +1308,9 @@ class WorkspaceToolService:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         stdout = (cp.stdout or "")[:500000]
+        raw_stdout = cp.stdout or ""
         stderr = (cp.stderr or "")[:200000]
+        raw_stderr = cp.stderr or ""
         result = {
             "argv": run_argv,
             "cwd": str(cwd),
@@ -1320,19 +1322,19 @@ class WorkspaceToolService:
         if isinstance(requested_digest, str):
             requested_digest = requested_digest.strip().lower() not in {"0", "false", "no", "off"}
         if requested_digest is None:
-            want_digest = len(stdout) + len(stderr) > DIGEST_THRESHOLD
+            want_digest = len(raw_stdout) + len(raw_stderr) > DIGEST_THRESHOLD
         else:
             want_digest = bool(requested_digest)
         if not want_digest:
             return result
         full_log = None
-        if stdout or stderr:
+        if raw_stdout or raw_stderr:
             job = args.get("job") or os.environ.get("TEAMYRA_JOB_ID") or "default"
-            full_log = self._save_terminal_log(job, result)
+            full_log = self._save_terminal_log(job, {**result, "stdout": raw_stdout, "stderr": raw_stderr})
         return {
             **result,
-            "stdout": digest_output(stdout, label="stdout", full_log=full_log),
-            "stderr": digest_output(stderr, label="stderr", full_log=full_log),
+            "stdout": digest_output(raw_stdout, label="stdout", full_log=full_log),
+            "stderr": digest_output(raw_stderr, label="stderr", full_log=full_log),
             "digest": True,
             "full_log": full_log,
         }

@@ -204,5 +204,56 @@ class TerminalDigestServiceTests(unittest.TestCase):
             self.assertEqual(full_log.parent.parent, (service.root / "logs" / "terminal").resolve())
 
 
+    def test_beyond_both_caps_digests_real_tail_and_saves_complete_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(Path(td) / "runtime", workspace)
+            stdout = chr(10).join([f"out-line {i}" for i in range(42000)] + ["OUT-TAIL-SENTINEL"])
+            stderr = chr(10).join([f"err-line {i}" for i in range(18000)] + ["ERR-TAIL-SENTINEL"])
+            self.assertGreater(len(stdout), 500000)
+            self.assertGreater(len(stderr), 200000)
+            result, _ = self.run_terminal(service, {"argv": [sys.executable, "-m", "unittest"], "job": "job-cap"}, subprocess.CompletedProcess([], 3, stdout, stderr))
+            self.assertTrue(result["digest"])
+            self.assertEqual(result["exit_code"], 3)
+            self.assertIn("OUT-TAIL-SENTINEL", result["stdout"])
+            self.assertIn("ERR-TAIL-SENTINEL", result["stderr"])
+            self.assertIn("out-line 0", result["stdout"])
+            full_log = Path(result["full_log"])
+            self.assertTrue(full_log.is_file())
+            saved = full_log.read_text(encoding="utf-8")
+            self.assertIn(stdout, saved)
+            self.assertIn(stderr, saved)
+            self.assertIn("OUT-TAIL-SENTINEL", saved)
+            self.assertIn("ERR-TAIL-SENTINEL", saved)
+    def test_digest_false_caps_both_streams_and_saves_no_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(Path(td) / "runtime", workspace)
+            stdout = chr(10).join([f"out-line {i}" for i in range(42000)] + ["OUT-TAIL-SENTINEL"])
+            stderr = chr(10).join([f"err-line {i}" for i in range(18000)] + ["ERR-TAIL-SENTINEL"])
+            result, _ = self.run_terminal(service, {"argv": [sys.executable, "-m", "unittest"], "digest": False}, subprocess.CompletedProcess([], 1, stdout, stderr))
+            self.assertEqual(result["stdout"], stdout[:500000])
+            self.assertEqual(result["stderr"], stderr[:200000])
+            self.assertNotIn("digest", result)
+            self.assertFalse((service.root / "logs" / "terminal").exists())
+
+    def test_threshold_6000_no_digest_and_6001_digests(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(Path(td) / "runtime", workspace)
+            args = {"argv": [sys.executable, "-m", "unittest"]}
+            result, _ = self.run_terminal(service, args, subprocess.CompletedProcess([], 0, "x" * 6000, ""))
+            self.assertNotIn("digest", result)
+            self.assertEqual(result["stdout"], "x" * 6000)
+            self.assertFalse((service.root / "logs" / "terminal").exists())
+            args2 = {"argv": [sys.executable, "-m", "unittest"], "job": "job-6001"}
+            result2, _ = self.run_terminal(service, args2, subprocess.CompletedProcess([], 0, "x" * 6001, ""))
+            self.assertTrue(result2["digest"])
+            saved = Path(result2["full_log"]).read_text(encoding="utf-8")
+            self.assertIn("x" * 6001, saved)
+
 if __name__ == "__main__":
     unittest.main()
