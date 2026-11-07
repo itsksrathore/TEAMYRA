@@ -314,9 +314,9 @@ def second():
 def third():
 	pass
 ''')
-		header = 'solo.py' + chr(10)
-		row = ' function first @1' + chr(10)
-		budget = len(header) + len(row)
+		full = self.map(budget_chars=10000)
+		lines = full['text'].splitlines(keepends=True)
+		budget = len(lines[0]) + len(lines[1])
 		result = self.map(budget_chars=budget)
 		self.assertLessEqual(len(result['text']), budget)
 		self.assertTrue(result['truncated'])
