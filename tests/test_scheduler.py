@@ -50,6 +50,25 @@ class Spawned:
         return 4242
 
 
+class CancelWaitingDesktopJobTests(unittest.TestCase):
+    """ISS-20261107-104454-6d6338: a cancelled web job that waited for its
+    account stayed waiting_for_desktop."""
+
+    def test_waiting_web_job_is_cancelled_at_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_job(td, "w1", worker="qwen-normal", provider="qwen-web", state="waiting_for_desktop")
+            write_job(td, "r1", worker="qwen-normal", provider="qwen-web", state="running")
+            write_job(td, "c1", worker="codex1", provider="codex", state="waiting_for_desktop")
+            self.assertTrue(scheduler.cancel_waiting_desktop_job(td, "w1"))
+            meta = read_meta(td, "w1")
+            self.assertEqual((meta["state"], meta["reason"]), ("cancelled", "cancelled"))
+            self.assertTrue((Path(td) / "jobs" / "w1" / "DONE").exists())
+            # A running job stops through its CANCEL file; CLI jobs are not touched here.
+            self.assertFalse(scheduler.cancel_waiting_desktop_job(td, "r1"))
+            self.assertFalse(scheduler.cancel_waiting_desktop_job(td, "c1"))
+            self.assertFalse(scheduler.cancel_waiting_desktop_job(td, "w1"))  # already done
+
+
 class DispatchTests(unittest.TestCase):
     def test_server_meta_replace_retries_transient_permission_error(self):
         with tempfile.TemporaryDirectory() as td:

@@ -498,6 +498,33 @@ def _web_account_status(root, info):
     return (status.get("profiles") or {}).get(str((info or {}).get("profile_id") or "web")) or {}
 
 
+def cancel_waiting_desktop_job(root, job_id):
+    """Cancel a web-chat job that waits for TEAMYRA Desktop (not running).
+
+    A CANCEL file is read only by a running job, so a job whose account never
+    became ready stayed ``waiting_for_desktop`` after a cancel and looked
+    alive (maintenance issue ISS-20261107-104454-6d6338). The caller writes
+    CANCEL first: if the desktop claims the job at the same moment, the job
+    loop sees CANCEL and ends cancelled too. Returns True when cancelled here."""
+    job_dir = _jobs_dir(root) / job_id
+    lock = SchedulerLock(root, 5)
+    if not lock.acquire():
+        return False
+    try:
+        meta = _read_json(job_dir / "meta.json")
+        if (not isinstance(meta, dict) or (job_dir / "DONE").exists()
+                or meta.get("provider") not in DESKTOP_PROVIDERS or meta.get("state") != "waiting_for_desktop"):
+            return False
+        meta.update(state="cancelled", reason="cancelled", exit_code=1, attention=None, ended=time.time(),
+                    last_event="cancelled before TEAMYRA Desktop started it")
+        _write_meta(job_dir, meta)
+        (job_dir / "DONE").write_text("cancelled", encoding="utf-8")
+        _append_event(job_dir, "info", "cancelled before TEAMYRA Desktop started it")
+        return True
+    finally:
+        lock.release()
+
+
 def _return_jobs_from_blocked_accounts(root, metas, registry):
     """A web job handed to an account whose page then showed a sign-in form
     (or a human check) would wait there until it timed out. If that account

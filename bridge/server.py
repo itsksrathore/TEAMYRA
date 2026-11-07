@@ -2284,6 +2284,9 @@ def tool_call(name, a):
             except ValueError:
                 pass  # dispatched meanwhile: cancel it like a running job
         (JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
+        if scheduler.cancel_waiting_desktop_job(jobs_root(), terminal_id):
+            return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
+                    "note": "the web-chat job was waiting for its account and never started"}
         return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
                 "note": "the active terminal worker stops within a few seconds"}
     if name == "worker_status":

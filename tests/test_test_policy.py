@@ -91,5 +91,32 @@ class TestPolicyTests(unittest.TestCase):
             self.assertIn("MCP_TEST_OK", result["steps"][0]["stdout_tail"])
 
 
+class ResolveArgvTests(unittest.TestCase):
+    """npm on Windows is npm.cmd, which a shell-less start cannot run
+    (maintenance issue ISS-20261107-103622-59ae1f)."""
+
+    def test_windows_names_resolve_without_a_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td) / "nodejs"
+            (folder / "node_modules" / "npm" / "bin").mkdir(parents=True)
+            for name in ("node.exe", "npm.cmd", "npx.cmd", "tool.bat", "node_modules/npm/bin/npm-cli.js",
+                         "node_modules/npm/bin/npx-cli.js"):
+                (folder / name).write_text("", encoding="utf-8")
+            paths = {"npm": folder / "npm.cmd", "npx": folder / "npx.cmd", "tool": folder / "tool.bat",
+                     "python": Path(td) / "python.exe", "node": folder / "node.exe"}
+            which = lambda name: str(paths[name]) if name in paths else None
+            resolve = lambda argv: test_policy.resolve_argv(argv, which=which, platform="nt")
+            self.assertEqual(resolve(["npm", "run", "desktop:check"]),
+                             [str(folder / "node.exe"), str(folder / "node_modules/npm/bin/npm-cli.js"), "run", "desktop:check"])
+            self.assertEqual(resolve(["npx", "tsc"])[1], str(folder / "node_modules/npm/bin/npx-cli.js"))
+            self.assertEqual(resolve(["python", "-m", "unittest"]), [str(paths["python"]), "-m", "unittest"])
+            with self.assertRaisesRegex(ValueError, "batch file"):
+                resolve(["tool", "x"])
+            with self.assertRaisesRegex(ValueError, "not found on PATH"):
+                resolve(["missing-program"])
+            # Elsewhere the argv is used as given.
+            self.assertEqual(test_policy.resolve_argv(["npm", "test"], which=which, platform="posix"), ["npm", "test"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -110,6 +110,8 @@ def handle(action, payload):
         terminal_id = server.failover_terminal_job_id(job_id)
         server.read_meta(terminal_id)
         (server.JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
+        import scheduler
+        scheduler.cancel_waiting_desktop_job(ROOT, terminal_id)
         return {
             "ok": True,
             "job_id": job_id,

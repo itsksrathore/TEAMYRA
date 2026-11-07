@@ -1,4 +1,6 @@
 """Deterministic no-shell test-policy runner for TEAMYRA."""
+import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -38,6 +40,41 @@ def normalize_steps(raw_steps):
     return normalized
 
 
+NODE_SCRIPTS = {"npm": "npm-cli.js", "npx": "npx-cli.js"}
+
+
+def resolve_argv(argv, which=shutil.which, platform=os.name):
+    """The argv to start without a shell. On Windows a bare ``npm`` is the
+    batch file ``npm.cmd``, which CreateProcess cannot start ("WinError 2"),
+    and batch files must not be run through cmd.exe with model-written
+    arguments. So: a name on PATH becomes its full path; ``npm``/``npx`` run
+    as ``node.exe <npm>/bin/npm-cli.js`` (what npm.cmd does); any other
+    batch file is refused with a clear message."""
+    argv = list(argv)
+    if platform != "nt" or not argv:
+        return argv
+    exe = argv[0]
+    found = which(exe)
+    if not found:
+        raise ValueError(f"{exe} was not found on PATH; pass the full path of the program")
+    suffix = Path(found).suffix.lower()
+    if suffix in (".exe", ".com", ""):
+        return [found, *argv[1:]]
+    if suffix in (".cmd", ".bat"):
+        name = Path(found).stem.lower()
+        script = NODE_SCRIPTS.get(name)
+        if script:
+            folder = Path(found).parent
+            node = folder / "node.exe"
+            node = str(node) if node.exists() else which("node")
+            cli = folder / "node_modules" / "npm" / "bin" / script
+            if node and cli.exists():
+                return [node, str(cli), *argv[1:]]
+        raise ValueError(f"{exe} is a batch file ({found}); TEAMYRA runs tests without a shell, "
+                         "so pass the real program (for example node.exe and its script)")
+    return [found, *argv[1:]]
+
+
 def _clip(text, limit=MAX_OUTPUT):
     text = str(text or "")
     return text if len(text) <= limit else text[-limit:]
@@ -56,7 +93,7 @@ def run_steps(raw_steps, cwd):
         timed_out = False
         try:
             cp = subprocess.run(
-                step["argv"],
+                resolve_argv(step["argv"]),
                 cwd=str(cwd),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,

@@ -276,9 +276,8 @@ class WorkspaceToolService:
             raise WorkspaceToolError("workspace must be an existing directory")
         if path == Path(path.anchor).resolve() or path == Path.home().resolve():
             raise PermissionError("workspace is too broad; select a project directory")
-        for blocked in self._sensitive_roots():
-            if path == blocked or _is_relative_to(path, blocked):
-                raise PermissionError("system or credential directories cannot be selected as workspaces")
+        if self._blocked(path, self._sensitive_roots(), workspace=path):
+            raise PermissionError("system or credential directories cannot be selected as workspaces")
         current = self._load()
         current_workspace = Path(current["workspace"]).resolve() if current["workspace"] else None
         same_workspace = bool(current_workspace and os.path.normcase(str(current_workspace)) == os.path.normcase(str(path)))
@@ -362,6 +361,48 @@ class WorkspaceToolService:
         if not path.exists() or not path.is_dir():
             raise WorkspaceToolError("selected workspace is unavailable")
         return path, data["permissions"]
+
+    def _managed_worktree(self, path):
+        """True when ``path`` is a worktree TEAMYRA created and registered
+        (ROOT/worktrees/<name>, listed in ROOT/worktrees/.teamyra/*.json).
+        Such a worktree is a normal project checkout made for a job, so it may
+        be a workspace although ROOT/worktrees itself stays blocked: the
+        registry and every other worktree remain out of reach."""
+        try:
+            path = Path(path).resolve()
+            worktrees = (self.root / "worktrees").resolve()
+        except OSError:
+            return False
+        if path.parent != worktrees or path.name.startswith("."):
+            return False
+        registry = worktrees / ".teamyra"
+        wanted = os.path.normcase(str(path))
+        try:
+            entries = list(registry.glob("*.json"))
+        except OSError:
+            return False
+        for entry in entries:
+            try:
+                meta = json.loads(entry.read_text(encoding="utf-8"))
+                if os.path.normcase(str(Path(meta.get("path") or "").resolve())) == wanted:
+                    return True
+            except (OSError, ValueError, TypeError):
+                continue
+        return False
+
+    def _blocked(self, candidate, roots, workspace=None):
+        """Is ``candidate`` inside a blocked root? Paths inside a workspace
+        that is a registered TEAMYRA worktree are not blocked by the
+        ROOT/worktrees entry (only by the others)."""
+        worktrees = (self.root / "worktrees").resolve()
+        exempt = workspace if workspace is not None and self._managed_worktree(workspace) else None
+        for blocked in roots:
+            if candidate == blocked or _is_relative_to(candidate, blocked):
+                if (exempt is not None and blocked == worktrees
+                        and (candidate == exempt or _is_relative_to(candidate, exempt))):
+                    continue
+                return True
+        return False
 
     def _sensitive_roots(self, full_access=False):
         """Locations no workspace tool may touch.  With Full PC access the
@@ -449,9 +490,8 @@ class WorkspaceToolService:
             relative = candidate.relative_to(workspace)
             if relative.parts and relative.parts[0].lower() == ".git":
                 raise PermissionError("direct filesystem access to Git internals is blocked; use TEAMYRA git tools")
-        for blocked in self._sensitive_roots(full_access=outside_ok):
-            if candidate == blocked or _is_relative_to(candidate, blocked):
-                raise PermissionError("access to TEAMYRA runtime, system, or credential storage is blocked")
+        if self._blocked(candidate, self._sensitive_roots(full_access=outside_ok), workspace=workspace):
+            raise PermissionError("access to TEAMYRA runtime, system, or credential storage is blocked")
         if self._sensitive_name(candidate):
             raise PermissionError("access to credential-like files is blocked")
         return candidate
@@ -466,7 +506,7 @@ class WorkspaceToolService:
                 return False
             if self._sensitive_name(resolved):
                 return False
-            return not any(resolved == blocked or _is_relative_to(resolved, blocked) for blocked in roots)
+            return not self._blocked(resolved, roots, workspace=workspace)
 
         return visible
 
@@ -594,9 +634,8 @@ class WorkspaceToolService:
             raise WorkspaceToolError("workspace must be an existing directory")
         if scoped == Path(scoped.anchor).resolve() or scoped == Path.home().resolve():
             raise PermissionError("workspace is too broad; assign a project directory")
-        for blocked in self._sensitive_roots():
-            if scoped == blocked or _is_relative_to(scoped, blocked):
-                raise PermissionError("system or credential directories cannot be assigned as workspaces")
+        if self._blocked(scoped, self._sensitive_roots(), workspace=scoped):
+            raise PermissionError("system or credential directories cannot be assigned as workspaces")
         return scoped
 
     def authorize_process(

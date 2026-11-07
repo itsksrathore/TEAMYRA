@@ -1044,6 +1044,17 @@ class ChatGPTWebProvider {
   // Fails a waiting job whose time budget ran out while the worker was not
   // ready, with the reason it waited, so it never sits for hours unnoticed.
   expireWaitingJob({ dir, meta }) {
+    // Cancelled while it waited: only a running job reads CANCEL, so a job
+    // whose account was not ready stayed "waiting" after a cancel.
+    if (fs.existsSync(path.join(dir, 'CANCEL'))) {
+      this.appendJobEvent(dir, 'info', 'cancelled before it started');
+      this.writeJobMeta(dir, {
+        state: 'cancelled', reason: 'cancelled', exit_code: 1, attention: null, ended: Date.now() / 1000,
+        last_event: 'cancelled before it started'
+      });
+      fs.writeFileSync(path.join(dir, 'DONE'), 'cancelled', 'utf8');
+      return true;
+    }
     const start = Number(meta.dispatched_at || meta.created || 0);
     const timeout = Number(meta.timeout_s || 0);
     if (!start || !timeout || Date.now() / 1000 <= start + timeout) return false;
@@ -1064,7 +1075,7 @@ class ChatGPTWebProvider {
     this.pendingJobCount = scan.owned;
     // Only jobs no other tab of this account has taken.
     let candidates = scan.waiting.filter(job => !CLAIMED_JOBS.has(job.dir));
-    if (this.lane === 0 && candidates.some(job => this.expireWaitingJob(job))) {
+    if (this.lane === 0 && candidates.map(job => this.expireWaitingJob(job)).some(Boolean)) {
       candidates = candidates.filter(job => !fs.existsSync(path.join(job.dir, 'DONE')));
       this.dispatchQueuedJobs();
     }

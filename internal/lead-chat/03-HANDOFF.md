@@ -54,7 +54,8 @@ Run independent packages at the same time on different workers. Never give two r
 3. **Follow it:** `job_wait {job_ids, timeout_seconds: 600}`, repeated. `job_status` or `job_events` show progress.
    - If a job is `needs_user` (sign-in or captcha), tell the user which worker and wait. Never try to get around it. If nobody completes it within 5 min and another agent is free, TEAMYRA moves the job there by itself.
    - TEAMYRA hands a stuck job over to another account or model on its own: on a usage limit, an unsolved check, a broken page or a failed chat. The new agent gets the task, every step done so far and the folder state (docs/AGENT_HANDOVER.md). Keep waiting on the **first** job id: `job_wait` and `job_result` follow the hand-over, and `job_result.failover_chain` lists it. Do not start a duplicate job for a moved task.
-   - If a job fails for good (no hand-over left), read `job_result`, then send a corrected job (or `job_message` if the job is still alive), usually to the same worker. After two failures, try another worker.
+   - If a job fails for good (no hand-over left), read `job_result`, then send a corrected job to the same worker, or `job_message` (it continues a job **after** it ended, in the same chat; it cannot reach a running job). After two failures, try another worker. To stop a running job that goes the wrong way, `job_cancel` it and send a corrected job.
+   - A job that must run tests or commands needs `write: true`; with `write: false` the terminal tools are off.
 4. **Review:**
    - `job_result` (the report) and `worktree_diff {worktree_id}` (the real change);
    - `test_run` in the worktree with the two suite commands from 02 plus the new test;
