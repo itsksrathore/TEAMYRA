@@ -299,3 +299,22 @@ replyTests().catch(error => { console.error(error); process.exitCode = 1; });
   const other = parse('Models emit <tool_call>{"name": "get_weather", "arguments": {}}</tool_call> in their template. Done.');
   assert.equal(other.marker, false, 'a reply that only mentions the tag is not a request');
 }
+
+// DeepSeek, 2026-11-07: its own DSML tool-call markup ended the job as the
+// final report. It is a request when it names a TEAMYRA tool.
+{
+  const parse = text => new ChatGPTAutomationAdapter(null).parseToolRequestDetailed(text);
+  const dsml = parse([
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="terminal.run">',
+    '<｜｜DSML｜｜ parameter name="command" string="true">git status --short</｜｜DSML｜｜ parameter>',
+    '<｜｜DSML｜｜ parameter name="timeout_seconds" string="false">60</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+    '</｜｜DSML｜｜ calls>'
+  ].join('\n'));
+  assert.deepEqual(dsml.request, { tool: 'terminal.run', args: { command: 'git status --short', timeout_seconds: 60 } });
+  const ascii = parse('<||DSML|| invoke name="filesystem.read"><||DSML|| parameter name="path" string="true">a.txt</||DSML|| parameter></||DSML|| invoke>');
+  assert.deepEqual(ascii.request, { tool: 'filesystem.read', args: { path: 'a.txt' } });
+  const other = parse('<｜｜DSML｜｜ invoke name="web_search"><｜｜DSML｜｜ parameter name="q" string="true">x</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>');
+  assert.equal(other.marker, false, 'a non-TEAMYRA tool is not a request');
+}

@@ -284,8 +284,35 @@ function fromNativeCall(data) {
   return { tool, args: typeof args === 'string' ? (() => { try { return JSON.parse(args); } catch { return args; } })() : args };
 }
 
+// DeepSeek's own tool-call markup (2026-11-07), taken as the final report:
+// <｜｜DSML｜｜ invoke name="terminal.run">
+// <｜｜DSML｜｜ parameter name="command" string="true">dir</｜｜DSML｜｜ parameter>
+// The bars may be ASCII or full-width. Read as {"tool", "args"} when it names
+// a TEAMYRA tool; string="false" values are JSON.
+const DSML_TAG = String.raw`<[|｜]+\s*DSML\s*[|｜]+`;
+const DSML_INVOKE = new RegExp(DSML_TAG + String.raw`\s*invoke\s+name="([^"]+)"\s*>([\s\S]*?)(?:<\/[|｜]+\s*DSML\s*[|｜]+\s*invoke\s*>|$)`);
+const DSML_PARAM = new RegExp(DSML_TAG + String.raw`\s*parameter\s+name="([^"]+)"([^>]*)>([\s\S]*?)<\/[|｜]+\s*DSML\s*[|｜]+\s*parameter\s*>`, 'g');
+
+function parseDsmlCall(value) {
+  const invoke = DSML_INVOKE.exec(value);
+  if (!invoke) return null;
+  const tool = invoke[1].trim();
+  if (!TEAMYRA_TOOL_NAME.test(tool)) return { marker: false, request: null, error: null };
+  const args = {};
+  for (const [, name, attrs, raw] of invoke[2].matchAll(DSML_PARAM)) {
+    let parsed = raw;
+    if (/string\s*=\s*"false"/.test(attrs)) { try { parsed = JSON.parse(raw); } catch { parsed = raw; } }
+    args[name] = parsed;
+  }
+  return { marker: true, request: { tool, args: normalizePathArgs(args) }, error: null };
+}
+
 function parseToolRequestDetailed(text) {
   const value = String(text || '');
+  if (!value.includes(TOOL_REQUEST_MARKER) && /DSML/.test(value)) {
+    const dsml = parseDsmlCall(value);
+    if (dsml) return dsml;
+  }
   let markerAt = value.indexOf(TOOL_REQUEST_MARKER);
   let markerLength = TOOL_REQUEST_MARKER.length;
   let native = false;
