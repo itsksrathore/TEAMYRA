@@ -329,7 +329,9 @@ const MAX_WEB_LANES = 8;
 // (2026-11-07). An account's own `lanes` setting still wins.
 // Qwen's heavy page froze (even simple page checks timed out) with five
 // hidden tabs per account sharing one renderer process.
-const SITE_DEFAULT_LANES = { 'glm-web': 2, 'qwen-web': 2 };
+// Fewer chats at once per account also keeps sites from flagging "unusual
+// activity" (ChatGPT); the scheduler rotates jobs over the accounts.
+const SITE_DEFAULT_LANES = { 'glm-web': 2, 'qwen-web': 2, 'chatgpt-web': 3, 'muse-web': 3, 'deepseek-web': 3 };
 
 function webLaneCount(providerId, profileId) {
   let lanes = Number(process.env.TEAMYRA_WEB_LANES) || SITE_DEFAULT_LANES[providerId] || DEFAULT_WEB_LANES;

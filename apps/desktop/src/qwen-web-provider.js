@@ -15,10 +15,18 @@ const QWEN_HOSTS = {
   has: host => QWEN_EXTRA_HOSTS.has(host) || QWEN_DOMAINS.some(domain => host === domain || String(host).endsWith('.' + domain))
 };
 
+// Model order (2026-11-07): Qwen3.8-Max, the flagship, kept hitting its usage
+// limit on the free plan, so TEAMYRA uses Qwen3.7-Plus, then
+// Qwen3.8-Omni-Flash, then any other Plus; Max only if none of those is
+// offered. TEAMYRA_QWEN_MODEL (a name such as "Qwen3.8-Max") overrides.
+const QWEN_MODEL_ORDER = process.env.TEAMYRA_QWEN_MODEL
+  ? [process.env.TEAMYRA_QWEN_MODEL]
+  : ['Qwen3.7-Plus', 'Qwen3.8-Omni-Flash'];
+
 const QWEN_SETTINGS_JS = `(async () => {
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const state = {};
-  const isBest = text => /flagship/i.test(text);
+  const preferred = ${JSON.stringify(QWEN_MODEL_ORDER)};
   const modelTrigger = () => document.querySelector('[aria-label="Select Model"]');
   const trigger = modelTrigger();
   if (!trigger) state.model = 'missing';
@@ -27,8 +35,10 @@ const QWEN_SETTINGS_JS = `(async () => {
     await sleep(500);
     const items = [...document.querySelectorAll('.wms-list__item')];
     const version = text => Number((text.match(/Qwen(\\d+(?:\\.\\d+)?)/i) || [])[1] || 0);
-    const best = items.find(item => isBest(item.innerText)) ||
-      items.filter(item => /-Max\\b/i.test(item.innerText)).sort((a, b) => version(b.innerText) - version(a.innerText))[0];
+    const named = item => item.innerText.trim().split('\\n')[0].trim();
+    const newest = pattern => items.filter(item => pattern.test(named(item))).sort((a, b) => version(named(b)) - version(named(a)))[0];
+    const best = preferred.map(name => items.find(item => named(item).toLowerCase() === name.toLowerCase())).find(Boolean) ||
+      newest(/-Plus\\b/i) || newest(/Omni-Flash/i) || items.find(item => /flagship/i.test(item.innerText)) || newest(/-Max\\b/i);
     const name = best ? best.innerText.trim().split('\\n')[0] : '';
     if (best && !String(best.className).includes('selected')) { best.click(); await sleep(400); }
     // Close the list with a click beside it (toggling the trigger reopened it).

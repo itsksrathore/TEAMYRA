@@ -66,3 +66,11 @@ Optional, in `bridge/config.json`:
 - `wait_minutes`: how long a stopped task waits for a ready agent.
 - `providers`: the order of the other sites.
 - `pack_chars`: the size of the step list and last reply in the pack. The original task always comes in full.
+
+## Spreading work over accounts
+
+Sites flag an account that works without a break ("unusual activity" on ChatGPT). So TEAMYRA spreads web-chat work over each site's accounts:
+
+- **Rotation:** a queued job goes to the least busy ready account of its site. Ties go to the account with fewer jobs in the last hour, then to the one used longest ago. So jobs alternate: ChatGPT 1, then ChatGPT 2, then ChatGPT 1 again. With 5 accounts, all five take turns. Signed-out accounts, accounts showing a check, and accounts cooling down after a limit or block are skipped. Pass `account_fixed: true` to `start_task` to keep a job on the account named in `worker`.
+- **Pacing:** each account starts at most one new job every 20 seconds (`WEB_PACING_SECONDS` in `bridge/scheduler.py`).
+- **Tabs per account:** ChatGPT, Muse and DeepSeek run up to 3 jobs at once per account, Qwen and GLM up to 2. An account's own `lanes` setting in its `teamyra-profile.json` overrides this (`SITE_DEFAULT_LANES` in `apps/desktop/src/main.js`).

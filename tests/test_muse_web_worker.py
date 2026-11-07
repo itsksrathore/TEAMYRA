@@ -126,7 +126,8 @@ class MuseWorkerTests(unittest.TestCase):
     def test_an_account_with_tabs_runs_that_many_jobs_at_once(self):
         # One ChatGPT/Muse account runs several tabs, each in its own chat;
         # the queue used to start one job per account and hold the rest.
-        with tempfile.TemporaryDirectory() as td:
+        # (Pacing between starts is tested in test_scheduler; off here.)
+        with tempfile.TemporaryDirectory() as td, patch.object(scheduler, "WEB_PACING_SECONDS", 0):
             write_status(td, "muse", session_present=True, automation_ready=True, lanes=2)
             for n in range(3):
                 write_job(td, f"q{n}", state="queued", queued_at=n, queue_order=n + 1, created=n)

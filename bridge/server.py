@@ -650,7 +650,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
               queue=False, pin=False, pool=False, expect_files=None, worker_order=None, teamyra_mcp=False,
-              transfer=None):
+              transfer=None, account_fixed=False):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
@@ -723,6 +723,8 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             "worker_order": list(worker_order or []), "teamyra_mcp": bool(teamyra_mcp)}
     if transfer is False:
         meta["transfer"] = False  # never hand this job over to another agent (job_transfer)
+    if account_fixed:
+        meta["account_fixed"] = True  # web-chat account rotation leaves this job on its account
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "task.txt").write_text(full_task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
@@ -1714,6 +1716,7 @@ TOOLS = [
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
          "write": {"type": "boolean", "default": True},
          "pin": {"type": "boolean", "default": False, "description": "Keep the job on its assigned worker."},
+         "account_fixed": {"type": "boolean", "default": False, "description": "Web-chat jobs rotate over the ready accounts of their site (least used first). true keeps this job on the account named in worker."},
          "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is."},
          "pool": {"type": "boolean", "default": False, "description": "Allow idle workers of the same provider to take this queued job."},
          "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
@@ -1804,6 +1807,7 @@ TOOLS = [
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
                      "write": {"type": "boolean", "default": True},
                      "pin": {"type": "boolean", "default": False},
+                     "account_fixed": {"type": "boolean", "default": False, "description": "Web-chat jobs rotate over the ready accounts of their site (least used first). true keeps this job on the account named in worker."},
                      "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is."},
                      "pool": {"type": "boolean", "default": False},
                      "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
@@ -2168,7 +2172,7 @@ def tool_call(name, a):
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
-            transfer=a.get("transfer"),
+            transfer=a.get("transfer"), account_fixed=a.get("account_fixed", False),
         )
         result = {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
         hint = media_guide.image_task_hint(a["task"], worker)
@@ -2326,7 +2330,7 @@ def tool_call(name, a):
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
-            transfer=a.get("transfer"),
+            transfer=a.get("transfer"), account_fixed=a.get("account_fixed", False),
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
         res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}

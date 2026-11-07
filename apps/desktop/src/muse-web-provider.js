@@ -37,9 +37,14 @@ const MUSE_SITE = {
     // TEAMYRA reads Muse's answer from the page, which drops backslashes,
     // Markdown characters and anything that looks like an HTML tag ("<id>"):
     // long file contents then broke as JSON (2026-11-07). \u escapes survive.
-    'This page changes some characters in your answer. Inside the JSON of a TEAMYRA_TOOL_REQUEST, write every backslash as \\u005c, ' +
-      'every double quote inside a string as \\u0022, < and > as \\u003c and \\u003e, and * _ ` $ inside strings as ' +
-      '\\u002a \\u005f \\u0060 \\u0024. Line breaks stay \\n. Keep each tool request under about 4000 characters: write a long file with filesystem.create holding ' +
+    // Muse's page shows the answer as Markdown: outside a code block
+    // "__file__" became bold "file" and leading spaces collapsed; the earlier
+    // \u-escape rule was misapplied ("/u005f" in a path). A code block keeps
+    // the text exactly, and TEAMYRA reads the request from it (2026-11-07).
+    'On this site, unlike the general rule above, put the TEAMYRA_TOOL_REQUEST line inside a fenced code block: a line with ```text, ' +
+      'then the request line, then a line with ```. This page shows text outside code blocks as formatted Markdown, which changes ' +
+      'underscores, asterisks, backslashes and spaces. Inside the code block write normal JSON. ' +
+      'Keep each tool request under about 4000 characters: write a long file with filesystem.create holding ' +
       'the first part and a last line TEAMYRA_CONTINUE, add each next part with filesystem.patch (find TEAMYRA_CONTINUE, ' +
       'replace with the part plus a new TEAMYRA_CONTINUE line), and finally replace the marker with the last part.'
   ]

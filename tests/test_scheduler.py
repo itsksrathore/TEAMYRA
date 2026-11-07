@@ -59,6 +59,69 @@ class Spawned:
         return 4242
 
 
+class AccountRotationTests(unittest.TestCase):
+    """Queued web-chat jobs spread over the site's ready accounts, and each
+    account starts at most one job per WEB_PACING_SECONDS."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+        (self.root / "jobs").mkdir()
+        scheduler._META_CACHE.clear()
+        acc2 = self.root / "profiles" / "chatgpt-web" / "acc2"
+        acc2.mkdir(parents=True)
+        (acc2 / "teamyra-profile.json").write_text(json.dumps({"name": "ChatGPT 2"}), encoding="utf-8")
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def status(self, **acc2):
+        (self.root / "chatgpt").mkdir(exist_ok=True)
+        ready = {"automation_ready": True, "session_present": True, "lanes": 3}
+        (self.root / "chatgpt" / "status.json").write_text(json.dumps({
+            "heartbeat_at": time.time(), "active_profile_id": "web",
+            "profiles": {"web": ready, "acc2": {**ready, **acc2}}}), encoding="utf-8")
+
+    def queue(self, job_id, created, **extra):
+        write_job(self.root, job_id, worker="chatgpt-normal", provider="chatgpt-web", state="queued",
+                  created=created, queued_at=created, queue_order=created, **extra)
+
+    def test_jobs_alternate_between_accounts_and_are_paced(self):
+        self.status()
+        for n in range(4):
+            self.queue(f"q{n}", 1000 + n)
+        report = scheduler.dispatch_once(self.root, spawn=Spawned())
+        workers = {m["id"]: m["worker"] for m in scheduler.load_jobs(self.root)}
+        self.assertEqual(workers, {"q0": "chatgpt-normal", "q1": "chatgpt-acc2", "q2": "chatgpt-normal", "q3": "chatgpt-acc2"})
+        # One start per account now; the rest wait for the pacing gap.
+        self.assertEqual(sorted(d["worker"] for d in report["dispatched"]), ["chatgpt-acc2", "chatgpt-normal"])
+        states = {m["id"]: m["state"] for m in scheduler.load_jobs(self.root)}
+        self.assertEqual(sorted(k for k, v in states.items() if v == "queued"), ["q2", "q3"])
+        # A second pass inside the gap starts nothing more.
+        again = scheduler.dispatch_once(self.root, spawn=Spawned())
+        self.assertEqual(again["dispatched"], [])
+        self.assertIn("pacing", {w["reason"] for w in again["waiting"]})
+        later = time.time() + scheduler.WEB_PACING_SECONDS + 1
+        self.assertEqual(scheduler.web_pacing_left(self.root, "chatgpt-normal", scheduler.load_jobs(self.root),
+                                                   {"provider": "chatgpt-web"}, now=later), 0)
+
+    def test_least_recently_used_account_goes_first(self):
+        self.status()
+        write_job(self.root, "old", worker="chatgpt-normal", provider="chatgpt-web", state="done", done=True,
+                  dispatched_at=time.time() - 120)
+        self.queue("q0", 2000)
+        scheduler.dispatch_once(self.root, spawn=Spawned())
+        self.assertEqual(read_meta(self.root, "q0")["worker"], "chatgpt-acc2")
+
+    def test_blocked_account_and_fixed_jobs_are_left_alone(self):
+        self.status(challenged=True)
+        self.queue("q0", 1000)
+        self.queue("q1", 1001)
+        self.queue("fixed", 1002, account_fixed=True)
+        scheduler.dispatch_once(self.root, spawn=Spawned())
+        self.assertTrue(all(m["worker"] == "chatgpt-normal" for m in scheduler.load_jobs(self.root)))
+
+
 class CancelWaitingDesktopJobTests(unittest.TestCase):
     """ISS-20261107-104454-6d6338: a cancelled web job that waited for its
     account stayed waiting_for_desktop."""

@@ -498,6 +498,91 @@ def _web_account_status(root, info):
     return (status.get("profiles") or {}).get(str((info or {}).get("profile_id") or "web")) or {}
 
 
+# --- account rotation for web-chat sites ---------------------------------------------
+# Sites flag an account that works without pause ("unusual activity" on
+# ChatGPT, 2026-11-07). Queued web-chat jobs therefore go to the least busy,
+# least recently used ready account of the same site (ChatGPT 1, then 2, then
+# 1 ...), and each account starts at most one job per WEB_PACING_SECONDS.
+WEB_PACING_SECONDS = 20
+
+
+def _last_start(root, worker, metas):
+    times = [float(m.get("dispatched_at") or 0) for m in metas if m.get("worker") == worker]
+    return max(times) if times else 0.0
+
+
+def _starts_since(worker, metas, since):
+    return sum(1 for m in metas if m.get("worker") == worker and float(m.get("dispatched_at") or 0) >= since)
+
+
+def _account_usable(root, info, metas):
+    if info.get("enabled", True) is False:
+        return False
+    if not chatgpt_ready(root, info):
+        return False
+    return not cooldown_left(root, info["id"], metas)
+
+
+def rotate_web_queues(root, metas, registry, now=None):
+    """Give each queued web-chat job (not ``account_fixed``) to the best ready
+    account of its site. Called under the scheduler lock. Returns the moves."""
+    now = time.time() if now is None else now
+    moves = []
+    by_provider = {}
+    for worker, info in registry.items():
+        if info.get("provider") in DESKTOP_PROVIDERS and info.get("execution") == "desktop-web":
+            by_provider.setdefault(info["provider"], []).append(dict(info, id=worker))
+    planned = {}  # worker -> jobs given to it in this pass
+    queued = sorted((m for m in metas if is_queued(m) and m.get("provider") in by_provider
+                     and not m.get("account_fixed")), key=queue_key)
+    for meta in queued:
+        accounts = [a for a in by_provider[meta["provider"]] if _account_usable(root, a, metas)]
+        allowed = set(meta.get("worker_order") or [])
+        if allowed:
+            accounts = [a for a in accounts if a["id"] in allowed] or accounts
+        if not accounts:
+            continue
+
+        def rank(account):
+            worker = account["id"]
+            load = len(active_jobs(root, worker, metas)) + planned.get(worker, 0)
+            capacity = worker_capacity(root, account)
+            return (load >= capacity, load / capacity, _starts_since(worker, metas, now - 3600),
+                    _last_start(root, worker, metas), worker)
+
+        best = min(accounts, key=rank)
+        current = next((a for a in accounts if a["id"] == meta.get("worker")), None)
+        # Stay when the current account is as good (same load and use).
+        if current is not None and rank(current)[:3] <= rank(best)[:3]:
+            best = current
+        planned[best["id"]] = planned.get(best["id"], 0) + 1
+        if best["id"] == meta.get("worker"):
+            continue
+        job_dir = _jobs_dir(root) / meta["id"]
+        fresh = _read_json(job_dir / "meta.json")
+        spec = _read_json(job_dir / "spec.json")
+        if not isinstance(fresh, dict) or not isinstance(spec, dict) or not is_queued(fresh) or (job_dir / "DONE").exists():
+            continue
+        old = fresh.get("worker")
+        fresh.update(worker=best["id"], worker_label=best.get("label"), profile_id=best.get("profile_id"),
+                     queued_at=fresh.get("queued_at") or now,
+                     last_event=f"rotated to {best.get('label') or best['id']} (least used {site_name(meta['provider'])} account)")
+        _write_spec(job_dir, dict(spec, worker=best["id"], profile_id=best.get("profile_id")))
+        _write_meta(job_dir, fresh)
+        _append_event(job_dir, "info", f"account rotation: {old} -> {best['id']}")
+        meta.update(fresh)
+        moves.append({"job_id": meta["id"], "from": old, "to": best["id"]})
+    return moves
+
+
+def web_pacing_left(root, worker, metas, info, now=None):
+    """Seconds until this web-chat account may start another job (0 = now)."""
+    if (info or {}).get("provider") not in DESKTOP_PROVIDERS:
+        return 0
+    now = time.time() if now is None else now
+    return max(0, int(_last_start(root, worker, metas) + WEB_PACING_SECONDS - now))
+
+
 def cancel_waiting_desktop_job(root, job_id):
     """Cancel a web-chat job that waits for TEAMYRA Desktop (not running).
 
@@ -573,6 +658,9 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
         metas = load_jobs(root)
         registry = build_worker_registry(root) if registry is None else registry
         report["returned"] = _return_jobs_from_blocked_accounts(root, metas, registry)
+        report["rotated"] = rotate_web_queues(root, metas, registry)
+        if report["rotated"]:
+            metas = load_jobs(root)
         names = sorted({m.get("worker") for m in metas if is_queued(m) and m.get("worker")} |
                        {w for w, info in registry.items() if info.get("enabled", True)})
         if workers is not None:
@@ -600,6 +688,8 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
             reason = None
             if worker_busy(root, worker, metas, info):
                 reason = "busy"
+            elif web_pacing_left(root, worker, metas, info):
+                reason = "pacing"
             elif cooldown_left(root, worker, metas):
                 reason = "cooldown"
             elif is_ready is not None:
@@ -627,7 +717,8 @@ def dispatch_once(root, bridge=None, python_exe=None, spawn=None, is_ready=None,
                     metas = load_jobs(root)
                     # A cancelled job leaves the worker free, and a web-chat
                     # account with free tabs takes more of its own queue now.
-                    while not borrowed and not worker_busy(root, worker, metas, info):
+                    while (not borrowed and not worker_busy(root, worker, metas, info)
+                           and not web_pacing_left(root, worker, metas, info)):
                         rest = queued_jobs(root, worker, metas)
                         again = _dispatch_job(root, rest[0], spawn) if rest else None
                         if not again:

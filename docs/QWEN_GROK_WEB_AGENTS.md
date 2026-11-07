@@ -13,7 +13,7 @@ A Continue button at a site's length limit is clicked automatically, and "busy" 
 
 `apps/desktop/src/qwen-web-provider.js`. Page checked on 2026-11-06, free plan.
 
-- **Model:** the one Qwen labels its flagship ("Qwen3.8-Max: The flagship of Qwen3.8 model"), or else the newest `-Max`. The other choices were Qwen3.7-Plus and Qwen3.8-Omni-Flash.
+- **Model:** Qwen3.7-Plus, then Qwen3.8-Omni-Flash, then the newest other `-Plus`; the flagship Qwen3.8-Max only when none of those is offered. Max kept hitting its free-plan usage limit (2026-11-07). `TEAMYRA_QWEN_MODEL` names another model to use.
 - **Thinking:** set to **Thinking** (the choices are Auto / Thinking / Fast). Qwen's own web search runs automatically (`auto_search`).
 - **Off:** Agent Mode, Web Dev, Deep Research and the image and video modes stay off. They work with Qwen's own tools, not the project.
 - **Page:**
