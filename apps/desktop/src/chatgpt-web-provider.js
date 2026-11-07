@@ -238,7 +238,12 @@ function looksLikeProtocolLoss(text, successfulTools) {
     /\b(?:don't|do not)\s+have\b[^.!?\n]*(?:TEAMYRA|local tools|tool interface)/i.test(reply);
   const paste = /\b(?:please\s+)?(?:paste|upload|provide|share)\b[^.!?\n]*(?:files?|file contents|source code|repository|repo|code here)/i.test(reply) &&
     !/\b(?:pasted|uploaded|provided|shared)\b/i.test(reply);
-  if (!(refusal || unavailable || paste)) return false;
+  // The site's own function calling answered for it (Qwen, 2026-11-07): the
+  // model called "filesystem.read" as a built-in tool instead of writing a
+  // TEAMYRA_TOOL_REQUEST line, and the site replied that the tool does not exist.
+  const nativeTool = /(?:^|\n)\s*Tool\s+(?:filesystem|terminal|git|process|page|screen)\.[\w.-]+\s+(?:does\s+not\s+exists?|not\s+found|is\s+not\s+available)\b/.test(reply);
+  if (!(refusal || unavailable || paste || nativeTool)) return false;
+  if (nativeTool) return true;
   // A completed result may discuss a resolved access error. Require actual
   // successful tool work before accepting that kind of completion claim.
   const completed = /(?:^|\n)\s*(?:done\b|finished\b|completed\b|implemented\b|fixed\b|I (?:have |successfully )?(?:completed|implemented|fixed)\b)/i.test(reply);

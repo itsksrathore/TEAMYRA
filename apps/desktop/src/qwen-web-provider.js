@@ -111,7 +111,8 @@ const QWEN_SITE = {
   adapter: (webContents, options) => new ChatSiteAdapter(webContents, options, QWEN_SITE.page),
   promptRules: [
     'Do not use Agent Mode, web dev previews or any built-in tool for this job; TEAMYRA_TOOL_REQUEST is the only way to reach the project.',
-    'Your thinking is not shown to TEAMYRA: put the TEAMYRA_TOOL_REQUEST line in your answer.'
+    'Your thinking is not shown to TEAMYRA: put the TEAMYRA_TOOL_REQUEST line in your answer.',
+    'Never call filesystem.*, terminal.*, git.* or any TEAMYRA tool through the built-in function calling of this site: it does not have them. Write the TEAMYRA_TOOL_REQUEST line as plain text in your answer.'
   ]
 };
 
