@@ -58,7 +58,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 	def handle(self, payload):
 		return desktop_api.handle('lead.tool', payload)
 
-	def run(self, name, args=None):
+	def run_tool(self, name, args=None):
 		if args is None:
 			return self.handle({'name': name})
 		return self.handle({'name': name, 'args': args})
@@ -93,7 +93,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 			for name in ('lead.' + tool, tool):
 				with self.subTest(name=name):
 					self.calls.clear()
-					result = self.run(name, {'probe': 1})
+					result = self.run_tool(name, {'probe': 1})
 					self.assertEqual(len(self.calls), 1)
 					self.assertEqual(self.calls[0][0], tool)
 					self.assertEqual(self.calls[0][1], {'probe': 1})
@@ -106,7 +106,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 			with self.subTest(name=name):
 				before = len(self.calls)
 				with self.assertRaises(ValueError):
-					self.run(name, {})
+					self.run_tool(name, {})
 				self.assertEqual(len(self.calls), before)
 				entry = self.last_audit()
 				self.assertEqual(entry['outcome'], 'denied')
@@ -115,7 +115,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 			with self.subTest(name=name):
 				before = len(self.calls)
 				with self.assertRaises(ValueError):
-					self.run(name, {})
+					self.run_tool(name, {})
 				self.assertEqual(len(self.calls), before)
 				self.assertEqual(self.last_audit()['outcome'], 'denied')
 		text = self.audit_text()
@@ -154,7 +154,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 				args = {'job_ids': ['j-1']}
 				args.update(extra)
 				snapshot = copy.deepcopy(args)
-				self.run('lead.job_wait', args)
+				self.run_tool('lead.job_wait', args)
 				self.assertEqual(args, snapshot)
 				self.assertEqual(self.calls[-1][0], 'job_wait')
 				self.assertEqual(self.calls[-1][1].get('timeout_seconds'), expected)
@@ -165,7 +165,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 			with self.subTest(bad=bad):
 				before = len(self.calls)
 				with self.assertRaises(ValueError):
-					self.run('job_wait', {'job_ids': ['j-1'], 'timeout_seconds': bad})
+					self.run_tool('job_wait', {'job_ids': ['j-1'], 'timeout_seconds': bad})
 				self.assertEqual(len(self.calls), before)
 				self.assertEqual(self.last_audit()['outcome'], 'denied')
 	def test_confirm_never_autoapproved_and_forwarded_unchanged(self):
@@ -182,13 +182,13 @@ class LeadToolAdversarialTests(unittest.TestCase):
 					self.assertNotIn('confirm', forwarded)
 
 	def test_audit_contains_only_safe_metadata(self):
-		self.run('lead.job_status', {'job_id': 'alpha', 'password': 'hunter2', 'content': 'secret content'})
-		self.run('lead.memory_add', {'content': 'secret content', 'token': 'private token'})
+		self.run_tool('lead.job_status', {'job_id': 'alpha', 'password': 'hunter2', 'content': 'secret content'})
+		self.run_tool('lead.memory_add', {'content': 'secret content', 'token': 'private token'})
 		with self.assertRaises(ValueError):
-			self.run('lead.terminal.run', {'command': 'secret content'})
+			self.run_tool('lead.terminal.run', {'command': 'secret content'})
 		self.router_error[0] = RuntimeError('private token abc')
 		with self.assertRaises(RuntimeError):
-			self.run('lead.team_report', {})
+			self.run_tool('lead.team_report', {})
 		self.router_error[0] = None
 		entries = self.audit_entries()
 		self.assertEqual(len(entries), 4)
@@ -209,29 +209,29 @@ class LeadToolAdversarialTests(unittest.TestCase):
 		self.assertNotIn('private token abc', text)
 		self.assertNotIn('alpha', text)
 	def test_outcomes_success_router_error_import_error_ok_false_and_failed_job(self):
-		result = self.run('lead.job_status', {'job_id': 'a'})
+		result = self.run_tool('lead.job_status', {'job_id': 'a'})
 		self.assertEqual(result, {'ok': True, 'tool': 'job_status'})
 		self.assertEqual(self.last_audit()['outcome'], 'success')
 		self.router_result[0] = {'ok': False, 'error': 'boom'}
-		result = self.run('lead.job_cancel', {'job_id': 'j'})
+		result = self.run_tool('lead.job_cancel', {'job_id': 'j'})
 		self.assertEqual(result, {'ok': False, 'error': 'boom'})
 		self.assertEqual(self.last_audit()['outcome'], 'error')
 		self.router_result[0] = {'ok': True, 'job': {'state': 'failed'}}
-		result = self.run('lead.job_result', {'job_id': 'j'})
+		result = self.run_tool('lead.job_result', {'job_id': 'j'})
 		self.assertEqual(result['job']['state'], 'failed')
 		self.assertEqual(self.last_audit()['outcome'], 'success')
 		self.router_result[0] = None
 		self.router_error[0] = RuntimeError('router exploded')
 		with self.assertRaisesRegex(RuntimeError, 'router exploded'):
-			self.run('lead.team_report', {})
+			self.run_tool('lead.team_report', {})
 		self.assertEqual(self.last_audit()['outcome'], 'error')
 		self.router_error[0] = None
 		with patch.dict(sys.modules, {'server': None}):
 			with self.assertRaises(ImportError):
-				self.run('lead.job_cancel', {'job_id': 'j'})
+				self.run_tool('lead.job_cancel', {'job_id': 'j'})
 		self.assertEqual(self.last_audit()['outcome'], 'error')
 		self.router_result[0] = 'plain-result'
-		result = self.run('lead.job_status', {'job_id': 'a'})
+		result = self.run_tool('lead.job_status', {'job_id': 'a'})
 		self.assertEqual(result, 'plain-result')
 		self.assertEqual(self.last_audit()['outcome'], 'success')
 		self.router_result[0] = None
@@ -243,7 +243,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 		attempts = (('lead.job_status', {'job_id': 'a'}), ('lead.terminal.run', {}), ('lead.job_wait', {'job_ids': ['b'], 'timeout_seconds': 3000}), ('lead.memory_search', {'query': 'x'}), ('lead./../start_task', {}), ('lead.team_report', {}), ('lead.queue_list', {}), ('lead.job_status', {'job_id': 'c'}))
 		for name, args in attempts:
 			try:
-				self.run(name, args)
+				self.run_tool(name, args)
 			except ValueError:
 				pass
 		entries = self.audit_entries()
@@ -251,7 +251,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 		before = len(entries)
 		def call_one(i):
 			try:
-				self.run('lead.job_status', {'job_id': 'job-' + str(i)})
+				self.run_tool('lead.job_status', {'job_id': 'job-' + str(i)})
 			except Exception:
 				return False
 			return True
