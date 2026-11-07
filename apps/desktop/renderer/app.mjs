@@ -320,6 +320,20 @@ async function loadTranscriptPreview(job) {
 
 const NEED_LABELS = { action: 'Action required', captcha: 'Captcha required' };
 
+// A web-chat task that has not sent its first message has no chat yet:
+// "Open" then shows its account's page (to check a sign-in, a captcha or a
+// page that does not answer), and says so.
+function openButtonHtml(job) {
+  const id = escapeHtml(job.id);
+  if (!isWebChat(job.provider)) {
+    return `<button class="task-open" type="button" data-open-job="${id}" title="Open this task's transcript">Open</button>`;
+  }
+  if (job.hasChat) {
+    return `<button class="task-open" type="button" data-open-job="${id}" title="Open this task's chat">Open chat</button>`;
+  }
+  return `<button class="task-open" type="button" data-open-job="${id}" title="This task has not started its chat yet. Opens its account's page, to check a sign-in, a captcha or a page that does not answer.">Open page</button>`;
+}
+
 function taskCardHtml(job) {
   const meta = workerMeta(job.worker);
   const active = isActive(job);
@@ -352,7 +366,7 @@ function taskCardHtml(job) {
       <pre class="task-output ${preview ? '' : 'empty'}" data-task-output="${escapeHtml(job.id)}">${escapeHtml(preview)}</pre>
       <div class="task-foot">
         <span class="task-path" title="${escapeHtml(job.cwd)}">${escapeHtml(job.cwd || job.branch || '')}</span>
-        <button class="task-open" type="button" data-open-job="${escapeHtml(job.id)}" title="${isWebChat(job.provider) ? 'Open this task\'s chat' : 'Open this task\'s transcript'}">${isWebChat(job.provider) ? 'Open chat' : 'Open'}</button>
+        ${openButtonHtml(job)}
         ${active ? `<button class="task-cancel" type="button" data-cancel-job="${escapeHtml(job.id)}">Stop</button>` : ''}
       </div>
     </article>
@@ -422,7 +436,7 @@ async function refreshJobs() {
     const jobs = await window.teamyra.jobs();
     currentJobs = jobs;
     updateLiveBadge();
-    const signature = jobs.map(job => [job.id, job.state, job.updated, job.heartbeatAt, job.lastEvent, job.need].join(':')).join('|');
+    const signature = jobs.map(job => [job.id, job.state, job.updated, job.heartbeatAt, job.lastEvent, job.need, job.hasChat].join(':')).join('|');
     if (signature !== jobsRenderSignature) {
       jobsRenderSignature = signature;
       renderJobs();

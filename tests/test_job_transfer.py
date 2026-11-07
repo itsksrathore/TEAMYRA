@@ -127,6 +127,21 @@ class TransferTests(unittest.TestCase):
         # chatgpt-normal is cooling down (its job ended on a limit) and was tried.
         self.assertEqual(start.calls[0]["worker"], "deepseek-normal")
 
+    def test_a_broken_page_goes_to_another_site_before_another_account(self):
+        add_profile(self.root, "qwen-web", "acc2", "Qwen 2")
+        write_status(self.root, "qwen", {"web": ready(), "acc2": ready()})
+        write_status(self.root, "deepseek", {"web": ready()})
+        write_job(self.root, "j1", worker="qwen-normal", provider="qwen-web", reason="page_unresponsive")
+        start = FakeStart(self.root)
+        job_transfer.sweep(self.root, start, CONFIG)
+        self.assertEqual(start.calls[0]["worker"], "deepseek-normal")
+        # With no other site ready, the other account of the same site is still used.
+        scheduler._META_CACHE.clear()
+        write_status(self.root, "deepseek", {"web": ready(challenged=True)})
+        write_job(self.root, "j2", worker="qwen-normal", provider="qwen-web", reason="page_unresponsive")
+        job_transfer.sweep(self.root, start, CONFIG)
+        self.assertEqual(start.calls[-1]["worker"], "qwen-acc2")
+
     def test_a_free_tab_beats_a_busy_account_of_the_same_site(self):
         add_profile(self.root, "chatgpt-web", "acc2", "ChatGPT Normal 2")
         write_status(self.root, "chatgpt", {"web": ready(), "acc2": ready(lanes=1)})

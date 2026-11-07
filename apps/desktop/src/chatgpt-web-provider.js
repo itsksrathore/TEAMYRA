@@ -578,6 +578,24 @@ class ChatGPTWebProvider {
     } catch {}
   }
 
+  // Loads `url` in the view. Some sites (Qwen) keep their load event back
+  // for longer than the page-call limit while hidden (a slow background
+  // request), although the page itself works. A load that times out or is
+  // aborted still counts when the page then answers and shows its message
+  // box; otherwise the error stands. Without this every reload of such a
+  // page "failed", and jobs ended as page_unresponsive.
+  async loadPage(view, url, label) {
+    try {
+      await this.pageCall(() => view.webContents.loadURL(url), label);
+    } catch (error) {
+      const probe = this.automation ? await this.automation.probe().catch(() => null) : null;
+      if (!probe?.promptFound) throw error;
+      this.pageUnresponsiveSince = null;
+      this.lastProbe = probe;
+      this.publishHeartbeat();
+    }
+  }
+
   async ensureLoaded({ visible = false } = {}) {
     const view = this.ensureView();
     this.visible = visible === true;
@@ -585,7 +603,7 @@ class ChatGPTWebProvider {
     if (this.visible) view.setBounds(this.bounds);
     const url = view.webContents.getURL();
     if (!url || url === 'about:blank') {
-      await this.pageCall(() => view.webContents.loadURL(this.site.home), 'navigation');
+      await this.loadPage(view, this.site.home, 'navigation');
     }
     await this.refreshStatus();
     return this.getStatus();
@@ -604,7 +622,7 @@ class ChatGPTWebProvider {
     void (async () => {
       try {
         if (!current || current === 'about:blank') {
-          await this.pageCall(() => view.webContents.loadURL(this.site.home), 'navigation');
+          await this.loadPage(view, this.site.home, 'navigation');
         }
         await this.pageCall(async () => {
           while (view.webContents.isLoading()) await sleep(120);
@@ -676,7 +694,7 @@ class ChatGPTWebProvider {
     this.lastProbe = null;
     const current = view.webContents.getURL();
     const target = safeHttps(current, this.site.hosts) ? current : this.site.home;
-    await this.pageCall(() => view.webContents.loadURL(target), 'reconnect');
+    await this.loadPage(view, target, 'reconnect');
     if (generation !== this.pageGeneration) throw teamyraError(`${this.site.name} navigation superseded`, 'TEAMYRA_PAGE_UNRESPONSIVE', 'page_unresponsive');
     this.loaded = true;
     const probe = await this.automation.probe();
@@ -773,6 +791,16 @@ class ChatGPTWebProvider {
         const probe = await this.automation.probe();
         if (generation !== this.pageGeneration) return this.getStatus();
         this.lastProbe = probe;
+        // The page answered within the page-call limit, so it is not hung
+        // (any more). Without this the "page unresponsive" mark stayed until
+        // a reload, and background reloads stop after a few: the account
+        // looked broken for good although its page worked (Qwen, 2026-11-07).
+        if (probe && this.pageUnresponsiveSince && !this.busy) {
+          this.pageUnresponsiveSince = null;
+          this.heals = 0;
+          this.notReadySince = null;
+          this.publishHeartbeat();
+        }
       } catch {
         if (generation === this.pageGeneration) this.lastProbe = null;
       }
@@ -885,7 +913,7 @@ class ChatGPTWebProvider {
     if (!safeHttps(url, this.site.hosts) || !new URL(url).hostname.endsWith(this.site.conversationHost)) {
       throw new Error(`Invalid ${this.site.name} conversation URL`);
     }
-    await this.pageCall(() => view.webContents.loadURL(url), 'conversation navigation');
+    await this.loadPage(view, url, 'conversation navigation');
     this.loaded = true;
     return this.refreshStatus();
   }

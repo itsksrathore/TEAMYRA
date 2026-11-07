@@ -790,6 +790,31 @@ async function testUnsolvedCheckHandsTheJobOver() {
   }
 }
 
+// Qwen, 2026-11-07: the load event came late while the page worked, and the
+// "page unresponsive" mark then stayed for good.
+async function testLateLoadAndUnresponsiveMarkClear() {
+  const provider = makeProvider(new FakeChat([]));
+  provider.writeStatus = () => {};
+  const view = { webContents: { isDestroyed: () => false, loadURL: () => new Promise(() => {}) } };
+  provider.pageCallTimeoutMs = 20;
+  // A load that never finishes, on a page that answers with its message box: accepted.
+  provider.pageUnresponsiveSince = null;
+  await provider.loadPage(view, 'https://chatgpt.com/', 'navigation');
+  assert.equal(provider.pageUnresponsiveSince, null);
+  // The page does not answer: the error stands.
+  provider.automation.probe = async () => ({ promptFound: false });
+  await assert.rejects(provider.loadPage(view, 'https://chatgpt.com/', 'navigation'), /timed out/);
+  // A page marked unresponsive that answers a status probe is ready again.
+  provider.automation.probe = async () => ({ promptFound: true, challenged: false, loginVisible: false });
+  provider.pageUnresponsiveSince = Date.now() - 60000;
+  provider.heals = 3;
+  provider.loaded = true;
+  provider.getStatus = ChatGPTWebProvider.prototype.getStatus;
+  await ChatGPTWebProvider.prototype.refreshStatusOnce.call(provider).catch(() => {});
+  assert.equal(provider.pageUnresponsiveSince, null);
+  assert.equal(provider.heals, 0);
+}
+
 async function main() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chatgpt-loop-'));
   try {
@@ -820,6 +845,7 @@ async function main() {
     await testLimitReplyEndsTheJobAsUsageLimit();
     await testLimitNoticeWhileTheReplyIsOverdue();
     await testUnsolvedCheckHandsTheJobOver();
+    await testLateLoadAndUnresponsiveMarkClear();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {

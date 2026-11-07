@@ -52,6 +52,7 @@ TRANSFER_REASONS = {
     "runner_crash",
     "tool_parse_error",      # the model kept sending unusable tool requests
 }
+ACCOUNT_REASONS = {"usage_or_rate_limit", "needs_user_timeout", "account_unavailable"}
 REASON_TEXT = {
     "usage_or_rate_limit": "its site reported a usage limit",
     "needs_user_timeout": "it was paused on a human check or sign-in that nobody completed",
@@ -160,6 +161,11 @@ def candidates(root, meta, config=None, metas=None, registry=None):
     allowed = set(meta.get("worker_order") or [])
     order = [p for p in cfg["providers"] if p in WEB_SITES] + [p for p in WEB_SITES if p not in cfg["providers"]]
     own = meta.get("provider")
+    # A limit, a check or a sign-in belongs to one account: another account of
+    # the same site comes first. A broken page, a failed chat or unusable tool
+    # requests are more likely the site or model itself: other sites first,
+    # the same site last (Qwen's page hung on both accounts, 2026-11-07).
+    account_problem = meta.get("reason") in ACCOUNT_REASONS or not meta.get("reason")
     rows = []
     for worker, info in registry.items():
         provider = info.get("provider")
@@ -173,7 +179,10 @@ def candidates(root, meta, config=None, metas=None, registry=None):
         queued = len(scheduler.queued_jobs(root, worker, metas))
         capacity = scheduler.worker_capacity(root, info)
         free = active + queued < capacity
-        rank = 0 if provider == own else 1 + order.index(provider)
+        if provider == own:
+            rank = 0 if account_problem else len(order) + 1
+        else:
+            rank = 1 + order.index(provider)
         key = (0 if free else 1, rank, (active + queued) / capacity, int(info.get("priority") or 100), worker)
         rows.append((key, worker, info, free))
     rows.sort(key=lambda row: row[0])

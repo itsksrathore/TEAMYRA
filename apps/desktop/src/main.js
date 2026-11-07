@@ -484,6 +484,8 @@ function listJobs(limit = 30) {
           attention: data.attention || null,
           // Hand-overs (bridge/job_transfer.py): where this task went, or
           // which agent's task it continues.
+          // A web-chat job has a chat only once it sent its first message.
+          hasChat: Boolean(data.chatgpt_url || data.session_id),
           movedTo: data.failover_job_id || '',
           movedToLabel: data.failover_worker_label || data.failover_worker || '',
           movingSince: data.transfer_waiting_since || 0,
