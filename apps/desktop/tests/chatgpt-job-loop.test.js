@@ -19,7 +19,7 @@ vm.runInNewContext(fs.readFileSync(require.resolve('../src/chatgpt-web-provider'
     return require(name);
   }
 });
-const { ChatGPTWebProvider, boundToolResult } = providerModule.exports;
+const { ChatGPTWebProvider, boundToolResult, looksLikeProgressNote } = providerModule.exports;
 const { ChatGPTAutomationAdapter } = require('../src/chatgpt-automation-adapter');
 
 // DOM-free fake of the embedded ChatGPT page. Each sendTask() consumes one
@@ -811,6 +811,27 @@ async function testNoSendButtonAfterSiteErrorEndsAsSiteDown() {
   assert.ok(!/page_recovery/.test(events), 'no reload cycle for a site outage');
 }
 
+// DeepSeek, 2026-11-07: "Now let me make the main.js edits." with no tool
+// request ended the job as done with 1 of 4 files edited.
+async function testProgressNoteIsNotAFinalReport() {
+  assert.ok(looksLikeProgressNote('Now let me make the main.js edits. First A1/A2 - the getDeps block and the lead controller wiring.'));
+  assert.ok(looksLikeProgressNote("Good, the tests pass. Next, I'll update the docs."));
+  assert.ok(!looksLikeProgressNote('Done. All four files are edited and the tests pass.'));
+  assert.ok(!looksLikeProgressNote("I've completed the task: main.js and lead.js are wired. Let me know if you want more."));
+  assert.ok(!looksLikeProgressNote('Summary\nChanged main.js. Now I will stop.'));
+  assert.ok(!looksLikeProgressNote('Changed main.js and lead.js; tests pass. Let me know if you want more.'));
+  const fake = new FakeChat([
+    'Now let me make the main.js edits. First A1/A2 - the getDeps block.',
+    'Finished: all edits made.'
+  ]);
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.ok(fake.sent[1].includes('announced a next step'), 'the progress note gets a continue nudge');
+  assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: all edits made.');
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -1021,6 +1042,7 @@ async function main() {
     await testSiteBlockEndsTheJobAsSiteBlocked();
     await testSiteErrorResendsAndAgentTraceGetsReminder();
     await testSiteThatKeepsFailingEndsAsSiteDown();
+    await testProgressNoteIsNotAFinalReport();
     await testNoSendButtonAfterSiteErrorEndsAsSiteDown();
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();

@@ -279,6 +279,19 @@ function looksLikeProtocolLoss(text, successfulTools) {
   return unfinished || !successfulTools || !completed;
 }
 
+// A reply with no tool request that only announces its next step ("Now let
+// me make the main.js edits.") is not a final report (DeepSeek, 2026-11-07:
+// the job ended done with 1 of 4 files edited). Short, ends on a plan, and
+// claims nothing finished.
+function looksLikeProgressNote(text) {
+  const reply = String(text || '').replace(/[’‘]/g, "'").trim();
+  if (!reply || reply.length > 800) return false;
+  if (/(?:^|\n)\s*(?:#+\s*)?(?:summary|final (?:report|result)|done|finished|completed|result)\b/i.test(reply)) return false;
+  if (/\b(?:I(?:'ve| have)\s+(?:completed|finished|implemented|made all)|all (?:changes|edits|tasks) (?:are|have been) (?:done|made|completed)|task is (?:complete|done))\b/i.test(reply)) return false;
+  const tail = reply.split(/(?<=[.!?:])\s+/).slice(-2).join(' ');
+  return /\b(?:let me (?!know\b)|let's (?!discuss\b)|now I(?:'ll| will| am going to)|next,? I(?:'ll| will)|I(?:'ll| will) now|I(?:'m| am) going to|first,? I(?:'ll| will))\b/i.test(tail);
+}
+
 // 'verification' / 'sign_in' when the error means a human must act in the
 // embedded view, else null.
 function userActionKind(error) {
@@ -1926,6 +1939,18 @@ class ChatGPTWebProvider {
             ].join('\n'));
             continue;
           }
+          if (looksLikeProgressNote(reply.text) && outputNudges < MAX_OUTPUT_NUDGES) {
+            outputNudges += 1;
+            this.appendJobEvent(jobDir, 'protocol_recovery',
+              `reply announces a next step without a tool request; asking ${this.site.name} to continue ` +
+              `${outputNudges}/${MAX_OUTPUT_NUDGES}: ${String(reply.text || '').slice(0, 300)}`);
+            this.writeJobMeta(jobDir, { output_nudges: outputNudges, last_event: 'progress note without a tool request; asking to continue' });
+            reply = await this.jobExchange(job, [
+              'TEAMYRA: your last reply announced a next step but sent no TEAMYRA_TOOL_REQUEST, so nothing ran.',
+              'Continue the task: reply with your next TEAMYRA_TOOL_REQUEST line. Give the final report only when all the work is done.'
+            ].join('\n'));
+            continue;
+          }
           missing = missingExpectedOutputs(assignedWorkspace, spec.expect_files);
           if (missing.length) {
             reason = 'missing_output';
@@ -2083,4 +2108,5 @@ ChatGPTWebProvider.prototype.laneCount = 1;
 ChatGPTWebProvider.prototype.inspector = new JobInspector();
 ChatGPTWebProvider.prototype.userActions = userActions(CHATGPT_SITE);
 
-module.exports = { boundToolResult, googleSignInHost, ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };
+module.exports = {
+  looksLikeProgressNote, boundToolResult, googleSignInHost, ChatGPTWebProvider, CHATGPT_HOME, CHATGPT_SITE, ALLOWED_HOSTS, userActions, CLAIMED_JOBS };
