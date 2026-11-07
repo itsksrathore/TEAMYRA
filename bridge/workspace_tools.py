@@ -202,6 +202,105 @@ def _safe_permissions(value=None) -> dict:
     return {key: bool(source.get(key, default)) for key, default in DEFAULT_PERMISSIONS.items()}
 
 
+# ----------------------------------------------------------------- digest
+# Long terminal output is cut down for web-chat workers (the RTK idea): the
+# command, the exit code, the head, every error/summary line with context and
+# the tail are kept, and the full output is saved under ROOT/logs/terminal/.
+DIGEST_THRESHOLD = 6000
+DIGEST_HEAD_LINES = 40
+DIGEST_TAIL_LINES = 60
+DIGEST_CONTEXT_LINES = 2
+
+DIGEST_ERROR_RE = re.compile(
+    r"(?i)(?:\b(?:error|errors|failed|failure|failures|failing|fail|fails|panic|panics|"
+    r"traceback|assert|asserts|assertion|assertions|exception|exceptions|warning|warnings)\b)"
+)
+
+# Summary lines of pytest, unittest, node:test, npm, tsc and git.
+DIGEST_SUMMARY_RES = tuple(re.compile(pattern) for pattern in (
+    r"^=+ .*(?:passed|failed|error|errors|warning|warnings|skipped|deselected).*=*\s*$",
+    r"^(?:FAILED|ERROR) \S+",
+    r"^(?:OK|FAILED)(?:\(|\b)",
+    r"^Ran \d+ tests? ",
+    r"^# (?:tests|pass|fail|todo|skipped|cancelled|duration_ms) \d+",
+    r"^(?:ok|not ok) \d+",
+    r"^\W (?:tests|pass|fail|suites|cancelled|skipped) \d+",
+    r"^npm (?:ERR!|error|WARN)",
+    r"^npm notice (?:New minor|New major|Update available)",
+    r"^> \S",
+    r"^\S*error TS\d+",
+    r"^Found \d+ errors?",
+    r"^\s*[ MADRU?]{1,2} \S",
+    r"^\s*\d+ files? changed",
+    r"^diff --git ",
+    r"^\[[^\]]+ [0-9a-f]{7,}\] ",
+    r"^(?:BUILD SUCCESS|BUILD FAILURE|Successfully (?:built|installed|packaged))",
+    r"^(?:Tests?|Suites?|Test Files?):\s+\d+",
+))
+
+
+def _merge_line_ranges(ranges):
+    """Merge overlapping/adjacent ``(start, end)`` ranges, keeping order."""
+    merged = []
+    for start, end in sorted(ranges):
+        if start >= end:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _digest_ranges(lines):
+    """Line ranges the digest keeps: head, tail, error and summary lines."""
+    total = len(lines)
+    ranges = [(0, DIGEST_HEAD_LINES), (total - DIGEST_TAIL_LINES, total)]
+    for index, line in enumerate(lines):
+        if DIGEST_ERROR_RE.search(line):
+            ranges.append((index - DIGEST_CONTEXT_LINES, index + DIGEST_CONTEXT_LINES + 1))
+    for index, line in enumerate(lines):
+        if any(pattern.search(line) for pattern in DIGEST_SUMMARY_RES):
+            ranges.append((index, index + 1))
+    clamped = []
+    for start, end in ranges:
+        clamped.append((max(0, start), min(total, end)))
+    return _merge_line_ranges(clamped)
+
+
+def _cut_marker(count):
+    return f"\u2026 {count} line{'s' if count != 1 else ''} cut \u2026"
+
+
+def digest_output(text, *, label="stdout", full_log=None):
+    """Return ``text`` cut to the digest form.
+
+    Keeps the first 40 lines, the last 60 lines, every error/panic/traceback/
+    assert/warning line with 2 lines of context and the summary lines of the
+    common test runners, Git and TypeScript.  Cut stretches are replaced with
+    a line saying how many lines were dropped."""
+    text = str(text or "")
+    lines = text.splitlines()
+    total = len(lines)
+    ranges = _digest_ranges(lines)
+    if not ranges or (len(ranges) == 1 and ranges[0][0] == 0 and ranges[0][1] == total):
+        return text
+    header = f"[digest {label}: {total} lines, {len(text)} chars"
+    if full_log:
+        header += f"; full log: {full_log}"
+    header += "]"
+    out = [header]
+    previous_end = 0
+    for start, end in ranges:
+        if start > previous_end:
+            out.append(_cut_marker(start - previous_end))
+        out.extend(lines[start:end])
+        previous_end = max(previous_end, end)
+    if previous_end < total:
+        out.append(_cut_marker(total - previous_end))
+    return "\n".join(out)
+
+
 class WorkspaceToolService:
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -1208,13 +1307,72 @@ class WorkspaceToolService:
             shell=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        return {
+        stdout = (cp.stdout or "")[:500000]
+        stderr = (cp.stderr or "")[:200000]
+        result = {
             "argv": run_argv,
             "cwd": str(cwd),
             "exit_code": cp.returncode,
-            "stdout": (cp.stdout or "")[:500000],
-            "stderr": (cp.stderr or "")[:200000],
+            "stdout": stdout,
+            "stderr": stderr,
         }
+        requested_digest = args.get("digest")
+        if isinstance(requested_digest, str):
+            requested_digest = requested_digest.strip().lower() not in {"0", "false", "no", "off"}
+        if requested_digest is None:
+            want_digest = len(stdout) + len(stderr) > DIGEST_THRESHOLD
+        else:
+            want_digest = bool(requested_digest)
+        if not want_digest:
+            return result
+        full_log = None
+        if stdout or stderr:
+            job = args.get("job") or os.environ.get("TEAMYRA_JOB_ID") or "default"
+            full_log = self._save_terminal_log(job, result)
+        return {
+            **result,
+            "stdout": digest_output(stdout, label="stdout", full_log=full_log),
+            "stderr": digest_output(stderr, label="stderr", full_log=full_log),
+            "digest": True,
+            "full_log": full_log,
+        }
+
+    TERMINAL_LOG_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+    def _terminal_log_dir(self, job):
+        """``ROOT/logs/terminal/<job>/``, with the job id made path-safe."""
+        name = self.TERMINAL_LOG_NAME_RE.sub("_", str(job or "default"))
+        name = name.strip("._-")[:80] or "default"
+        directory = (self.root / "logs" / "terminal" / name).resolve()
+        logs_root = (self.root / "logs" / "terminal").resolve()
+        if directory != logs_root and not _is_relative_to(directory, logs_root):
+            raise WorkspaceToolError("terminal log path is outside ROOT/logs/terminal")
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _save_terminal_log(self, job, result):
+        """Write the full output under ROOT/logs/terminal/<job>/<n>.txt and
+        return its path (as text); never inside the workspace's control files."""
+        directory = self._terminal_log_dir(job)
+        number = 1
+        while True:
+            path = directory / f"{number}.txt"
+            try:
+                handle = path.open("x", encoding="utf-8", newline="")
+                break
+            except FileExistsError:
+                number += 1
+        argv = result.get("argv") or []
+        with handle:
+            handle.write("argv: " + json.dumps(argv, ensure_ascii=False) + "\n")
+            handle.write(f"cwd: {result.get('cwd')}\n")
+            handle.write(f"exit_code: {result.get('exit_code')}\n")
+            handle.write("--- stdout ---\n")
+            handle.write(result.get("stdout") or "")
+            handle.write("\n--- stderr ---\n")
+            handle.write(result.get("stderr") or "")
+            handle.write("\n")
+        return str(path)
 
     def _git(self, tool, args, workspace, permissions, confirm):
         allowed_args = GIT_TOOL_ARGS.get(tool)
