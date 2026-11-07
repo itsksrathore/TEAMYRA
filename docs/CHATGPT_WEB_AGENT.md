@@ -88,8 +88,6 @@ Worker prompts must emit a single `TEAMYRA_TOOL_REQUEST` JSON line for local too
 
 Git tools use a strict argument contract: an unknown argument is an error that lists the allowed keys (it is never silently ignored). Every ref is verified with `git rev-parse --verify` before use, and the same sensitive-path filtering applies to commit comparisons as to working-tree diffs.
 
-- `code.map`
-- `code.symbol`
 - `git.status`: `path` / `paths`.
 - `git.diff`: `base` + optional `head`, or `range` (`"A..B"` or `"A...B"`; an empty side means `HEAD`), `staged` (not with `head`/`range`), `stat`, `name_only`, `unified` (context lines), `path` / `paths`.
 - `git.log`: `max_count` (alias `limit`, max 100), `range`, `since` (for example `2026-01-31` or `2 weeks ago`), `path` / `paths`.
