@@ -29,7 +29,23 @@ You lead and monitor. **TEAMYRA's web-chat workers write all the code, docs and 
    cmd /c mklink /J D:\AI-Orchestrator-lead\node_modules D:\AI-Orchestrator\node_modules
    ```
    Do the same in each work package worktree: put this line in every task's "Checks" section, with the worktree path.
-2. **Progress log.** Create `D:\AI-Orchestrator-lead\internal\lead-chat\PROGRESS.md`: one line per WP with state, job id, worker, worktree id and review result. You may write only this file and `plans-out/` notes.
+2. **Progress log.** Create `D:\AI-Orchestrator-lead\internal\lead-chat\PROGRESS.md`: one line per WP with state, job id, worker, worktree id and review result, plus a short "Decisions" list. You may write only this file and `plans-out/` notes. Another lead must be able to continue from this file alone. If you run out of quota, the user pastes 04-LEAD-PROMPT into a new lead, which reads PROGRESS.md and carries on. Also save each decision that matters beyond this build with `memory_add`.
+
+## Order
+
+Follow the three waves in 02:
+1. **Wave 1:** S1-0, C-1 and C-2 at the same time.
+2. **Wave 2:** C-3, with S1-1 alongside. Then **Checkpoint A**: ask the user to merge `feat/lead-chat` and restart TEAMYRA, so every later worker has `code.map`, `code.symbol` and short command output.
+3. **Wave 3:** S1-2 … S1-9, then S1-6 and S1-7, then Stage 2.
+
+Run independent packages at the same time on different workers. Never give two running jobs the same files.
+
+## Keep your own context small
+
+- Read `job_result` with a small `max_chars` (about 3000). Open `final_path` only when the report is cut and you need the rest.
+- Never ask for full transcripts. Use `job_events` (a few lines) when a job looks stuck.
+- Review with `worktree_diff` (stat first, then only the files that matter) and `test_run`, not by reading whole files.
+- Keep PROGRESS.md short: one line per WP.
 
 ## The loop for each work package
 

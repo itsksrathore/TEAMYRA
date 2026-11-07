@@ -24,7 +24,16 @@ Use the TEAMYRA MCP tools:
 
 Do not use Codex, Claude, Antigravity or Qwen workers unless I say so.
 
-Start with the setup in 03-HANDOFF (ask me before creating `D:\AI-Orchestrator-lead`). Then run Stage 1 package by package (S1-0 … S1-7), running independent packages at the same time on different workers. Write every task so that it works on its own, as described in 02 "How to write each job".
+Start with the setup in 03-HANDOFF (ask me before creating `D:\AI-Orchestrator-lead`). If `PROGRESS.md` already exists there, another lead started this build: continue from it, and do not redo merged packages.
+
+Then follow the waves in 02:
+1. **Wave 1:** S1-0, C-1 and C-2 at the same time.
+2. **Wave 2:** C-3 (with S1-1 alongside). Then Checkpoint A: ask me to merge `feat/lead-chat` and restart TEAMYRA, so the workers get the new code tools.
+3. **Wave 3:** S1-2 … S1-9, then S1-6 and S1-7.
+
+Run independent packages at the same time on different workers, and never give two running jobs the same files. Write every task so that it works on its own, as described in 02 "How to write each job".
+
+If a job moves to another worker by itself (a limit, a captcha, a broken chat), keep waiting on the first job id; do not start it again. Keep your own context small, as 03 says.
 
 Keep `internal/lead-chat/PROGRESS.md` (in the integration folder) up to date.
 

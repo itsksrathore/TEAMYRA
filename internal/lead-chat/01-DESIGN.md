@@ -14,6 +14,8 @@
   - Also present: recovery after a desktop restart (`chatgpt-state.json`, `resumeExchange`), page recovery, busy/"server busy" retries, and nudges when expected files are missing.
 - **Core calls from the desktop.** `apps/desktop/src/core-api.js` (`callCore`) talks to one long-lived `bridge/desktop_api.py --serve` process. `desktop_api.handle(action, payload)` has `task.start`, `worktree.*` and `memory.*`, but **no** job status, wait, result or worker-status actions.
 - **Orchestration tools** (MCP, `bridge/server.py`, `tool_call(name, args)`): `start_task`, `job_status`, `job_wait`, `job_result`, `job_cancel`, `job_message`, `worker_status`, `team_report`, `queue_list`, `worktree_create`, `worktree_diff`, `worktree_merge`, `worktree_discard`, `test_run`, `memory_*`, `review_start`. MCP endpoint: `http://127.0.0.1:8787/mcp`.
+- **Hand-overs.** A web-chat job that hits a usage limit, an unsolved captcha or a broken chat moves to another account or model by itself, with a context pack of everything done so far (`bridge/job_transfer.py`, `apps/desktop/src/limit-detect.js`, `docs/AGENT_HANDOVER.md`). `job_wait` / `job_result` on the first job id follow it.
+- **Memory and task graphs.** `memory_add`, `memory_search` and `memory_context` (`bridge/project_memory.py`) keep project facts and decisions across sessions. `graph_*` (`bridge/task_graph.py`) runs dependency graphs of jobs. Reuse these; do not add another memory or task system.
 - **Panel.** The renderer (`renderer/app.mjs`, `#chatgptDetail`, `openChatgptDetail()`) shows an account's view. Main-process IPC is in `main.js` (`teamyra:chatgpt-*`). The view blocks manual input only while a job runs (`before-input-event` and `busy`).
 
 ## Stage 1: Lead mode in the site panel
@@ -35,6 +37,8 @@ Today the user can chat in a site panel, but tool requests are only acted on ins
    - Workspace tools: everything a job has (filesystem, terminal, git, process, page.check, screen.capture), in the workspace chosen in the panel.
    - Lead tools, new: `lead.start_task`, `lead.job_status`, `lead.job_wait` (at most 120 s per call, so the chat never hangs), `lead.job_result`, `lead.job_cancel`, `lead.job_message`, `lead.worker_status`, `lead.team_report`, `lead.queue_list`, `lead.worktree_create`, `lead.worktree_diff`, `lead.worktree_merge`, `lead.worktree_discard`, `lead.test_run`, `lead.memory_search`, `lead.memory_add`.
    - Each maps one to one to the MCP tool of the same name without `lead.`, with the same arguments.
+   - Two run in the desktop itself: `lead.guide {topic}` (a section of the lead rules) and `lead.state {set | append}` (the session's `state.md`).
+   - After Track C, the workspace tools also include `code.map` and `code.symbol`.
 5. **Approvals.** `lead.worktree_merge`, `lead.worktree_discard`, `lead.job_cancel`, any `git push`, and `filesystem.delete` outside the workspace show a TEAMYRA approval dialog (renderer modal: what, where, Allow / Deny). Denied returns `{ok:false, error:"denied by the user"}`.
 6. **Saved state.** `ROOT/lead/<session id>.json` holds the account, conversation URL and id, workspace, created time, the last 50 tool calls (tool, args summary, ok, time) and the pending approval. After a desktop restart the lead tab reopens the conversation; a tool that was running is reported as "outcome unknown", exactly as for jobs.
 
@@ -57,6 +61,42 @@ Today the user can chat in a site panel, but tool requests are only acted on ins
   - hand work to TEAMYRA workers with `lead.start_task`, each job self-contained and in its own worktree;
   - follow with `lead.job_wait`, review with `lead.worktree_diff` and `lead.test_run`, merge with `lead.worktree_merge`;
   - report to the user in plain language.
+
+### Keeping the lead's context small (S1-3, S1-8, S1-9)
+
+A web model leading a long build forgets early details once the chat is long, and every tool result adds to the chat. Three parts keep it small:
+- **Short bootstrap, rules on demand.** The bootstrap names the tools and the role. The detailed rules (how to write a job, review, merge, worktrees, memory, hand-overs, approvals) come from `lead.guide {topic}` when needed, the same idea as Agent Skills.
+- **State file and rollover.** `ROOT/lead/<id>/state.md` holds the goal, decisions, the work package table and open items; the lead keeps it current with `lead.state`. A chat past 60 turns or about 150,000 characters sent rolls over to a fresh chat. The fresh chat gets the bootstrap, `state.md`, the running jobs and the last 6 messages. Decisions worth keeping also go to `memory_add`.
+- **Lead hand-over.** A limit or an unsolved check on the lead's site moves the session to another account, as jobs move today, and the session continues from `state.md`.
+
+## Track C: code intelligence for every job
+
+Built before most of Stage 1, because it makes every later job cheaper (02, Checkpoint A).
+- **`code.map {path, budget_chars?, focus?}`** gives a compact map of a folder: files with their top-level symbols and line numbers, cut to a budget. Files imported by the most others rank first, and recently changed and `focus` files come before the rest (Aider's repo map).
+- **`code.symbol {path, name}`** returns one definition (its body, at most 300 lines) and up to 30 reference lines, so a worker reads one function instead of a whole file (the Serena idea).
+- **`terminal.run` digest:** long output comes back as the command, exit code, head, error and summary lines with context, and tail, plus the path of the full log (the RTK idea).
+
+Parsing uses tree-sitter (`tree-sitter-language-pack`) when it is installed, and a regex extractor otherwise, so nothing new has to be installed or packaged. Everything lives in `bridge/code_intel.py` and `bridge/workspace_tools.py`; there is no new service or database.
+
+## From the outside research: what we use and what we skip
+
+**Used, as ideas built into TEAMYRA's own code (no new dependency):**
+- Aider repo map → `code.map`;
+- Serena (symbol-level reads) → `code.symbol`;
+- RTK (output compression) → the `terminal.run` digest;
+- Agent Skills (rules on demand) → `lead.guide`;
+- Claude-Mem and Beads ideas (session memory, task state) → `state.md`, rollover, the existing `memory_*` and `graph_*`;
+- Gas Town ideas (handoffs, single owner per change) → the existing worktrees, one writer per worktree, and the hand-overs;
+- a dashboard of runs → S2-8 session numbers.
+
+**Optional:** tree-sitter, used when installed. ripgrep and ast-grep are not on this PC. Workers can use them through `terminal.run` once the user installs them, and nothing depends on them.
+
+**Skipped, and why:**
+- LangGraph, BullMQ, CrewAI, Ruflo, OpenHands, Gas Town as frameworks: TEAMYRA already has the queue, scheduler, worktrees, failover, hand-overs and task graphs. Moving onto a framework would take weeks and gain nothing for this build.
+- Mem0, Graphiti, Cognee, Supermemory, Letta: they need an LLM API and often a graph or vector database. The existing memory plus `state.md` cover this build.
+- Claude-Mem, ccusage, Context7, Claude Agent SDK, Vercel AI SDK, LiteLLM: they are tied to Claude Code or to API keys. TEAMYRA's leads and workers are web chats and CLIs.
+- Langfuse and Phoenix: separate servers; TEAMYRA's timeline and job metas are enough for now.
+- GitNexus: its license is non-commercial. codebase-memory-mcp, Graphify and CodeGraphContext overlap with `code.map` / `code.symbol`. Look at them later if the built-in tools fall short on very large projects.
 
 ### Out of scope for Stage 1
 
