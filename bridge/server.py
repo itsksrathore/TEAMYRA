@@ -2359,7 +2359,10 @@ def tool_call(name, a):
                                    session_id=m["session_id"], parent=m["id"])
         return {"job_id": job_id, "worker": worker, **follow_info(job_id)}
     if name == "job_cancel":
-        terminal_id = failover_terminal_job_id(a["job_id"])
+        # The named job itself when it still runs: following the chain from
+        # its root picked a finished sibling and left it running
+        # (ISS-20261107-173958).
+        terminal_id = a["job_id"] if (JOBS / a["job_id"]).is_dir() and not is_done(a["job_id"])             else failover_terminal_job_id(a["job_id"])
         terminal = read_meta(terminal_id)
         if terminal.get("state") == scheduler.QUEUED and not is_done(terminal_id):
             try:
