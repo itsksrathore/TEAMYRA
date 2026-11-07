@@ -33,7 +33,16 @@ def write_job(root, job_id, *, worker="codex1", provider="codex", state="running
 
 
 def read_meta(root, job_id):
-    return json.loads((Path(root) / "jobs" / job_id / "meta.json").read_text(encoding="utf-8"))
+    # Windows: a background dispatcher may be replacing meta.json at this very
+    # moment (PermissionError), as the real readers expect (ISS-20261107-134733).
+    path = Path(root) / "jobs" / job_id / "meta.json"
+    for attempt in range(40):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (PermissionError, ValueError):
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
 
 
 class Spawned:
