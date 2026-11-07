@@ -456,6 +456,12 @@ def serve():
     import concurrent.futures
     import threading
 
+    # The desktop writes UTF-8. A piped stdin on Windows reads cp1252 with
+    # surrogateescape: every non-ASCII character arrived garbled, and bytes
+    # cp1252 lacks (0x9D in "”") became lone surrogates that broke
+    # terminal.run with "surrogates not allowed" (ISS-20261107-170009).
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     out = sys.stdout
     # A stray print in an action must never corrupt the reply stream.
     sys.stdout = sys.stderr
