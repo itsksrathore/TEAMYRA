@@ -126,6 +126,44 @@ class CodeIntelTests(unittest.TestCase):
         with patch.object(code_intel, '_language_pack', object()):
             self.assertEqual(code_intel._parse(Path('x.go'), 'func work() {}')[0][0]['name'], 'work')
 
+    def test_relative_imports_do_not_credit_duplicate_basenames(self):
+        self.put('a/shared.js', 'export function one() {}\n')
+        self.put('b/shared.js', 'export function two() {}\n')
+        self.put('use.js', "import { one } from './a/shared.js';\n")
+        counts = {item['path']: item['imported_by'] for item in self.map()['files']}
+        self.assertEqual(counts['a/shared.js'], 1)
+        self.assertEqual(counts['b/shared.js'], 0)
+
+    def test_fallback_braces_and_expression_arrow_ranges(self):
+        self.put('body.js', "function f() {\n const s = '}'; // }\n /* } */ return 1;\n}\nconst twice = x => x * 2;\nfunction next() {}\n")
+        self.assertEqual(self.symbol('f')['definition']['end_line'], 4)
+        self.assertEqual(self.symbol('twice')['definition']['end_line'], 5)
+        self.assertEqual(self.symbol('next')['definition']['start_line'], 6)
+        self.put('receiver.go', 'func (s *Server) Serve() {\n}\n')
+        self.assertEqual(self.symbol('Serve')['definition']['kind'], 'method')
+
+    def test_tree_backend_supplements_named_arrow(self):
+        from unittest.mock import patch
+        from bridge import code_intel
+        source = 'function hello() {}\nexport const twice = x => x * 2;\n'
+        class Node:
+            start_point = type('Point', (), {'row': 0})()
+            end_point = type('Point', (), {'row': 0})()
+            named_children = []
+            def child_by_field_name(self, field):
+                return type('Name', (), {'start_byte': 9, 'end_byte': 14})()
+        Node.type = 'function_declaration'
+        class Pack:
+            def get_parser(self, language):
+                return self
+            def parse(self, raw):
+                root = type('Root', (), {'has_error': False, 'named_children': [Node()], 'type': 'program'})()
+                return type('Tree', (), {'root_node': root})()
+        with patch.object(code_intel, '_language_pack', Pack()):
+            symbols, _ = code_intel._parse(Path('x.js'), source)
+        self.assertEqual({item['name'] for item in symbols}, {'hello', 'twice'})
+        self.assertEqual(next(item for item in symbols if item['name'] == 'twice')['end_line'], 2)
+
     def test_default_cache_and_oversized_first(self):
         from unittest.mock import patch
         from bridge import code_intel

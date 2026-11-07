@@ -77,6 +77,49 @@ def _tree_parse(path, source):
         return None
 
 
+def _brace_counts(lines):
+    """Count structural braces, excluding common quoted strings and comments."""
+    counts = []
+    quote = None
+    block = False
+    for line in lines:
+        opens = closes = 0
+        i = 0
+        while i < len(line):
+            char = line[i]
+            pair = line[i:i + 2]
+            if block:
+                if pair == '*/':
+                    block = False
+                    i += 2
+                    continue
+            elif quote:
+                if char == '\\':
+                    i += 2
+                    continue
+                if char == quote:
+                    quote = None
+            elif pair == '/*':
+                block = True
+                i += 2
+                continue
+            elif pair == '//':
+                break
+            elif char == '#':
+                break
+            elif char in (chr(34), chr(39), '`'):
+                quote = char
+            elif char == '{':
+                opens += 1
+            elif char == '}':
+                closes += 1
+            i += 1
+        counts.append((opens, closes))
+        if quote != '`':
+            quote = None
+    return counts
+
+
 def _parse(path, source):
     lines = source.splitlines()
     tree_symbols = _tree_parse(path, source)
@@ -106,6 +149,7 @@ def _parse(path, source):
     go_receiver = re.compile(r'^\s*func\s+\([^)]*\)\s+([\w]+)\s*\(')
     rust_pub = re.compile(r'^\s*pub(?:\([^)]*\))?\s+(?:async\s+)?fn\s+([\w]+)\s*\(')
     arrow = re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[\w$]+)\s*(?::[^=]+)?=>')
+    brace_counts = _brace_counts(lines)
     controls = {'if', 'for', 'while', 'catch', 'switch', 'else', 'try', 'return', 'throw', 'with', 'lock', 'using'}
     for i, line in enumerate(lines):
         match = pattern.match(line)
@@ -122,24 +166,31 @@ def _parse(path, source):
                 name = None
             if name in controls:
                 name = None
-            kind = 'export' if exported else ('class' if keyword in ('class', 'interface', 'enum', 'struct', 'trait', 'impl') else 'method' if method else 'function')
+            kind = 'method' if (method or (special and path.suffix == '.go') or (special and path.suffix in ('.java', '.cs'))) else 'export' if exported else 'class' if keyword in ('class', 'interface', 'enum', 'struct', 'trait', 'impl') else 'function'
             start = i + 1
             end = start
             depth = 0
             opened = False
             for j in range(i, len(lines)):
-                depth += lines[j].count('{') - lines[j].count('}')
-                opened |= '{' in lines[j]
+                opening, closing = brace_counts[j]
+                depth += opening - closing
+                opened |= opening > 0
                 if opened and depth <= 0:
                     end = j + 1
                     break
                 end = j + 1
+                if arrow_match and not opened and ';' in lines[j]:
+                    break
             if name:
                 symbols.append({'name': name, 'kind': kind, 'line': start, 'end_line': end})
         imp = re.search(r'\b(?:from\s+["\']([^"\']+)|require\(["\']([^"\']+)|import\s+["\']([^"\']+)|^\s*import\s+([\w./]+))', line)
         if imp:
             imports.append(next(group for group in imp.groups() if group))
-    return (tree_symbols if tree_symbols is not None else symbols), imports
+    if tree_symbols is not None:
+        seen = {(item["name"], item["line"]) for item in tree_symbols}
+        tree_symbols.extend(item for item in symbols if (item["name"], item["line"]) not in seen)
+        symbols = tree_symbols
+    return symbols, imports
 
 
 def _extract(path, cache):
@@ -149,7 +200,7 @@ def _extract(path, cache):
     if location:
         try:
             record = json.loads(location.read_text(encoding='utf-8'))
-            if record['mtime_ns'] == stat.st_mtime_ns and record['size'] == stat.st_size:
+            if record.get('parser_version') == (2, bool(_language_pack)) and record['mtime_ns'] == stat.st_mtime_ns and record['size'] == stat.st_size:
                 return record['symbols'], record['imports']
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -157,7 +208,7 @@ def _extract(path, cache):
     if location:
         try:
             cache.mkdir(parents=True, exist_ok=True)
-            location.write_text(json.dumps({'mtime_ns': stat.st_mtime_ns, 'size': stat.st_size, 'symbols': symbols, 'imports': imports}), encoding='utf-8')
+            location.write_text(json.dumps({'parser_version': (2, bool(_language_pack)), 'mtime_ns': stat.st_mtime_ns, 'size': stat.st_size, 'symbols': symbols, 'imports': imports}), encoding='utf-8')
         except OSError:
             pass
     return symbols, imports
@@ -174,18 +225,35 @@ def _inventory(path, cache, focus):
         except OSError:
             continue
     centrality = {file: 0 for file in parsed}
-    for file, (_, imports) in parsed.items():
-        for other in parsed:
-            if other != file and any(other.stem == Path(imp).stem or other.stem == imp.rsplit('/', 1)[-1] for imp in imports):
-                centrality[other] += 1
+    stats = {}
+    for file in parsed:
+        try:
+            stats[file] = file.stat().st_mtime_ns
+        except OSError:
+            stats[file] = 0
+    newest = max(stats.values(), default=0)
+    by_path = {file.resolve(): file for file in parsed}
+    suffixes = tuple(sorted(EXTENSIONS))
+    for importer, (_, imports) in parsed.items():
+        for imp in imports:
+            if imp.startswith('.'):
+                target = importer.parent / imp
+            elif importer.suffix == '.py':
+                target = directory / imp.replace('.', '/')
+            else:
+                continue  # Bare JS packages are not local relative imports.
+            options = [target] if target.suffix in EXTENSIONS else [Path(str(target) + ext) for ext in suffixes]
+            options += [target / ('index' + ext) for ext in suffixes]
+            for option in options:
+                resolved = by_path.get(option.resolve())
+                if resolved is not None and resolved != importer:
+                    centrality[resolved] += 1
+                    break
     def rank(file):
         relative = file.relative_to(directory).as_posix()
-        try:
-            modified = file.stat().st_mtime_ns
-        except OSError:
-            modified = 0
-        match = bool(focus and (str(focus).lower() in relative.lower() or any(str(focus).lower() in s['name'].lower() for s in parsed[file][0])))
-        recent = modified >= max((f.stat().st_mtime_ns for f in parsed), default=0) - 86_400_000_000_000
+        modified = stats[file]
+        match = bool(focus and (str(focus).lower() in relative.lower() or any(str(focus).lower() in item['name'].lower() for item in parsed[file][0])))
+        recent = modified >= newest - 86_400_000_000_000
         return (-int(match), -int(recent), -centrality[file], -modified, relative)
     return directory, sorted(parsed, key=rank), parsed, centrality
 
