@@ -15,10 +15,11 @@ ID_RE = re.compile(r"^wt-[A-Za-z0-9._-]{1,96}$")
 SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _run(cmd, cwd=None, check=True):
+def _run(cmd, cwd=None, check=True, env=None):
     cp = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
+        env=env,
         text=True,
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -30,8 +31,8 @@ def _run(cmd, cwd=None, check=True):
     return cp.returncode, (cp.stdout or "").strip(), (cp.stderr or "").strip()
 
 
-def _git(cwd, *args, check=True):
-    return _run(["git", "-C", str(cwd), *args], check=check)
+def _git(cwd, *args, check=True, env=None):
+    return _run(["git", "-C", str(cwd), *args], check=check, env=env)
 
 
 def _slug(value):
@@ -441,7 +442,10 @@ def continue_rebase_resolution(storage_root, worktree_id):
     staged_rc, _, _ = _git(path, "diff", "--cached", "--quiet", check=False)
     # ':' is Git's cross-platform no-op editor; Windows need not provide true.exe.
     command = ("rebase", "--skip") if staged_rc == 0 else ("-c", "core.editor=:", "rebase", "--continue")
-    rc, out, err = _git(path, *command, check=False)
+    # GIT_EDITOR (and GIT_SEQUENCE_EDITOR) win over core.editor: an agent
+    # shell with GIT_EDITOR=false made every continue fail (ISS-20261107-171311).
+    no_editor = {**os.environ, "GIT_EDITOR": ":", "GIT_SEQUENCE_EDITOR": ":"}
+    rc, out, err = _git(path, *command, check=False, env=no_editor)
     current = status(storage_root, worktree_id)
     if rc != 0:
         if current.get("rebase_in_progress") and current.get("conflicts"):
