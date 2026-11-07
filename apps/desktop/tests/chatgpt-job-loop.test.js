@@ -755,6 +755,24 @@ async function testLimitNoticeWhileTheReplyIsOverdue() {
   assert.match(meta.last_event, /usage limit: You've reached your message limit/);
 }
 
+// Z.ai, 2026-11-07: the site's own error shown as the "answer"; then the
+// model's built-in agent trace instead of a TEAMYRA tool request.
+async function testSiteErrorResendsAndAgentTraceGetsReminder() {
+  const fake = new FakeChat([
+    'SyntaxError: Unexpected token \'<\', "<!doctypeh"... is not valid JSON',
+    'Todos\n4\nList workspace files\nExplored 1 files\nFind File **/*',
+    'Finished: all done.'
+  ]);
+  const provider = makeProvider(fake);
+  provider.transientRetryMs = 1;
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.equal(fake.sent[1], fake.sent[0], 'after a site error the same message is sent again');
+  assert.ok(fake.sent[2].startsWith('TEAMYRA protocol reminder:'), 'an agent trace gets the protocol reminder');
+  assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: all done.');
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -897,6 +915,7 @@ async function main() {
     await testLimitNoticeWhileTheReplyIsOverdue();
     await testUnsolvedCheckHandsTheJobOver();
     await testSiteBlockEndsTheJobAsSiteBlocked();
+    await testSiteErrorResendsAndAgentTraceGetsReminder();
     await testLateLoadAndUnresponsiveMarkClear();
     await testDeliveredMessageWithoutReplyGetsANudge();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');

@@ -29,9 +29,16 @@ import media_guide
 import desktop_runtime
 from expected_outputs import validate_expect_files
 
-sys.stdin.reconfigure(encoding="utf-8")
-sys.stdout.reconfigure(encoding="utf-8")
-sys.stderr.reconfigure(encoding="utf-8")
+# stdout/stderr may be switched to UTF-8 on import. stdin is switched only in
+# main(), when this module serves MCP over stdio itself: other processes
+# import it (TEAMYRA Desktop's core reads its own requests from stdin), and
+# reconfiguring stdin under their reading thread ended that loop, so the
+# core exited with its requests unanswered (2026-11-07).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
 
 BRIDGE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("TEAMYRA_ROOT") or BRIDGE.parent).resolve()
@@ -2472,6 +2479,7 @@ def handle_and_send(msg):
 
 
 def main():
+    sys.stdin.reconfigure(encoding="utf-8")
     try:
         import dashboard
         dashboard.serve(int(config().get("dashboard_port", 8765)))

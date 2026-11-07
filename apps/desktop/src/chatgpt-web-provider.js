@@ -231,6 +231,31 @@ function boundToolResult(result, limit = MAX_TOOL_RESULT_CHARS) {
   return bounded;
 }
 
+// Windows: renaming over meta.json fails with EPERM/EBUSY/EACCES while
+// another process reads it (the core, the Tasks view). Try again for up to
+// about a second instead of failing the job (2026-11-07).
+function renameWithRetry(from, to) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      if (attempt >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+}
+
+// A site's own error shown in place of an answer: Z.ai showed
+// "SyntaxError: Unexpected token '<', "<!doctype"... is not valid JSON" when
+// its server sent an error page (2026-11-07). The model never saw the message,
+// so the same message is sent again.
+const SITE_ERROR_REPLY = /^(?:SyntaxError:\s*Unexpected token|Unexpected token\s*'<'|[^\n]{0,80}\bis not valid JSON\b|Network error|Failed to fetch|Something went wrong|An error occurred|Request failed|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/i;
+function isSiteErrorReply(text) {
+  const value = String(text || '').trim();
+  return value.length > 0 && value.length <= 300 && !/TEAMYRA_TOOL_REQUEST/.test(value) && SITE_ERROR_REPLY.test(value);
+}
+
 function looksLikeProtocolLoss(text, successfulTools) {
   const reply = String(text || '').replace(/[’‘]/g, "'");
   const refusal = /\b(?:I|we)\s+(?:(?:do not|don't)\s+have\s+access|(?:can(?:not|'t)|am unable to|are unable to)\s+(?:directly\s+)?(?:access|read|write|edit|modify|inspect|open|use))\b[^.!?\n]*(?:files?|filesystem|workspace|repository|repo|local|tools?|TEAMYRA)/i.test(reply);
@@ -242,7 +267,10 @@ function looksLikeProtocolLoss(text, successfulTools) {
   // model called "filesystem.read" as a built-in tool instead of writing a
   // TEAMYRA_TOOL_REQUEST line, and the site replied that the tool does not exist.
   const nativeTool = /(?:^|\n)\s*Tool\s+(?:filesystem|terminal|git|process|page|screen)\.[\w.-]+\s+(?:does\s+not\s+exists?|not\s+found|is\s+not\s+available)\b/.test(reply);
-  if (!(refusal || unavailable || paste || nativeTool)) return false;
+  const agentTrace = /(?:^|\n)\s*(?:Explored \d+ files?|Find File\b|Read File\b|Run Command\b)/.test(reply) &&
+    !/TEAMYRA_TOOL_REQUEST/.test(reply);
+  if (!(refusal || unavailable || paste || nativeTool || agentTrace)) return false;
+  if (agentTrace) return true;
   if (nativeTool) return true;
   // A completed result may discuss a resolved access error. Require actual
   // successful tool work before accepting that kind of completion claim.
@@ -1282,7 +1310,7 @@ class ChatGPTWebProvider {
     Object.assign(data, patch, { updated: Date.now() / 1000 });
     const temp = file + '.tmp-' + process.pid;
     fs.writeFileSync(temp, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(temp, file);
+    renameWithRetry(temp, file);
     return data;
   }
 
@@ -1530,6 +1558,7 @@ class ChatGPTWebProvider {
   }
 
   async jobExchange(job, text, resumeSnap = null) {
+    job.lastMessage = text;
     let snap = resumeSnap;
     // The message is in the chat after a reload, and its reply has not started.
     let deliveredAfterRecovery = false;
@@ -1809,13 +1838,18 @@ class ChatGPTWebProvider {
           throw new Error('TEAMYRA job cancelled');
         }
         // "The server is busy" (DeepSeek) is not an answer: wait, ask again.
-        if (this.automation.isTransientReply?.(reply.text) && transientRetries < MAX_TRANSIENT_RETRIES) {
+        const siteError = isSiteErrorReply(reply.text);
+        if ((siteError || this.automation.isTransientReply?.(reply.text)) && transientRetries < MAX_TRANSIENT_RETRIES) {
           transientRetries += 1;
-          this.appendJobEvent(jobDir, 'info', `${this.site.name} was busy; asking again in a moment (${transientRetries}/${MAX_TRANSIENT_RETRIES})`);
-          this.writeJobMeta(jobDir, { last_event: `${this.site.name} busy; retrying` });
+          this.appendJobEvent(jobDir, 'info', siteError
+            ? `${this.site.name} showed an error instead of an answer ("${String(reply.text).slice(0, 80)}"); sending the message again (${transientRetries}/${MAX_TRANSIENT_RETRIES})`
+            : `${this.site.name} was busy; asking again in a moment (${transientRetries}/${MAX_TRANSIENT_RETRIES})`);
+          this.writeJobMeta(jobDir, { last_event: `${this.site.name} ${siteError ? 'error' : 'busy'}; retrying` });
           await sleep((this.transientRetryMs ?? 15000) * transientRetries);
           this.checkJobActive(job);
-          reply = await this.jobExchange(job, 'Please answer my previous message again.');
+          // After a site error the model never got the message: send it again.
+          const again = siteError && job.lastMessage ? job.lastMessage : 'Please answer my previous message again.';
+          reply = await this.jobExchange(job, again);
           continue;
         }
         let parsed = this.automation.parseToolRequestDetailed(reply.text);
