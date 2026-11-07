@@ -169,6 +169,29 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(start.calls[0]["worker"], "muse-normal")
         self.assertIn("not answering", start.calls[0]["task"])
 
+    def test_move_on_request_to_a_site_or_a_named_worker(self):
+        add_profile(self.root, "deepseek-web", "acc2", "DeepSeek 2")
+        write_status(self.root, "chatgpt", {"web": ready()})
+        write_status(self.root, "deepseek", {"web": ready(), "acc2": ready()})
+        write_status(self.root, "muse", {"web": ready()})
+        write_job(self.root, "j1", state="cancelled", reason="cancelled", events=[
+            ("command", 'filesystem.read {"path":"D:/p/a.py"}'), ("result", '{"content":"x"}')])
+        start = FakeStart(self.root)
+        moved = job_transfer.move_job(self.root, read_meta(self.root, "j1"), start, provider="deepseek-web")
+        self.assertTrue(start.calls[0]["worker"].startswith("deepseek-"))
+        self.assertIn("moved it to you", start.calls[0]["task"])
+        self.assertIn("read D:/p/a.py", start.calls[0]["task"])
+        meta = read_meta(self.root, "j1")
+        self.assertEqual((meta["failover_job_id"], meta["reason"]), (moved["new_job_id"], "moved_by_request"))
+        # A named worker is used as given, even another provider.
+        write_job(self.root, "j2", state="failed", reason="worker_error")
+        job_transfer.move_job(self.root, read_meta(self.root, "j2"), start, worker="muse-normal")
+        self.assertEqual(start.calls[-1]["worker"], "muse-normal")
+        with self.assertRaises(ValueError):
+            job_transfer.move_job(self.root, read_meta(self.root, "j2"), start, worker="no-such-worker")
+        options = job_transfer.move_options(self.root, read_meta(self.root, "j1"))
+        self.assertTrue(options and all({"worker", "label", "site", "free"} <= set(o) for o in options))
+
     def test_a_free_tab_beats_a_busy_account_of_the_same_site(self):
         add_profile(self.root, "chatgpt-web", "acc2", "ChatGPT Normal 2")
         write_status(self.root, "chatgpt", {"web": ready(), "acc2": ready(lanes=1)})

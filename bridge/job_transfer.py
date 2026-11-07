@@ -59,6 +59,7 @@ REASON_TEXT = {
     "usage_or_rate_limit": "its site reported a usage limit",
     "site_blocked": "its site refused this PC for now (\"unusual activity\")",
     "site_down": "its site was not answering (server errors)",
+    "moved_by_request": "the lead or the user moved it to you",
     "needs_user_timeout": "it was paused on a human check or sign-in that nobody completed",
     "account_unavailable": "its account was not usable (human check, sign-in or a broken page)",
     "page_unresponsive": "its chat page stopped responding",
@@ -459,57 +460,97 @@ def transfer_one(root, meta, start_job, config=None, metas=None):
                 scheduler._append_event(job_dir, "transfer", "no other agent is ready yet; the task will move "
                                         "as soon as one is (for up to %d min)" % cfg["wait_minutes"])
             return None
-        chain = _chain(root, fresh)
-        root_id = fresh.get("failover_root") or chain[0]["id"]
-        attempt = _attempt(fresh) + 1
-        previous = list(dict.fromkeys([*(fresh.get("previous_workers") or []),
-                                       *(item.get("worker") for item in chain if item.get("worker"))]))
-        pack = build_pack(root, fresh, config)
-        remaining = fresh.get("timeout_s") or 5400
-        label = f"{chain[0].get('label') or root_id}"[:72] + f" (moved {attempt})"
-        last_error = None
-        for worker, info, _free in options[:4]:
-            try:
-                new_id, chosen = start_job(
-                    worker, pack, fresh["cwd"], label=label,
-                    timeout_minutes=max(5, min(int(remaining / 60), 720)), write=fresh.get("write", True),
-                    parent=fresh["id"], auto_failover=False, max_failovers=0,
-                    failover_attempt=attempt, failover_root=root_id, previous_workers=previous,
-                    start_monitor=False, queue=True, pin=True, pool=False,
-                    expect_files=fresh.get("expect_files") or None,
-                    worker_order=fresh.get("worker_order") or None,
-                )
-            except Exception as exc:  # not ready after all, cooling down, …
-                last_error = exc
-                continue
-            to_label = info.get("label") or chosen
-            scheduler.patch_meta(root, fresh["id"], failover_job_id=new_id, failover_worker=chosen,
-                                 failover_worker_label=to_label, transfer_waiting_since=None,
-                                 transferred_at=time.time(),
-                                 last_event=f"moved to {to_label} ({site_name(info.get('provider'))}) as {new_id}")
-            scheduler._append_event(job_dir, "transfer",
-                                    f"handed over to {to_label} ({site_name(info.get('provider'))}) as job {new_id}, "
-                                    f"with the task, every step done so far and the folder state")
-            new_dir = jobs / new_id
-            scheduler.patch_meta(root, new_id, transfer=fresh.get("transfer", True), transferred_from=fresh["id"],
-                                 transferred_from_label=fresh.get("worker_label") or fresh.get("worker"),
-                                 transfer_reason=fresh.get("reason"))
-            scheduler._append_event(new_dir, "transfer",
-                                    f"continues job {fresh['id']} from {fresh.get('worker_label') or fresh.get('worker')} "
-                                    f"({REASON_TEXT.get(fresh.get('reason'), fresh.get('reason'))})")
-            if root_id != fresh["id"]:
-                try:
-                    scheduler.patch_meta(root, root_id, transfer_active_job=new_id, transfer_attempts=attempt)
-                except Exception:
-                    pass
-            return {"job_id": fresh["id"], "new_job_id": new_id, "worker": chosen, "attempt": attempt}
-        scheduler._append_event(job_dir, "transfer", f"could not start the hand-over: {last_error}")
-        return None
+        return _launch(root, fresh, options, start_job, config)
     finally:
         try:
             claim.unlink()
         except OSError:
             pass
+
+
+def _launch(root, fresh, options, start_job, config=None):
+    """Start the continuation of ``fresh`` on the first of ``options`` that
+    takes it, and link the chain. Returns a result dict or None."""
+    jobs = Path(root) / "jobs"
+    job_dir = jobs / fresh["id"]
+    chain = _chain(root, fresh)
+    root_id = fresh.get("failover_root") or chain[0]["id"]
+    attempt = _attempt(fresh) + 1
+    previous = list(dict.fromkeys([*(fresh.get("previous_workers") or []),
+                                   *(item.get("worker") for item in chain if item.get("worker"))]))
+    pack = build_pack(root, fresh, config)
+    remaining = fresh.get("timeout_s") or 5400
+    label = f"{chain[0].get('label') or root_id}"[:72] + f" (moved {attempt})"
+    last_error = None
+    for worker, info, _free in options[:4]:
+        try:
+            new_id, chosen = start_job(
+                worker, pack, fresh["cwd"], label=label,
+                timeout_minutes=max(5, min(int(remaining / 60), 720)), write=fresh.get("write", True),
+                parent=fresh["id"], auto_failover=False, max_failovers=0,
+                failover_attempt=attempt, failover_root=root_id, previous_workers=previous,
+                start_monitor=False, queue=True, pin=True, pool=False,
+                expect_files=fresh.get("expect_files") or None,
+                worker_order=fresh.get("worker_order") or None,
+            )
+        except Exception as exc:  # not ready after all, cooling down, …
+            last_error = exc
+            continue
+        to_label = info.get("label") or chosen
+        scheduler.patch_meta(root, fresh["id"], failover_job_id=new_id, failover_worker=chosen,
+                             failover_worker_label=to_label, transfer_waiting_since=None,
+                             transferred_at=time.time(),
+                             last_event=f"moved to {to_label} ({site_name(info.get('provider'))}) as {new_id}")
+        scheduler._append_event(job_dir, "transfer",
+                                f"handed over to {to_label} ({site_name(info.get('provider'))}) as job {new_id}, "
+                                f"with the task, every step done so far and the folder state")
+        new_dir = jobs / new_id
+        scheduler.patch_meta(root, new_id, transfer=fresh.get("transfer", True), transferred_from=fresh["id"],
+                             transferred_from_label=fresh.get("worker_label") or fresh.get("worker"),
+                             transfer_reason=fresh.get("reason"))
+        scheduler._append_event(new_dir, "transfer",
+                                f"continues job {fresh['id']} from {fresh.get('worker_label') or fresh.get('worker')} "
+                                f"({REASON_TEXT.get(fresh.get('reason'), fresh.get('reason'))})")
+        if root_id != fresh["id"]:
+            try:
+                scheduler.patch_meta(root, root_id, transfer_active_job=new_id, transfer_attempts=attempt)
+            except Exception:
+                pass
+        return {"job_id": fresh["id"], "new_job_id": new_id, "worker": chosen, "attempt": attempt}
+    scheduler._append_event(job_dir, "transfer", f"could not start the hand-over: {last_error}")
+    return None
+
+
+def move_options(root, meta, config=None):
+    """Where a job could go now: [{worker, label, site, free}], best first."""
+    rows = candidates(root, dict(meta, reason="moved_by_request"), config)
+    return [{"worker": w, "label": info.get("label") or w, "site": site_name(info.get("provider")), "free": free}
+            for w, info, free in rows]
+
+
+def move_job(root, meta, start_job, worker=None, provider=None, config=None):
+    """Continue a stopped job on another account or model, on request (MCP
+    job_move). ``worker`` names the account; ``provider`` (e.g. "deepseek-web")
+    asks for the best ready account of that site; neither picks the best ready
+    web-chat agent. The new job gets the same context pack as a hand-over."""
+    registry = build_worker_registry(root)
+    fresh = dict(meta, reason="moved_by_request")
+    if worker:
+        info = registry.get(worker)
+        if not info:
+            raise ValueError(f"unknown worker: {worker}")
+        options = [(worker, info, True)]
+    else:
+        options = candidates(root, fresh, config)
+        if provider:
+            options = [row for row in options if row[1].get("provider") == provider]
+    if not options:
+        raise ValueError("no ready agent to move this job to" + (f" on {provider}" if provider else ""))
+    scheduler.patch_meta(root, meta["id"], reason="moved_by_request", transfer=meta.get("transfer", True))
+    result = _launch(root, fresh, options, start_job, config)
+    if not result:
+        raise ValueError("the move could not start (see the job's events)")
+    return result
 
 
 def pause_over(meta, config=None, now=None):

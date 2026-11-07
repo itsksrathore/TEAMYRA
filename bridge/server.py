@@ -335,6 +335,29 @@ def chatgpt_desktop_watch(root, wake=None, desktop_ready=None):
     return {"pending": len(alive), "woke": woke, "expired": expired}
 
 
+def move_job_now(job_id, worker=None, provider=None, stop_wait_seconds=90):
+    """job_move: stop the chain's current job if it still runs, then continue
+    it elsewhere with the hand-over context pack (job_transfer.move_job)."""
+    terminal_id = failover_terminal_job_id(job_id)
+    read_meta(terminal_id)
+    if not is_done(terminal_id):
+        (JOBS / terminal_id / "CANCEL").write_text("cancel", encoding="utf-8")
+        scheduler.cancel_waiting_desktop_job(jobs_root(), terminal_id)
+        try:
+            scheduler.queue_cancel(jobs_root(), terminal_id)
+        except Exception:
+            pass
+        deadline = time.time() + stop_wait_seconds
+        while not is_done(terminal_id) and time.time() < deadline:
+            time.sleep(1)
+        if not is_done(terminal_id):
+            return {"ok": False, "job_id": job_id, "current_job_id": terminal_id,
+                    "error": f"the job did not stop within {stop_wait_seconds} s; call job_move again in a moment"}
+    result = job_transfer.move_job(jobs_root(), read_meta(terminal_id), start_job, worker=worker, provider=provider)
+    return {"ok": True, "job_id": job_id, "moved_job_id": terminal_id, **result,
+            "note": "follow the original job id with job_wait / job_result"}
+
+
 def scheduler_tick(root):
     """Every scheduler pass: keep the desktop up for web jobs, and hand
     stopped web-chat jobs over to another agent (job_transfer)."""
@@ -1776,6 +1799,18 @@ TOOLS = [
                      "required": ["job_id", "message"], "additionalProperties": False}},
     {"name": "job_cancel", "description": "Stop a running job (kills the worker process tree).",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": False}},
+    {"name": "job_move", "description": (
+        "Move a job (running, waiting or ended) to another account or model now. TEAMYRA stops it and starts a "
+        "continuation with the original task, every step done so far and the folder state, so you do not resend "
+        "anything. worker = an exact worker id (any provider); provider = a site such as deepseek-web, muse-web, "
+        "chatgpt-web, qwen-web, glm-web (its best ready account); neither = the best ready web-chat agent. "
+        "job_wait/job_result on the original job id follow the move."),
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"}, "worker": {"type": "string"}, "provider": {"type": "string"}},
+         "required": ["job_id"], "additionalProperties": False}},
+    {"name": "job_move_options", "description": "Where job_move could send a job now: ready accounts and models, best first.",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"],
+                     "additionalProperties": False}},
     {"name": "worker_status", "description": "List all discovered workers/accounts with auth availability, provider, model, running jobs, current_job, queue_length and usage cooldown.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "team_report", "description": (
@@ -2300,6 +2335,12 @@ def tool_call(name, a):
                     "note": "the web-chat job was waiting for its account and never started"}
         return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
                 "note": "the active terminal worker stops within a few seconds"}
+    if name == "job_move_options":
+        terminal_id = failover_terminal_job_id(a["job_id"])
+        return {"job_id": a["job_id"], "current_job_id": terminal_id,
+                "options": job_transfer.move_options(jobs_root(), read_meta(terminal_id))}
+    if name == "job_move":
+        return move_job_now(a["job_id"], a.get("worker"), a.get("provider"))
     if name == "worker_status":
         return worker_status()
     if name == "team_report":

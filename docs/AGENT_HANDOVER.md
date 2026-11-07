@@ -74,3 +74,15 @@ Sites flag an account that works without a break ("unusual activity" on ChatGPT)
 - **Rotation:** a queued job goes to the least busy ready account of its site. Ties go to the account with fewer jobs in the last hour, then to the one used longest ago. So jobs alternate: ChatGPT 1, then ChatGPT 2, then ChatGPT 1 again. With 5 accounts, all five take turns. Signed-out accounts, accounts showing a check, and accounts cooling down after a limit or block are skipped. Pass `account_fixed: true` to `start_task` to keep a job on the account named in `worker`.
 - **Pacing:** each account starts at most one new job every 20 seconds (`WEB_PACING_SECONDS` in `bridge/scheduler.py`).
 - **Tabs per account:** ChatGPT, Muse and DeepSeek run up to 3 jobs at once per account, Qwen and GLM up to 2. An account's own `lanes` setting in its `teamyra-profile.json` overrides this (`SITE_DEFAULT_LANES` in `apps/desktop/src/main.js`).
+
+## Moving a job on request (MCP)
+
+A lead (or any MCP client) can move a job itself, without resending the task or spending tokens on a summary:
+
+- `job_move_options {job_id}` lists the ready accounts and models, best first (`worker`, `label`, `site`, `free`).
+- `job_move {job_id, worker?}` or `job_move {job_id, provider?}`:
+  1. stops the job if it still runs (or is queued or waiting);
+  2. starts a continuation on the named worker (any provider, Codex and Claude included), or on the best ready account of `provider` (for example `deepseek-web`), or on the best ready web-chat agent;
+  3. gives the continuation the same context pack as an automatic hand-over.
+
+  The old job ends with reason `moved_by_request`. `job_wait` and `job_result` on the original job id follow the move, as with automatic hand-overs.
