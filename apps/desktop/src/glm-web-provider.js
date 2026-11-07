@@ -116,6 +116,8 @@ const GLM_SITE = {
     settingsJs: glmSettingsJs
   },
   adapter: (webContents, options) => new GlmAutomationAdapter(webContents, options, GLM_SITE.page),
+  // Z.ai drops the message behind a busy reply: send it again, not "answer again".
+  resendAfterBusy: true,
   promptRules: [
     'Do not use Z.ai agents, Full-Stack, Web Site, PPT or any built-in tool for this job; TEAMYRA_TOOL_REQUEST is the only way to reach the project.',
     'Your thinking is not shown to TEAMYRA: put the TEAMYRA_TOOL_REQUEST line in your answer.',

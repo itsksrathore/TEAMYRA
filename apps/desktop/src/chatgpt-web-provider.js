@@ -250,7 +250,7 @@ function renameWithRetry(from, to) {
 // "SyntaxError: Unexpected token '<', "<!doctype"... is not valid JSON" when
 // its server sent an error page (2026-11-07). The model never saw the message,
 // so the same message is sent again.
-const SITE_ERROR_REPLY = /^(?:SyntaxError:\s*Unexpected token|Unexpected token\s*'<'|[^\n]{0,80}\bis not valid JSON\b|Network error|Failed to fetch|Something went wrong|An error occurred|Request failed|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/i;
+const SITE_ERROR_REPLY = /^(?:Your current concurrent (?:conversation|chat|request)s? limit|SyntaxError:\s*Unexpected token|Unexpected token\s*'<'|[^\n]{0,80}\bis not valid JSON\b|Network error|Failed to fetch|Something went wrong|An error occurred|Request failed|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/i;
 function isSiteErrorReply(text) {
   const value = String(text || '').trim();
   return value.length > 0 && value.length <= 300 && !/TEAMYRA_TOOL_REQUEST/.test(value) && SITE_ERROR_REPLY.test(value);
@@ -1848,7 +1848,10 @@ class ChatGPTWebProvider {
           await sleep((this.transientRetryMs ?? 15000) * transientRetries);
           this.checkJobActive(job);
           // After a site error the model never got the message: send it again.
-          const again = siteError && job.lastMessage ? job.lastMessage : 'Please answer my previous message again.';
+          // After a site error, and on sites that drop the message behind a busy
+          // reply (Z.ai: "I can't see your previous message"), send it again.
+          const again = (siteError || this.site.resendAfterBusy) && job.lastMessage
+            ? job.lastMessage : 'Please answer my previous message again.';
           reply = await this.jobExchange(job, again);
           continue;
         }

@@ -324,8 +324,15 @@ const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([
 const DEFAULT_WEB_LANES = 5;
 const MAX_WEB_LANES = 8;
 
+// Sites that allow fewer chats at once per account. Z.ai's free plan answers
+// "Your current concurrent conversation limit has been reached" with more
+// (2026-11-07). An account's own `lanes` setting still wins.
+// Qwen's heavy page froze (even simple page checks timed out) with five
+// hidden tabs per account sharing one renderer process.
+const SITE_DEFAULT_LANES = { 'glm-web': 2, 'qwen-web': 2 };
+
 function webLaneCount(providerId, profileId) {
-  let lanes = Number(process.env.TEAMYRA_WEB_LANES) || DEFAULT_WEB_LANES;
+  let lanes = Number(process.env.TEAMYRA_WEB_LANES) || SITE_DEFAULT_LANES[providerId] || DEFAULT_WEB_LANES;
   try {
     const meta = JSON.parse(fs.readFileSync(path.join(PROFILES_ROOT, providerId, profileId, 'teamyra-profile.json'), 'utf8'));
     if (Number.isInteger(meta.lanes)) lanes = meta.lanes;
