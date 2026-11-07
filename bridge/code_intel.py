@@ -28,6 +28,13 @@ def default_cache_root(root=None):
     return Path(root or Path(__file__).resolve().parent.parent) / 'cache' / 'code-intel'
 
 
+def _is_reparse(p):
+    try:
+        return p.is_symlink() or (p.is_junction() if hasattr(p, 'is_junction') else False) or bool(getattr(p.lstat(), 'st_file_attributes', 0) & 1024)
+    except OSError:
+        return True
+
+
 def _files(path):
     base = Path(path)
     if base.is_file():
@@ -38,14 +45,14 @@ def _files(path):
         raise FileNotFoundError(str(path))
     for p in candidates:
         try:
-            if p.suffix.lower() in EXTENSIONS and not any(part in IGNORED for part in p.parts) and not p.is_symlink() and p.stat().st_size <= MAX_BYTES:
+            if p.suffix.lower() in EXTENSIONS and not any(part in IGNORED for part in p.parts) and not _is_reparse(p) and p.resolve().is_relative_to(base.resolve()) and p.stat().st_size <= MAX_BYTES:
                 yield p
         except OSError:
             continue
 
 
 def _walk(folder, dirs, names):
-    dirs[:] = sorted(d for d in dirs if d not in IGNORED and not (Path(folder) / d).is_symlink())
+    dirs[:] = sorted(d for d in dirs if d not in IGNORED and not _is_reparse(Path(folder) / d))
     for name in sorted(names):
         yield Path(folder) / name
 
@@ -200,15 +207,15 @@ def _extract(path, cache):
     if location:
         try:
             record = json.loads(location.read_text(encoding='utf-8'))
-            if record.get('parser_version') == (2, bool(_language_pack)) and record['mtime_ns'] == stat.st_mtime_ns and record['size'] == stat.st_size:
+            if isinstance(record, dict) and isinstance(record.get('symbols'), list) and isinstance(record.get('imports'), list) and record.get('parser_version') == [2, bool(_language_pack)] and record['mtime_ns'] == stat.st_mtime_ns and record['size'] == stat.st_size:
                 return record['symbols'], record['imports']
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
     symbols, imports = _parse(path, path.read_text(encoding='utf-8', errors='replace'))
     if location:
         try:
             cache.mkdir(parents=True, exist_ok=True)
-            location.write_text(json.dumps({'parser_version': (2, bool(_language_pack)), 'mtime_ns': stat.st_mtime_ns, 'size': stat.st_size, 'symbols': symbols, 'imports': imports}), encoding='utf-8')
+            location.write_text(json.dumps({'parser_version': [2, bool(_language_pack)], 'mtime_ns': stat.st_mtime_ns, 'size': stat.st_size, 'symbols': symbols, 'imports': imports}), encoding='utf-8')
         except OSError:
             pass
     return symbols, imports

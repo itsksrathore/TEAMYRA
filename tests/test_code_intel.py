@@ -82,6 +82,52 @@ class CodeIntelTests(unittest.TestCase):
         self.assertTrue(self.symbol('updated')['found'])
         self.assertFalse(self.symbol('old')['found'])
 
+    def test_cache_hit_parses_once_and_mtime_reparses(self):
+        from unittest.mock import patch
+        from bridge import code_intel
+        file = self.put('sample.py', 'def cached():\n pass\n')
+        calls = []
+        original = code_intel._parse
+        def counting(path, source):
+            calls.append(path)
+            return original(path, source)
+        with patch.object(code_intel, '_parse', counting):
+            self.assertEqual(code_intel._extract(file, self.cache)[0][0]['name'], 'cached')
+            self.assertEqual(code_intel._extract(file, self.cache)[0][0]['name'], 'cached')
+            self.assertEqual(len(calls), 1)
+            os.utime(file, ns=(file.stat().st_atime_ns, file.stat().st_mtime_ns + 2000000000))
+            self.assertEqual(code_intel._extract(file, self.cache)[0][0]['name'], 'cached')
+            self.assertEqual(len(calls), 2)
+
+    def test_corrupt_cache_list_falls_back(self):
+        import json
+        file = self.put('sample.py', 'def cached():\n pass\n')
+        self.assertTrue(self.symbol('cached')['found'])
+        for cached in self.cache.glob('*.json'):
+            cached.write_text('[]', encoding='utf-8')
+        self.assertTrue(self.symbol('cached')['found'])
+        records = [json.loads(p.read_text(encoding='utf-8')) for p in self.cache.glob('*.json')]
+        self.assertTrue(records and all(isinstance(r, dict) for r in records))
+
+    def test_junction_escape(self):
+        import subprocess
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'secret.py').write_text('def secret():\n pass\n', encoding='utf-8')
+        self.put('good.py', 'def good():\n pass\n')
+        link = self.project / 'linked'
+        def _unlink(path):
+            try:
+                os.rmdir(path)
+            except OSError:
+                os.unlink(path)
+        self.addCleanup(_unlink, link)
+        result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(outside)], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise unittest.SkipTest('no directory symlink or junction support')
+        paths = [item['path'] for item in self.map()['files']]
+        self.assertEqual(paths, ['good.py'])
+
     def test_body_and_reference_caps(self):
         self.put('long.py', 'def huge():\n' + '    x = 1\n' * 350)
         self.put('uses.py', 'huge()\n' * 50)
