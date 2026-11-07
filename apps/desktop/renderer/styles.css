@@ -658,6 +658,10 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
   overflow: auto;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  /* Rows take each card's full height. Without this, the grid shares the
+     window's height between the rows and cuts the cards (overflow: hidden)
+     down to 190px, hiding accounts and the footer buttons. */
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 12px;
   padding: 2px 4px 8px;
@@ -665,6 +669,8 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 
 .agent-card {
   min-height: 190px;
+  /* A card with many accounts stops growing here and scrolls its list. */
+  max-height: 400px;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--rim);
@@ -709,6 +715,8 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 
 .profile-list {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   padding: 2px 9px 8px;

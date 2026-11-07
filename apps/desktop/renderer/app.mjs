@@ -548,7 +548,18 @@ async function refreshAgents(force = false) {
   const idleSeconds = Number(currentMcpConnections?.service?.idleSeconds) || 600;
   $('#agentSummary').title = currentMcpConnections?.bootError ||
     (currentMcpConnections?.endpoint + ' · auto-sleep after ' + Math.round(idleSeconds / 60) + ' min idle');
-  $('#agentGrid').innerHTML = currentProviders.map(agentCardHtml).join('');
+  // The status poll rebuilds these cards every few seconds. Keep the page's
+  // and each card's account-list scroll where the user left them.
+  const grid = $('#agentGrid');
+  const gridTop = grid.scrollTop;
+  const listTops = new Map([...grid.querySelectorAll('[data-provider-card]')]
+    .map(card => [card.dataset.providerCard, card.querySelector('.profile-list')?.scrollTop || 0]));
+  grid.innerHTML = currentProviders.map(agentCardHtml).join('');
+  grid.scrollTop = gridTop;
+  grid.querySelectorAll('[data-provider-card]').forEach(card => {
+    const list = card.querySelector('.profile-list');
+    if (list && listTops.get(card.dataset.providerCard)) list.scrollTop = listTops.get(card.dataset.providerCard);
+  });
 
   $('#agentGrid').querySelectorAll('[data-provider][data-profile]').forEach(button => {
     button.addEventListener('click', () => {
