@@ -84,13 +84,17 @@ def handle(action, payload):
             forwarded = dict(args)
             if name == "job_wait":
                 timeout = forwarded.get("timeout_seconds", 120)
-                if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
-                    raise ValueError("job_wait timeout_seconds must be a positive number")
+                if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not -1e999 < timeout < float("inf"):
+                    raise ValueError("job_wait timeout_seconds must be a finite number")
                 forwarded["timeout_seconds"] = min(timeout, 120)
+            outcome = 'error'
             import server
             outcome = "error"
             result = server.tool_call(name, forwarded)
-            outcome = "success"
+            if isinstance(result, dict) and result.get('ok') is False:
+                outcome = 'error'
+            else:
+                outcome = 'success'
             return result
         except Exception:
             if outcome != "denied":

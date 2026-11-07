@@ -51,15 +51,31 @@ class LeadToolTests(unittest.TestCase):
 
     def test_wait_cap_default_and_lower_and_no_mutation(self):
         for original, expected in (({}, 120), ({"timeout_seconds": 9999}, 120),
-                                   ({"timeout_seconds": 4}, 4)):
+                                   ({"timeout_seconds": 4}, 4), ({"timeout_seconds": 0}, 0), ({"timeout_seconds": -1}, -1)):
             args = {"job_ids": ["a"], **original}
             snapshot = dict(args)
             self.run_tool("lead.job_wait", args)
             self.assertEqual(self.calls[-1][1]["timeout_seconds"], expected)
             self.assertEqual(args, snapshot)
-        for timeout in (0, -1, True, "999", None):
+        for timeout in (True, "999", None, float("nan"), float("inf"), float("-inf")):
             with self.assertRaises(ValueError):
                 self.run_tool("job_wait", {"timeout_seconds": timeout})
+
+    def test_returned_ok_false_audits_error(self):
+        self.fake.tool_call = lambda name, args: {'ok': False, 'error': 'boom'}
+        result = self.run_tool('lead.job_cancel', {'job_id': 'j'})
+        self.assertEqual(result, {'ok': False, 'error': 'boom'})
+        self.assertEqual(self.audit()[-1]['outcome'], 'error')
+        self.fake.tool_call = lambda name, args: {'ok': True, 'name': name, 'job': {'state': 'failed'}}
+        result = self.run_tool('lead.job_result', {'job_id': 'j'})
+        self.assertEqual(result['job']['state'], 'failed')
+        self.assertEqual(self.audit()[-1]['outcome'], 'success')
+
+    def test_import_failure_audits_error(self):
+        with patch.dict(sys.modules, {'server': None}):
+            with self.assertRaises(ImportError):
+                self.run_tool('lead.job_cancel', {'job_id': 'j'})
+        self.assertEqual(self.audit()[-1]['outcome'], 'error')
 
     def test_forward_confirm_unchanged_and_preserve_result(self):
         args = {"worktree_id": "w", "confirm": False}
