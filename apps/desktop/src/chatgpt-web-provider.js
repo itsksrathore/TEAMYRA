@@ -8,6 +8,7 @@ const { JobProcesses, jobProcesses } = require('./job-processes');
 const { JobInspector } = require('./job-inspect');
 const { callCore } = require('./core-api');
 const { limitNotice, replyLimitNotice, isBlockNotice, limitScript } = require('./limit-detect');
+const { readOnlyCommandProblem } = require('./read-only-commands');
 // A reply overdue this long with nothing being written: look for a usage-limit
 // notice on the page (limit-detect.js).
 const LIMIT_CHECK_AFTER_MS = 30000;
@@ -269,6 +270,11 @@ function looksLikeProtocolLoss(text, successfulTools) {
   const nativeTool = /(?:^|\n)\s*Tool\s+(?:filesystem|terminal|git|process|page|screen)\.[\w.-]+\s+(?:does\s+not\s+exists?|not\s+found|is\s+not\s+available)\b/.test(reply);
   const agentTrace = /(?:^|\n)\s*(?:Explored \d+ files?|Find File\b|Read File\b|Run Command\b)/.test(reply) &&
     !/TEAMYRA_TOOL_REQUEST/.test(reply);
+  // The model wrote a tool result itself (DeepSeek, 2026-11-07: a reply that
+  // was a made-up "<tool_result>{...}" with garbled file content) or left its
+  // own tool-call markup that names no TEAMYRA tool: nothing ran.
+  const fakeResult = /^\s*(?:<tool_result>|<[|｜]+\s*DSML|TEAMYRA_TOOL_RESULT\b)/.test(reply);
+  if (fakeResult) return true;
   if (!(refusal || unavailable || paste || nativeTool || agentTrace)) return false;
   if (agentTrace) return true;
   if (nativeTool) return true;
@@ -2017,8 +2023,15 @@ class ChatGPTWebProvider {
         this.saveJobState(job, { phase: 'tool', request, reply: null });
         let toolResult;
         try {
-          if (spec.write === false && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
-            throw new Error('This delegated job is read-only; write, terminal, and mutating Git tools are disabled');
+          if (spec.write === false && request.tool === 'terminal.run') {
+            // A read-only job may run tests and checks (files stay read-only).
+            const problem = readOnlyCommandProblem(request.args?.argv);
+            if (problem) {
+              throw new Error(`This delegated job is read-only: terminal.run may run only tests, linters, type checks ` +
+                `and read-only git commands (${problem})`);
+            }
+          } else if (spec.write === false && READ_ONLY_BLOCKED_TOOLS.has(request.tool)) {
+            throw new Error('This delegated job is read-only; write, process and mutating Git tools are disabled');
           }
           if (JobProcesses.handles(request.tool)) {
             toolResult = await jobProcesses.call(jobDir, request.tool, request.args, {

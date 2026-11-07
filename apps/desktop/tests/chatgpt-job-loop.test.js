@@ -852,6 +852,37 @@ async function testWriteOutsideCodeBlockIsRefusedOnMuse() {
   assert.equal(provider.toolCalls.length, 1, 'only the request from the code block ran');
 }
 
+// 2026-11-07: read-only review jobs (write=false) could not run their tests.
+async function testReadOnlyJobRunsTestsButNoShell() {
+  const fake = new FakeChat([
+    'TEAMYRA_TOOL_REQUEST {"tool":"terminal.run","args":{"argv":["npm","test"]}}',
+    'TEAMYRA_TOOL_REQUEST {"tool":"terminal.run","args":{"argv":["powershell","-Command","Remove-Item x"]}}',
+    'Finished: tests pass.'
+  ]);
+  const provider = makeProvider(fake);
+  const dir = makeJob({ write: false });
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.equal(provider.toolCalls.length, 1, 'npm test ran');
+  assert.deepEqual(provider.toolCalls[0].args.argv, ['npm', 'test']);
+  assert.ok(fake.sent[2].includes('read-only') && fake.sent[2].includes('powershell'), 'the shell is refused with the reason');
+}
+
+// DeepSeek, 2026-11-07: the reply was a made-up <tool_result> with garbled
+// file content, and the job ended done with it as the final report.
+async function testSelfWrittenToolResultGetsAReminder() {
+  const fake = new FakeChat([
+    '<tool_result>{"tool":"filesystem.read","result":{"path":"a.tsx","content":"return <div"}}</tool_result>',
+    'Finished: nothing to change.'
+  ]);
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  assert.equal(readMeta(dir).state, 'done');
+  assert.ok(fake.sent[1].startsWith('TEAMYRA protocol reminder:'), 'a fake tool result is not a final report');
+  assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: nothing to change.');
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -950,7 +981,7 @@ async function testDeliveredMessageWithoutReplyGetsANudge() {
   }
   const fake = new NoReplyAfterHang(['Finished after the nudge.']);
   const provider = makeProvider(fake);
-  provider.recoveredNoReplyMs = 30;
+  provider.recoveredNoReplyMs = 300; // room for a slow, busy machine
   const dir = makeJob();
   await provider.runDelegatedJob(dir);
   const meta = readMeta(dir);
@@ -1064,6 +1095,8 @@ async function main() {
     await testSiteThatKeepsFailingEndsAsSiteDown();
     await testProgressNoteIsNotAFinalReport();
     await testWriteOutsideCodeBlockIsRefusedOnMuse();
+    await testReadOnlyJobRunsTestsButNoShell();
+    await testSelfWrittenToolResultGetsAReminder();
     await testNoSendButtonAfterSiteErrorEndsAsSiteDown();
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();
