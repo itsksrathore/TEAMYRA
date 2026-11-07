@@ -96,7 +96,7 @@ class LeadToolAdversarialTests(unittest.TestCase):
 					result = self.run_tool(name, {'probe': 1})
 					self.assertEqual(len(self.calls), 1)
 					self.assertEqual(self.calls[0][0], tool)
-					self.assertEqual(self.calls[0][1], {'probe': 1})
+					self.assertEqual(self.calls[0][1], {'probe': 1, 'timeout_seconds': 120} if tool == 'job_wait' else {'probe': 1})
 					self.assertEqual(result.get('tool'), tool)
 		self.assertEqual(len(self.audit_entries()), 32)
 
