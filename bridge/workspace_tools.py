@@ -19,6 +19,11 @@ from pathlib import Path
 
 from web_sites import WEB_SITES
 
+try:
+    from code_intel import code_map, find_symbol
+except ImportError:
+    from bridge.code_intel import code_map, find_symbol
+
 DEFAULT_PERMISSIONS = {
     "read": True,
     "search": True,
@@ -42,6 +47,8 @@ PERMISSION_BY_TOOL = {
     "filesystem.stat": "read",
     "filesystem.read": "read",
     "filesystem.search": "search",
+    "code.map": "search",
+    "code.symbol": "search",
     "filesystem.create": "create",
     "filesystem.write": "write",
     "filesystem.patch": "write",
@@ -897,6 +904,19 @@ class WorkspaceToolService:
                             return {"results": results, "clipped": True, "scanned_files": scanned}
             return {"results": results, "clipped": scanned > 5000, "scanned_files": scanned}
 
+        if tool == 'code.map':
+            path = self._path(args.get('path', '.'), workspace, permissions, must_exist=True)
+            budget_chars = int(args.get('budget_chars', 8000))
+            visible = self._visible_filter(workspace, permissions)
+            return code_map(path, budget_chars=budget_chars, focus=args.get('focus'), root=self.root, visible=visible)
+
+        if tool == 'code.symbol':
+            path = self._path(args.get('path', '.'), workspace, permissions, must_exist=True)
+            name = str(args.get('name') or '')
+            if not name:
+                raise WorkspaceToolError('name is required')
+            visible = self._visible_filter(workspace, permissions)
+            return find_symbol(path, name, root=self.root, visible=visible)
         if tool in {"filesystem.create", "filesystem.write"}:
             path = self._path(args.get("path"), workspace, permissions)
             if tool == "filesystem.create" and path.exists():

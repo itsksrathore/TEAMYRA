@@ -35,7 +35,7 @@ def _is_reparse(p):
         return True
 
 
-def _files(path):
+def _files(path, visible=None):
     base = Path(path)
     if base.is_file():
         candidates = [base]
@@ -45,7 +45,10 @@ def _files(path):
         raise FileNotFoundError(str(path))
     for p in candidates:
         try:
-            if p.suffix.lower() in EXTENSIONS and not any(part in IGNORED for part in p.parts) and not _is_reparse(p) and p.resolve().is_relative_to(base.resolve()) and p.stat().st_size <= MAX_BYTES:
+            resolved = p.resolve()
+            if visible is not None and not visible(resolved):
+                continue
+            if p.suffix.lower() in EXTENSIONS and not any(part in IGNORED for part in p.parts) and not _is_reparse(p) and resolved.is_relative_to(base.resolve()) and p.stat().st_size <= MAX_BYTES:
                 yield p
         except OSError:
             continue
@@ -221,10 +224,10 @@ def _extract(path, cache):
     return symbols, imports
 
 
-def _inventory(path, cache, focus):
+def _inventory(path, cache, focus, visible=None):
     base = Path(path).resolve()
     directory = base if base.is_dir() else base.parent
-    files = list(_files(base))
+    files = list(_files(base, visible=visible))
     parsed = {}
     for file in files:
         try:
@@ -265,11 +268,11 @@ def _inventory(path, cache, focus):
     return directory, sorted(parsed, key=rank), parsed, centrality
 
 
-def code_map(path, budget_chars=8000, focus=None, root=None, cache_root=None):
+def code_map(path, budget_chars=8000, focus=None, root=None, cache_root=None, visible=None):
     """Return {path, files, text, total_files, truncated, budget_chars, focus}."""
     budget = max(0, int(budget_chars))
     cache = Path(cache_root) if cache_root else default_cache_root(root)
-    directory, ranked, parsed, centrality = _inventory(path, cache, focus)
+    directory, ranked, parsed, centrality = _inventory(path, cache, focus, visible=visible)
     entries, chunks, used = [], [], 0
     cut = False
     for file in ranked:
@@ -298,10 +301,10 @@ def code_map(path, budget_chars=8000, focus=None, root=None, cache_root=None):
 
 
 
-def find_symbol(path, name, root=None, cache_root=None):
+def find_symbol(path, name, root=None, cache_root=None, visible=None):
     """Return {name, found, definition, references}; definition body <=300 lines."""
     cache = Path(cache_root) if cache_root else default_cache_root(root)
-    directory, ranked, parsed, _ = _inventory(path, cache, name)
+    directory, ranked, parsed, _ = _inventory(path, cache, name, visible=visible)
     definition = None
     for file in ranked:
         for symbol in parsed[file][0]:
