@@ -1460,6 +1460,12 @@ class ChatGPTWebProvider {
         }
         // A site at its limit can block the message box or the Send button.
         if (!kind && await this.checkLimit(job)) throw this.limitError(job);
+        // After a site error reply the chat can stay stuck "generating" with
+        // no Send button (Z.ai outage, 2026-11-07): that is the same outage,
+        // not a hung page, so a reload will not help. End it as site_down.
+        if (!kind && job.siteErrors && /send-button-unavailable/.test(String(error?.message))) {
+          throw teamyraError(`${this.site.name} is not answering (site error, then no Send button)`, 'TEAMYRA_SITE_DOWN', 'site_down');
+        }
         if (!kind) throw error;
         await this.waitForChallengeResolution(job, kind);
       }
@@ -1856,6 +1862,7 @@ class ChatGPTWebProvider {
         const siteError = isSiteErrorReply(reply.text);
         if ((siteError || this.automation.isTransientReply?.(reply.text)) && transientRetries < MAX_TRANSIENT_RETRIES) {
           transientRetries += 1;
+          if (siteError) job.siteErrors = (job.siteErrors || 0) + 1;
           this.appendJobEvent(jobDir, 'info', siteError
             ? `${this.site.name} showed an error instead of an answer ("${String(reply.text).slice(0, 80)}"); sending the message again (${transientRetries}/${MAX_TRANSIENT_RETRIES})`
             : `${this.site.name} was busy; asking again in a moment (${transientRetries}/${MAX_TRANSIENT_RETRIES})`);
@@ -2011,7 +2018,9 @@ class ChatGPTWebProvider {
     } catch (error) {
       if (error?.code === 'TEAMYRA_CANCELLED') state = 'cancelled';
       else if (state !== 'cancelled') state = 'failed';
-      const finalReason = state === 'cancelled' ? 'cancelled' : (reason || error?.reason || 'worker_error');
+      let finalReason = state === 'cancelled' ? 'cancelled' : (reason || error?.reason || 'worker_error');
+      // The page "hung" only after the site answered with errors: the site is down.
+      if (job.siteErrors && finalReason === 'page_unresponsive') finalReason = 'site_down';
       this.appendJobEvent(jobDir, 'error', String(error?.message || error));
       this.writeJobMeta(jobDir, {
         state,

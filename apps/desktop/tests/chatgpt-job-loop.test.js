@@ -788,6 +788,29 @@ async function testSiteThatKeepsFailingEndsAsSiteDown() {
   assert.ok(!fs.existsSync(path.join(dir, 'final.txt')), 'the error text is not a final answer');
 }
 
+// Z.ai, 2026-11-07: after the error reply the chat stayed "generating" with
+// no Send button; the job hung through reloads and ended page_unresponsive.
+async function testNoSendButtonAfterSiteErrorEndsAsSiteDown() {
+  class StuckChat extends FakeChat {
+    async sendTask(text) {
+      if (this.sent.length >= 1) throw new Error('send-button-unavailable');
+      return super.sendTask(text);
+    }
+  }
+  const fake = new StuckChat(['SyntaxError: Unexpected token \'<\', "<!doctypeh"... is not valid JSON', 'never reached']);
+  const provider = makeProvider(fake);
+  provider.transientRetryMs = 1;
+  provider.sendRetryMs = 1;
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'site_down');
+  assert.match(meta.last_event, /not answering/);
+  const events = fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8');
+  assert.ok(!/page_recovery/.test(events), 'no reload cycle for a site outage');
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -998,6 +1021,7 @@ async function main() {
     await testSiteBlockEndsTheJobAsSiteBlocked();
     await testSiteErrorResendsAndAgentTraceGetsReminder();
     await testSiteThatKeepsFailingEndsAsSiteDown();
+    await testNoSendButtonAfterSiteErrorEndsAsSiteDown();
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();
     await testDeliveredMessageWithoutReplyGetsANudge();
