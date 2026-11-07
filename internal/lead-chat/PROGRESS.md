@@ -1,6 +1,6 @@
-# Lead Chat — Progress (2026-11-07)
+# Lead Chat - Progress (2026-11-07)
 
-Status: ACTIVE — Wave 1 retries running after USER confirmed worktree fix and TEAMYRA restart; not complete. S1-0 alone MERGED; no other WP merged; no implementation changes in this file.
+Status: ACTIVE - Wave 1 retries running after USER confirmed worktree fix and TEAMYRA restart; not complete. S1-0 alone MERGED; no other WP merged; no implementation changes in this file.
 
 Integration: D:/AI-Orchestrator-lead, branch feat/lead-chat, base 79140ebf392747a0a328e7035b0865957589390d. Separate integration checkout and node_modules junction already created with user approval. Read internal/lead-chat/03-HANDOFF.md, 02-IMPLEMENTATION-PLAN.md, and 01-DESIGN.md before resuming. This is an administrative snapshot, not proof of current job execution or completion.
 
@@ -8,37 +8,43 @@ Recovery note: previous writer 1107-102513-chatgpt-chatgpt-normal-3-cf8c-e1b7 is
 
 Prior progress update 1107-103626-muse-normal-8f0a done at 0ca4c20; its one-line WP rows and original worktree IDs are preserved below.
 
-Current update: previous writer 1107-113527-muse-normal-cc8d DONE. S1-0 MERGED (see row); C-1 followup ACTIVE, C-2 followup ACTIVE after prior child REJECTED IN REVIEW, GLM approval survey ACTIVE (report commit 6025c01, job/checks not yet verified; optional prep not merged), no other merge. Grok excluded (quota ISS-20261107-112112-454c57), prior job 1107-110408-grok-normal-9acd verified cancelled; Qwen paused; providers ChatGPT Normal (account 3 already used), Muse, DeepSeek, GLM only. Runtime workspace read and safe terminal now successful; bare npm test_run ['npm','--version'] passed npm 10.9.8. No bootstrap checkout created.
+Current update: previous writer 1107-113917-muse-normal-c7ae DONE. Work dispatched to up to 10 independent agents (not all confirmed running); S1-0 MERGED 717fa3a, desktop pass, Python 488 pass skip 1 after recorded intermittent failure. C-1 DeepSeek followup CANCELLED (1061s, no edits), GLM fix ACTIVE; C-2 followup ACTIVE; S1-1 advanced alongside C1/C2 (dep S1-0 met); C-3 still waits C1/C2, no Wave 3 before Checkpoint A. GLM approval survey DONE 6025c01, not yet lead-reviewed/tested/merged. Grok EXCLUDED (quota); expanded pool DeepSeek 1-4, ChatGPT Normal 1/3, GLM 1-3, Qwen 1/2, Muse; Normal3 fastest complex/followup, Muse bounded docs, GLM/other accounts scoped tests/reviews; Qwen2 ready:true ONLY bounded read-only bootstrap preflight; new jobs transfer:false. Prior: Grok job 1107-110408-grok-normal-9acd verified cancelled; runtime workspace read and safe terminal successful; npm 10.9.8. No bootstrap checkout created.
 
-## Jobs — one line per WP
+## Jobs - one line per WP
 
-- S1-0 — MERGED, original retry 1107-110349-muse-normal-9f92 -> automatic child 1107-111037-chatgpt-chatgpt-normal-3-cf8c-d1ad completed 907c438; doc-review fix 1107-112544-chatgpt-chatgpt-normal-3-cf8c-4e8b completed 3d90ff5; reviewed corrected C-2 mislabel/protocol/inheritance; lead desktop exit 0 129.361s, Python first run failed existing test_codex_images:test_images_run_in_parallel_across_accounts, then targeted 6 passed and entire 488 passed (skip 1, 121.253s), no source changes; merge via worktree_merge confirm:true, merge commit 717fa3acfd653f9d0945f863c61e2ea81ab341be. Worktree wt-20261107-102311-c9b082. Prior: FAILED missing_output, workspace denial — job 1107-102441-muse-normal-72a7.
-- C-1 — ACTIVE followup, job 1107-112349-deepseek-normal-b5fb, deepseek-normal, same worktree wt-20261107-102326-3279ab — full raw-log/tail cap fix pending, not merged. Initial retry 1107-110345-deepseek-normal-71df done a24e4a5 (10 new tests, 498 suite pass authored); lead found raw output capped before full-log save. Prior: BLOCKED, terminal done, no changes/tests — job 1107-102444-deepseek-normal-518c.
-- C-2 — ACTIVE followup, job 1107-113802-chatgpt-chatgpt-normal-3-cf8c-248d, same C-2 worktree wt-20261107-102334-586a3c - initial 6 focused tests pass, full suites 60s timeout unverified; followup instructed explicit timeout_seconds 600 and regressions. Prior child 1107-112958-chatgpt-chatgpt-normal-3-cf8c-d369 DONE at 3d909ef but REJECTED IN REVIEW, not merged: missing optional tree-sitter, fallback misses common Go/Rust/Java/C# defs/control false positives, default cache off, oversized first file returns empty map, JS explicit extension centrality. Chain: original 1107-110347-chatgpt-normal-a3a3 failed page_unresponsive -> Muse 1107-112449-muse-normal-13b3 failed tool_parse_error -> child above — lead follows followup ID. Prior: BLOCKED, terminal done, no changes/tests — job 1107-102446-chatgpt-normal-843c, chatgpt-normal, worktree wt-20261107-102334-586a3c, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C-2-586a3c — review pending.
-- QA-BASELINE — CANCELLED after same workspace denial — job 1107-102449-glm-normal-13de, glm-normal, worktree wt-20261107-102341-5850ea, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-QA-BASELINE-5850ea — no changes/tests.
-- S1-APPROVAL-SURVEY — ACTIVE GLM independent approval survey, job 1107-110608-glm-normal-a277, glm-normal, existing worktree wt-20261107-102348-d27625, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-S1-APPROVAL-SURVEY-d27625 — report written, checks/commit pending. Prior Qwen chain verified cancelled: original job 1107-102451-qwen-normal-b14c, transferred to 1107-102753-qwen-qwen-2-6057-1fe8 — no changes/tests.
-- C-3 — pending; not dispatched. C-3 owns provider registration/wiring and must pass the actual web job ID into terminal.run args.job (C-1 helper presently defaults without job context) so ROOT/logs/terminal// is real per-job, and must test this.
-- S1-1 — pending; not dispatched.
-- S1-2 — pending; not dispatched.
-- S1-3 — pending; not dispatched.
-- S1-4 — pending; not dispatched.
-- S1-5 — pending; not dispatched.
-- S1-8 — pending; not dispatched.
-- S1-9 — pending; not dispatched.
-- S1-6 — pending; not dispatched.
-- S1-7 — pending; not dispatched (independent review).
-- Stage 2 — gated; not dispatched, pending Stage 1 live acceptance.
+- S1-0 - MERGED, original retry 1107-110349-muse-normal-9f92 -> automatic child 1107-111037-chatgpt-chatgpt-normal-3-cf8c-d1ad completed 907c438; doc-review fix 1107-112544-chatgpt-chatgpt-normal-3-cf8c-4e8b completed 3d90ff5; reviewed corrected C-2 mislabel/protocol/inheritance; lead desktop exit 0 129.361s, Python first run failed existing test_codex_images:test_images_run_in_parallel_across_accounts, then targeted 6 passed and entire 488 passed (skip 1, 121.253s), no source changes; merge via worktree_merge confirm:true, merge commit 717fa3acfd653f9d0945f863c61e2ea81ab341be. Worktree wt-20261107-102311-c9b082. Prior: FAILED missing_output, workspace denial - job 1107-102441-muse-normal-72a7.
+- C-1 - ACTIVE GLM fix, job 1107-114230-glm-normal-356c, glm-normal; prior followup 1107-112349-deepseek-normal-b5fb CANCELLED verified after 1061s/no edits; clean worktree a24e4a5, same worktree wt-20261107-102326-3279ab - full raw-log/tail cap fix pending, not merged. Initial retry 1107-110345-deepseek-normal-71df done a24e4a5 (10 new tests, 498 suite pass authored); lead found raw output capped before full-log save. Prior: BLOCKED, terminal done, no changes/tests - job 1107-102444-deepseek-normal-518c.
+- C-2 - ACTIVE followup, job 1107-113802-chatgpt-chatgpt-normal-3-cf8c-248d, same C-2 worktree wt-20261107-102334-586a3c - initial 6 focused tests pass, full suites 60s timeout unverified; followup instructed explicit timeout_seconds 600 and regressions. Prior child 1107-112958-chatgpt-chatgpt-normal-3-cf8c-d369 DONE at 3d909ef but REJECTED IN REVIEW, not merged: missing optional tree-sitter, fallback misses common Go/Rust/Java/C# defs/control false positives, default cache off, oversized first file returns empty map, JS explicit extension centrality. Chain: original 1107-110347-chatgpt-normal-a3a3 failed page_unresponsive -> Muse 1107-112449-muse-normal-13b3 failed tool_parse_error -> child above - lead follows followup ID. Prior: BLOCKED, terminal done, no changes/tests - job 1107-102446-chatgpt-normal-843c, chatgpt-normal, worktree wt-20261107-102334-586a3c, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C-2-586a3c - review pending.
+- QA-BASELINE - CANCELLED after same workspace denial - job 1107-102449-glm-normal-13de, glm-normal, worktree wt-20261107-102341-5850ea, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-QA-BASELINE-5850ea - no changes/tests.
+- S1-APPROVAL-SURVEY - DONE GLM independent approval survey, job 1107-110608-glm-normal-a277, glm-normal, wt-20261107-102348-d27625, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-S1-APPROVAL-SURVEY-d27625 - report 6025c01, not yet lead-reviewed/tested/merged. Prior Qwen chain verified cancelled: original job 1107-102451-qwen-normal-b14c, transferred to 1107-102753-qwen-qwen-2-6057-1fe8 - no changes/tests.
+- C-3 - pending; not dispatched (waits C1/C2). C-3 owns provider registration/wiring and must pass the actual web job ID into terminal.run args.job (C-1 helper presently defaults without job context) so ROOT/logs/terminal// is real per-job, and must test this.
+- S1-1 - ACTIVE, job 1107-115040-chatgpt-chatgpt-normal-3-cf8c-3084, chatgpt-normal-3, queue:false separate lane, wt-20261107-114601-eb902d, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-S1-1-eb902d, ONLY bridge/desktop_api.py + tests/test_lead_tool.py; dep S1-0 met, advanced alongside C1/C2.
+- S1-2 - pending; not dispatched.
+- S1-3 - pending; not dispatched.
+- S1-4 - pending; not dispatched.
+- S1-5 - pending; not dispatched.
+- S1-8 - pending; not dispatched.
+- S1-9 - pending; not dispatched.
+- S1-6 - pending; not dispatched.
+- S1-7 - pending; not dispatched (independent review).
+- C2-SAFETY-TESTS - WAITING_PARENT, job 1107-115249-deepseek-deepseek-4-e58f-2c4f, deepseek-deepseek-4-e58f, wt-20261107-115042-3aa1c0, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C2-SAFETY-TESTS-3aa1c0, tests/test_code_intel_safety.py; supplemental only, do not merge before completed parent/rebase/checks.
+- C2-LANGUAGE-TESTS - WAITING_PARENT, job 1107-115251-glm-glm-z-ai-3-7f98-553e, glm-glm-z-ai-3-7f98, wt-20261107-115052-1508f2, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C2-LANGUAGE-TESTS-1508f2, tests/test_code_intel_languages.py; supplemental only, do not merge before completed parent/rebase/checks.
+- S11-POLICY-TESTS - WAITING_PARENT, job 1107-115253-glm-glm-z-ai-2-8e09-e169, glm-glm-z-ai-2-8e09, wt-20261107-115104-0e9187, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-S11-POLICY-TESTS-0e9187, tests/test_lead_tool_adversarial.py; supplemental only, do not merge before completed parent/rebase/checks.
+- C3-PATH-PREFLIGHT - preflight only, job 1107-115256-deepseek-deepseek-2-c657-6396, deepseek-deepseek-2-c657, wt-20261107-115116-cadc25, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C3-PATH-PREFLIGHT-cadc25; read-only final report, no file edits/merges.
+- C3-LOG-PREFLIGHT - preflight only, job 1107-115258-deepseek-deepseek-3-960a-8b0a, deepseek-deepseek-3-960a, wt-20261107-115124-7cd04f, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C3-LOG-PREFLIGHT-7cd04f; read-only final report, no file edits/merges.
+- C3-BOOTSTRAP-PREFLIGHT - preflight only, job 1107-115301-qwen-qwen-2-6057-270c, qwen-qwen-2-6057, wt-20261107-115137-faf6ef, D:/AI-Orchestrator/worktrees/AI-Orchestrator-lead-C3-BOOTSTRAP-PREFLIGHT-faf6ef; read-only final report, no file edits/merges.
+- Stage 2 - gated; not dispatched, pending Stage 1 live acceptance.
 
 ## Blocker and diagnosis
 
-- Blocker: bridge/workspace_tools.py _sensitive_roots protects ROOT/worktrees and _scoped_workspace rejects MCP-created worktrees — S1-0/QA-BASELINE failed on this denial; C-1/C-2 finished terminally but BLOCKED with no changes/tests.
+- Blocker: bridge/workspace_tools.py _sensitive_roots protects ROOT/worktrees and _scoped_workspace rejects MCP-created worktrees - S1-0/QA-BASELINE failed on this denial; C-1/C-2 finished terminally but BLOCKED with no changes/tests.
 - USER DECISION: do NOT create external bootstrap checkout D:/AI-Orchestrator-lead-bootstrap. Report blockers to TEAMYRA maintenance; user will have TEAMYRA updated. No bootstrap worktree.
 - Baseline VERIFIED by lead test_run on integration (baseline only, not new package acceptance): desktop:check exit 0 in 130.844s; python -m unittest discover -s tests exit 0 in 114.285s, 488 tests, skip 1; total 245.13s.
 - Grok diagnosis 1107-103643-grok-normal-34ff done: test_policy.run_steps no-shell bare npm Windows resolution; safe exact Node/npm workaround works, product fix still open.
 - DeepSeek diagnosis 1107-103044-deepseek-normal-2379 CANCELLED after repeated recovery / no final.
 - GLM normal baseline 1107-103716-glm-normal-6f78 CANCELLED because write:false intentionally disables terminal (lead task-setting mistake); baseline then verified by lead (see above).
 - Qwen transferred child 1107-102753-qwen-qwen-2-6057-1fe8 returned to waiting after root cancellation; direct child cancellation reissued. Do not claim it stayed cancelled without checking; no retries from this lead.
-- Unrelated 1107-103603-qwen-normal-bf6a qwen-hidden-test belongs to another task — DO NOT touch it.
+- Unrelated 1107-103603-qwen-normal-bf6a qwen-hidden-test belongs to another task - DO NOT touch it.
 
 ## Maintenance reports
 
@@ -50,10 +56,10 @@ Current update: previous writer 1107-113527-muse-normal-cc8d DONE. S1-0 MERGED (
 
 ## Decisions and next actions
 
-- LATEST routing: ChatGPT Normal (including already transferred Normal3), Muse, DeepSeek, GLM only. Grok quota exhausted â€” do not use Grok, hand its work to other agents; Qwen paused; no Codex/Claude/Antigravity. New jobs use transfer:false where necessary to avoid excluded providers; monitor older automatic chains.
+- LATEST routing: expanded pool DeepSeek 1-4, ChatGPT Normal 1/3, GLM 1-3, Qwen 1/2, Muse; Normal3 fastest complex/followup, Muse bounded docs, GLM/other accounts scoped tests/reviews. Grok EXCLUDED (quota) - do not use Grok, hand its work to other agents; Qwen2 ready:true ONLY bounded read-only bootstrap preflight; no Codex/Claude/Antigravity. New jobs use transfer:false where necessary to avoid excluded providers; monitor older automatic chains.
 - Wave 1 retries are now ACTIVE in the same managed worktrees (verified clean before retry); no duplicate running jobs, S1-0 alone merged. Keep waves/dependencies/checkpoints; no premature Checkpoint A/restart/push/main checkout edits.
-- Waves: Wave 1 S1-0, C-1, C-2; Wave 2 C-3 with S1-1, then Checkpoint A (ask user to merge feat/lead-chat and restart TEAMYRA); Wave 3 S1-2…S1-9, then S1-6 and S1-7, then Stage 2.
-- Maximize useful concurrency with separate worktrees and disjoint write scopes; honor dependencies in 02-IMPLEMENTATION-PLAN.md. Lead delegates all implementation file changes; do not duplicate already dispatched jobs.
+- Waves: Wave 1 S1-0, C-1, C-2; S1-1 advanced alongside C1/C2 (dep met); Wave 2 C-3 (waits C1/C2), then Checkpoint A (ask user to merge feat/lead-chat and restart TEAMYRA); Wave 3 S1-2 to S1-9, then S1-6 and S1-7, then Stage 2.
+- Maximize useful concurrency with separate worktrees and disjoint write scopes; honor dependencies in 02-IMPLEMENTATION-PLAN.md. Lead delegates all implementation file changes; do not duplicate already dispatched jobs. Test-only workers own DISTINCT new files and may expose known gaps on old snapshot; WAITING_PARENT, lead rebase via guarded managed tool after parent merged then test_run and merge ONLY if pass. Read-only preflights: no file edits/merges.
 - Every implementation must pass npm run desktop:check and python -m unittest discover -s tests in its worktree. Inspect job_result, worktree diff, and reviews before merging into feat/lead-chat.
 - Checkpoint A follows merged and verified C-1 through C-3: explicitly request the user's merge/restart; never restart TEAMYRA yourself. Stage 2 remains gated until Stage 1 live acceptance.
 - Never push, restart, or modify the D:/AI-Orchestrator main checkout/branch or other worktrees. Progress work is limited to this file; preserve the base and original job IDs.
