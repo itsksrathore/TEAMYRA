@@ -1020,9 +1020,17 @@ def worker_status():
             "effort": settings.get("effort"),
         })
 
+    # One cached scan of all jobs for every worker. Reading every job's meta
+    # twice per worker (running jobs, cooldown) took over 300 s with 1,200 jobs
+    # and 25 workers, and worker_status timed out (ISS-20261107-151606).
+    metas = scheduler.load_jobs(jobs_root())
+    unfinished = {}
+    for m in metas:
+        if not m.get("_done"):
+            unfinished.setdefault(m.get("worker"), []).append(m)
     for item in out:
         w = item["worker"]
-        mine = running_jobs(w)
+        mine = unfinished.get(w, [])
         active = [m for m in mine if m.get("state") in scheduler.ACTIVE_STATES]
         queued = sorted((m for m in mine if m.get("state") == scheduler.QUEUED), key=scheduler.queue_key)
         item["running_jobs"] = [m["id"] for m in mine if m.get("state") != scheduler.QUEUED]
@@ -1033,7 +1041,7 @@ def worker_status():
         item["ready_source"] = cached.get("source")
         if cached.get("probe_error"):
             item["probe_error"] = clip(cached["probe_error"], 200)
-        item["cooldown_seconds"] = cooldown_left(w)
+        item["cooldown_seconds"] = scheduler.cooldown_left(jobs_root(), w, metas)
         if item["cooldown_seconds"]:
             item["ready"] = False
     return out
