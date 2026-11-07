@@ -533,8 +533,10 @@ def rotate_web_queues(root, metas, registry, now=None):
         if info.get("provider") in DESKTOP_PROVIDERS and info.get("execution") == "desktop-web":
             by_provider.setdefault(info["provider"], []).append(dict(info, id=worker))
     planned = {}  # worker -> jobs given to it in this pass
+    # pin=true (and account_fixed) keep a job on the account it names
+    # (ISS-20261107-162044: a pinned ChatGPT Normal 3 job was rotated away).
     queued = sorted((m for m in metas if is_queued(m) and m.get("provider") in by_provider
-                     and not m.get("account_fixed")), key=queue_key)
+                     and not m.get("account_fixed") and not m.get("pin")), key=queue_key)
     for meta in queued:
         accounts = [a for a in by_provider[meta["provider"]] if _account_usable(root, a, metas)]
         allowed = set(meta.get("worker_order") or [])

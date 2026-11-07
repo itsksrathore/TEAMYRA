@@ -121,6 +121,17 @@ class AccountRotationTests(unittest.TestCase):
         scheduler.dispatch_once(self.root, spawn=Spawned())
         self.assertTrue(all(m["worker"] == "chatgpt-normal" for m in scheduler.load_jobs(self.root)))
 
+    def test_pinned_jobs_are_not_rotated(self):
+        # ISS-20261107-162044: pin=true on ChatGPT Normal 3 was rotated away.
+        self.status()
+        write_job(self.root, "old", worker="chatgpt-normal", provider="chatgpt-web", state="done", done=True,
+                  dispatched_at=time.time() - 120)
+        self.queue("pinned", 2000, pin=True)
+        self.queue("free", 2001)
+        scheduler.dispatch_once(self.root, spawn=Spawned())
+        self.assertEqual(read_meta(self.root, "pinned")["worker"], "chatgpt-normal")
+        self.assertEqual(read_meta(self.root, "free")["worker"], "chatgpt-acc2", "unpinned jobs still rotate")
+
 
 class CancelWaitingDesktopJobTests(unittest.TestCase):
     """ISS-20261107-104454-6d6338: a cancelled web job that waited for its
