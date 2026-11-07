@@ -554,12 +554,24 @@ def discard(storage_root, worktree_id, force=False):
 
 
 def list_managed(storage_root):
+    """Every managed worktree's status. Each one costs ~7 git calls; with ~40
+    worktrees in a row the MCP call ran past its 180 s limit on a busy PC
+    (ISS-20261107-194158), so they are read 8 at a time."""
+    from concurrent.futures import ThreadPoolExecutor
+
     directory = _registry_dir(storage_root)
-    rows = []
+    ids = []
     for path in sorted(directory.glob("wt-*.json")):
         try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-            rows.append(status(storage_root, meta["id"]))
+            ids.append(json.loads(path.read_text(encoding="utf-8"))["id"])
         except Exception:
             continue
-    return rows
+
+    def one(worktree_id):
+        try:
+            return status(storage_root, worktree_id)
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return [row for row in pool.map(one, ids) if row is not None]

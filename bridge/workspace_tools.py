@@ -169,6 +169,31 @@ PATCH_FIND_KEYS = ("find", "old_string", "old_text", "old", "search")
 PATCH_REPLACE_KEYS = ("replace", "new_string", "new_text", "new")
 
 
+STALE_INDEX_LOCK_SECONDS = 120
+
+
+def _clear_stale_index_lock(run_git, base):
+    """An empty index.lock older than 2 minutes is left over from a git that
+    was killed with its worker (a page_unresponsive stop); it blocked every
+    later commit in that worktree (ISS-20261107-193916). A live git holds the
+    lock for moments, not minutes, and writes into it."""
+    found = run_git([*base, "rev-parse", "--absolute-git-dir"])
+    if found.returncode != 0:
+        return False
+    lock = Path(found.stdout.strip()) / "index.lock"
+    try:
+        info = lock.stat()
+    except OSError:
+        return False
+    if info.st_size or time.time() - info.st_mtime < STALE_INDEX_LOCK_SECONDS:
+        return False
+    try:
+        lock.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def _first_of(item, keys):
     for key in keys:
         if item.get(key) is not None:
@@ -1664,6 +1689,7 @@ class WorkspaceToolService:
             if paths:
                 argv.extend(["--", *paths])
         elif tool == "git.add":
+            _clear_stale_index_lock(run_git, base)
             blocked_paths = []
             paths = args.get("paths")
             if not isinstance(paths, list) or not paths or len(paths) > 200:
@@ -1686,6 +1712,7 @@ class WorkspaceToolService:
                     )
             argv = [*base, "add", "--", *rel]
         elif tool == "git.commit":
+            _clear_stale_index_lock(run_git, base)
             blocked_paths = []
             message = str(args.get("message") or "").strip()
             if not message or len(message) > 500:

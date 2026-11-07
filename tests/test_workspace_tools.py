@@ -66,6 +66,35 @@ class WorkspaceToolTests(unittest.TestCase):
         git("config", "user.name", "Test")
         return git
 
+    def test_stale_empty_index_lock_is_cleared_before_a_commit(self):
+        # ISS-20261107-193916: a killed worker's git left index.lock behind.
+        import os as _os
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            git = self.init_repo(workspace)
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+            (workspace / "a.txt").write_text("a\n", encoding="utf-8")
+            lock = workspace / ".git" / "index.lock"
+            lock.write_bytes(b"")
+            old = __import__("time").time() - 600
+            _os.utime(lock, (old, old))
+            service.execute("git.add", {"paths": ["a.txt"]}, token=token)
+            commit = service.execute("git.commit", {"message": "add a"}, token=token)
+            self.assertEqual(commit["exit_code"], 0)
+            self.assertFalse(lock.exists())
+            # A fresh lock (a git still running) is left alone.
+            (workspace / "a.txt").write_text("b\n", encoding="utf-8")
+            lock.write_bytes(b"")
+            try:
+                result = service.execute("git.add", {"paths": ["a.txt"]}, token=token)
+                self.assertNotEqual(result.get("exit_code"), 0, "git refuses while the lock is held")
+            except Exception:
+                pass
+            self.assertTrue(lock.exists())
+
     def test_patch_accepts_old_string_new_string(self):
         # DeepSeek, 2026-11-07: the edit came as top-level old_string/new_string.
         with tempfile.TemporaryDirectory() as td:
