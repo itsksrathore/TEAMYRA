@@ -24,6 +24,18 @@ const LIMIT_PATTERNS = [
 ];
 const MAX_NOTICE_CHARS = 400;
 
+// The site refuses this PC for a while, whatever the account: ChatGPT shows
+// "Our systems have detected unusual activity coming from your system.
+// Please try again later." in the chat (2026-11-07). Another account on the
+// same PC is likely refused too, so the job goes to another site.
+const BLOCK_PATTERNS = [
+  /\bdetected unusual activity\b/i,
+  /\bunusual activity (?:coming )?from your (?:system|device|network|computer|account)\b/i,
+  /\bsuspicious activity (?:detected|from your)\b/i,
+  /\byour (?:access|ip|network|account) (?:has been|is) (?:temporarily )?(?:blocked|restricted|limited)\b/i,
+  /(?:检测到|发现)(?:异常|可疑)(?:活动|行为|流量|请求)/
+];
+
 // Wording that only a site's own limit message uses. A reply of the model
 // itself may well say "rate limit" or "too many requests" about the project.
 const REPLY_PATTERNS = [0, 2, 3, 5, 8, 9, 11].map(index => LIMIT_PATTERNS[index]);
@@ -34,15 +46,20 @@ function matchShort(text, patterns) {
   return patterns.some(pattern => pattern.test(value)) ? value : '';
 }
 
-// The limit wording in a notice (short text only), or ''.
+// The limit or block wording in a notice (short text only), or ''.
 function limitNotice(text) {
-  return matchShort(text, LIMIT_PATTERNS);
+  return matchShort(text, [...LIMIT_PATTERNS, ...BLOCK_PATTERNS]);
+}
+
+// True when a notice says the site refuses this PC (not one account's quota).
+function isBlockNotice(text) {
+  return BLOCK_PATTERNS.some(pattern => pattern.test(String(text || '')));
 }
 
 // A whole reply that is the site's limit message instead of an answer, or ''.
 function replyLimitNotice(text) {
   if (/TEAMYRA_TOOL_REQUEST/.test(String(text || ''))) return '';
-  return matchShort(text, REPLY_PATTERNS);
+  return matchShort(text, [...REPLY_PATTERNS, ...BLOCK_PATTERNS]);
 }
 
 // Page script: the first short, visible limit notice, or ''. It looks in
@@ -52,8 +69,8 @@ function replyLimitNotice(text) {
 // those elements. Text the model wrote (Markdown, code) and the user's own
 // messages are skipped.
 function limitScript() {
-  const sources = LIMIT_PATTERNS.map(pattern => [pattern.source, pattern.flags]);
-  const strictSources = REPLY_PATTERNS.map(pattern => [pattern.source, pattern.flags]);
+  const sources = [...LIMIT_PATTERNS, ...BLOCK_PATTERNS].map(pattern => [pattern.source, pattern.flags]);
+  const strictSources = [...REPLY_PATTERNS, ...BLOCK_PATTERNS].map(pattern => [pattern.source, pattern.flags]);
   return `(() => {
     const patterns = ${JSON.stringify(sources)}.map(([source, flags]) => new RegExp(source, flags));
     const strict = ${JSON.stringify(strictSources)}.map(([source, flags]) => new RegExp(source, flags));
@@ -78,10 +95,11 @@ function limitScript() {
     const skip = 'pre, code, .markdown, [class*=markdown], .prose, [class*=prose], [data-message-author-role="user"], ' +
       '[data-testid="user-message"], [class*=user-message], [class*=message-user], [contenteditable], textarea, input';
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const hint = /limit|quota|unusual|suspicious|blocked|restricted|上限|限制|限额|用完|用尽|耗尽|异常|可疑/i;
     let visited = 0;
     for (let node = walker.nextNode(); node && visited < 30000; node = walker.nextNode(), visited += 1) {
       const raw = node.nodeValue || '';
-      if (raw.length < 6 || !/limit|quota|上限|限制|限额|用完|用尽|耗尽/i.test(raw)) continue;
+      if (raw.length < 6 || !hint.test(raw)) continue;
       let el = node.parentElement;
       if (!el || el.closest(skip)) continue;
       // Grow to the notice block (title plus its one-line explanation).
@@ -96,4 +114,4 @@ function limitScript() {
   })()`;
 }
 
-module.exports = { limitNotice, replyLimitNotice, limitScript, LIMIT_PATTERNS };
+module.exports = { limitNotice, replyLimitNotice, isBlockNotice, limitScript, LIMIT_PATTERNS, BLOCK_PATTERNS };

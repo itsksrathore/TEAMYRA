@@ -294,7 +294,7 @@ def cooldown_left(root, worker, metas=None):
         cleared = 0
     metas = load_jobs(root) if metas is None else metas
     for meta in sorted(metas, key=lambda m: float(m.get("created") or 0), reverse=True):
-        if meta.get("worker") == worker and meta.get("reason") == "usage_or_rate_limit":
+        if meta.get("worker") == worker and meta.get("reason") in ("usage_or_rate_limit", "site_blocked"):
             ended = float(meta.get("ended") or 0)
             if ended > float(cleared or 0):
                 return max(0, int(ended + COOLDOWN_SECONDS - time.time()))

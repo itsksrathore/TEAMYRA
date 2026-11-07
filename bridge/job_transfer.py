@@ -44,6 +44,7 @@ BRIDGE = Path(__file__).resolve().parent
 
 TRANSFER_REASONS = {
     "usage_or_rate_limit",   # the site's usage limit
+    "site_blocked",          # the site refuses this PC for now (ChatGPT "unusual activity")
     "needs_user_timeout",    # a human check / sign-in not done in time
     "account_unavailable",   # the account never became usable for a waiting job
     "page_unresponsive",     # the page stayed broken after reloads
@@ -55,6 +56,7 @@ TRANSFER_REASONS = {
 ACCOUNT_REASONS = {"usage_or_rate_limit", "needs_user_timeout", "account_unavailable"}
 REASON_TEXT = {
     "usage_or_rate_limit": "its site reported a usage limit",
+    "site_blocked": "its site refused this PC for now (\"unusual activity\")",
     "needs_user_timeout": "it was paused on a human check or sign-in that nobody completed",
     "account_unavailable": "its account was not usable (human check, sign-in or a broken page)",
     "page_unresponsive": "its chat page stopped responding",
@@ -149,11 +151,23 @@ def _chain(root, meta):
     return chain
 
 
+SITE_BLOCK_SECONDS = 1800
+
+
+def blocked_sites(metas, now=None):
+    """Sites that refused this PC in the last 30 minutes (a job ended site_blocked).
+    Every account of such a site is skipped: the block is for the PC, not one account."""
+    now = time.time() if now is None else now
+    return {m.get("provider") for m in metas
+            if m.get("reason") == "site_blocked" and now - float(m.get("ended") or 0) < SITE_BLOCK_SECONDS}
+
+
 def candidates(root, meta, config=None, metas=None, registry=None):
     """Ready workers for a hand-over, best first: [(worker_id, info, free)]."""
     cfg = settings(config)
     registry = registry if registry is not None else build_worker_registry(root)
     metas = scheduler.load_jobs(root) if metas is None else metas
+    blocked = blocked_sites(metas)
     tried = set(meta.get("previous_workers") or [])
     for item in _chain(root, meta):
         if item.get("worker"):
@@ -170,6 +184,8 @@ def candidates(root, meta, config=None, metas=None, registry=None):
     for worker, info in registry.items():
         provider = info.get("provider")
         if provider not in WEB_SITES or worker in tried or info.get("enabled", True) is False:
+            continue
+        if provider in blocked:
             continue
         if allowed and worker not in allowed:
             continue
@@ -505,6 +521,8 @@ def pause_over(meta, config=None, now=None):
 
 def _unusable(root, worker, info, metas):
     """Why a web account cannot take work now ('' when it can)."""
+    if (info or {}).get("provider") in blocked_sites(metas):
+        return "is on a site that refuses this PC for now"
     if scheduler.cooldown_left(root, worker, metas):
         return "is cooling down after a usage limit"
     if scheduler.web_account_blocked(scheduler._web_account_status(root, info)):

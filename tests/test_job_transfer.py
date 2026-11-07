@@ -142,6 +142,23 @@ class TransferTests(unittest.TestCase):
         job_transfer.sweep(self.root, start, CONFIG)
         self.assertEqual(start.calls[-1]["worker"], "qwen-acc2")
 
+    def test_site_block_moves_to_another_site_and_skips_the_whole_site(self):
+        # ChatGPT "unusual activity coming from your system": every ChatGPT account is skipped.
+        add_profile(self.root, "chatgpt-web", "acc2", "ChatGPT Normal 2")
+        write_status(self.root, "chatgpt", {"web": ready(), "acc2": ready()})
+        write_status(self.root, "deepseek", {"web": ready()})
+        write_job(self.root, "j1", reason="site_blocked")
+        start = FakeStart(self.root)
+        job_transfer.sweep(self.root, start, CONFIG)
+        self.assertEqual(start.calls[0]["worker"], "deepseek-normal")
+        self.assertIn("refused this PC", start.calls[0]["task"])
+        # A queued ChatGPT job leaves the blocked site too, even on the other account.
+        scheduler._META_CACHE.clear()
+        old = time.time() - 6 * 60
+        write_job(self.root, "q1", worker="chatgpt-acc2", state="queued", done=False, queued_at=old)
+        moved = job_transfer.move_unstarted(self.root, CONFIG)
+        self.assertEqual([(m["job_id"], m["to"]) for m in moved], [("q1", "deepseek-normal")])
+
     def test_a_free_tab_beats_a_busy_account_of_the_same_site(self):
         add_profile(self.root, "chatgpt-web", "acc2", "ChatGPT Normal 2")
         write_status(self.root, "chatgpt", {"web": ready(), "acc2": ready(lanes=1)})

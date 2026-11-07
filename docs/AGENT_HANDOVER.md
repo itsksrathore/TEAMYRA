@@ -9,6 +9,7 @@ Code: `bridge/job_transfer.py` (core), `apps/desktop/src/limit-detect.js` and `c
 | What happened | How TEAMYRA notices | Job ends with reason |
 |---|---|---|
 | The site hit its usage limit | A short limit notice on the page while a reply is at least 30 s overdue, a reply that is only the site's limit message, or a Send button blocked by one | `usage_or_rate_limit` (the account also cools down for 30 min) |
+| The site refuses this PC for now (ChatGPT: "Our systems have detected unusual activity coming from your system") | The same notice in the chat while a reply is overdue | `site_blocked`: the job goes to **another site**, and every account of the blocked site is skipped for 30 min, because the block is for the PC, not one account. Queued jobs leave the site too. |
 | A captcha, human check or sign-in nobody completed | The job has been paused for it for 5 min, another agent is ready, and the chat is not open in TEAMYRA (you may be solving it) | `needs_user_timeout` |
 | The page stayed broken after its reloads | Existing page recovery gives up | `page_unresponsive` |
 | The chat failed in another way, or the model kept sending broken tool requests | Existing errors | `worker_error`, `tool_parse_error`, … |

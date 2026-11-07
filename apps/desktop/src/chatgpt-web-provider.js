@@ -7,7 +7,7 @@ const { WorkspaceBridge } = require('./workspace-bridge');
 const { JobProcesses, jobProcesses } = require('./job-processes');
 const { JobInspector } = require('./job-inspect');
 const { callCore } = require('./core-api');
-const { limitNotice, replyLimitNotice, limitScript } = require('./limit-detect');
+const { limitNotice, replyLimitNotice, isBlockNotice, limitScript } = require('./limit-detect');
 // A reply overdue this long with nothing being written: look for a usage-limit
 // notice on the page (limit-detect.js).
 const LIMIT_CHECK_AFTER_MS = 30000;
@@ -1320,9 +1320,14 @@ class ChatGPTWebProvider {
     }
   }
 
-  // The job ends with reason usage_or_rate_limit: the core cools this account
-  // down and hands the job to another agent (bridge/job_transfer.py).
+  // The job ends with reason usage_or_rate_limit (this account's quota) or
+  // site_blocked (the site refuses this PC, e.g. ChatGPT's "unusual activity"):
+  // the core cools the account down and hands the job to another agent,
+  // another site first for site_blocked (bridge/job_transfer.py).
   limitError(job) {
+    if (isBlockNotice(job.limitNotice)) {
+      return teamyraError(`${this.site.name} refuses this PC for now: ${job.limitNotice}`, 'TEAMYRA_LIMIT', 'site_blocked');
+    }
     return teamyraError(`${this.site.name} usage limit: ${job.limitNotice}`, 'TEAMYRA_LIMIT', 'usage_or_rate_limit');
   }
 

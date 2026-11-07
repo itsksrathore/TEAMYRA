@@ -755,6 +755,26 @@ async function testLimitNoticeWhileTheReplyIsOverdue() {
   assert.match(meta.last_event, /usage limit: You've reached your message limit/);
 }
 
+// ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
+// from your system" in the chat, and no reply.
+async function testSiteBlockEndsTheJobAsSiteBlocked() {
+  class SilentChat extends FakeChat {
+    async sendTask(text) { this.sent.push(text); this.users.push(text); return { ok: true }; }
+  }
+  const provider = makeProvider(new SilentChat([]));
+  provider.limitCheckAfterMs = 0;
+  provider.view = { webContents: {
+    isDestroyed: () => false,
+    executeJavaScript: async () => 'Our systems have detected unusual activity coming from your system. Please try again later. Retry'
+  } };
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'site_blocked');
+  assert.match(meta.last_event, /refuses this PC for now/);
+}
+
 async function testUnsolvedCheckHandsTheJobOver() {
   const fake = new FakeChat([{ text: 'never shown', challenge: { snaps: 1, probes: 100000 } }]);
   const provider = makeProvider(fake);
@@ -876,6 +896,7 @@ async function main() {
     await testLimitReplyEndsTheJobAsUsageLimit();
     await testLimitNoticeWhileTheReplyIsOverdue();
     await testUnsolvedCheckHandsTheJobOver();
+    await testSiteBlockEndsTheJobAsSiteBlocked();
     await testLateLoadAndUnresponsiveMarkClear();
     await testDeliveredMessageWithoutReplyGetsANudge();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
