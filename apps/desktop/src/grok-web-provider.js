@@ -21,7 +21,7 @@ const GROK_RAW_REPLY_JS = idJson => `(async () => {
   try {
     const match = location.pathname.match(new RegExp('/c/([0-9a-f-]{36})', 'i'));
     if (!match) return '';
-    const response = await fetch('/rest/app-chat/conversations/' + match[1] + '/responses?includeThreads=true', { credentials: 'include' });
+    const response = await fetch('/rest/app-chat/conversations/' + match[1] + '/responses?includeThreads=true', { credentials: 'include', signal: AbortSignal.timeout(7000) });
     if (!response.ok) return '';
     const data = await response.json();
     const reply = (data.responses || []).find(item => item.responseId === ${idJson} && item.sender === 'assistant');
@@ -68,7 +68,7 @@ class GrokAutomationAdapter extends ChatSiteAdapter {
       try {
         const match = location.pathname.match(new RegExp('/c/([0-9a-f-]{36})', 'i'));
         if (!match) return '';
-        const response = await fetch('/rest/app-chat/conversations/' + match[1] + '/responses?includeThreads=true', { credentials: 'include' });
+        const response = await fetch('/rest/app-chat/conversations/' + match[1] + '/responses?includeThreads=true', { credentials: 'include', signal: AbortSignal.timeout(7000) });
         if (!response.ok) return '';
         const reply = ((await response.json()).responses || []).find(item => item.responseId === ${JSON.stringify(snap.messageId)});
         if (!reply || reply.partial || reply.message) return '';

@@ -238,7 +238,7 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
         let token = '';
         try { token = JSON.parse(stored).value || ''; } catch { token = stored || ''; }
         const response = await fetch('/api/v0/chat/history_messages?chat_session_id=' + match[1], {
-          credentials: 'include', headers: token ? { Authorization: 'Bearer ' + token } : {}
+          credentials: 'include', signal: AbortSignal.timeout(7000), headers: token ? { Authorization: 'Bearer ' + token } : {}
         });
         if (!response.ok) return null;
         const messages = ((((await response.json()) || {}).data || {}).biz_data || {}).chat_messages || [];
@@ -295,7 +295,7 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
         let token = '';
         try { token = JSON.parse(stored).value || ''; } catch { token = stored || ''; }
         const response = await fetch('/api/v0/chat/history_messages?chat_session_id=' + match[1], {
-          credentials: 'include', headers: token ? { Authorization: 'Bearer ' + token } : {}
+          credentials: 'include', signal: AbortSignal.timeout(7000), headers: token ? { Authorization: 'Bearer ' + token } : {}
         });
         if (!response.ok) return '';
         const data = await response.json();

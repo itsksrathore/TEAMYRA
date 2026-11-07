@@ -29,6 +29,20 @@ class WorkspaceToolTests(unittest.TestCase):
                     self.assertEqual(run.call_args.kwargs["timeout"], expected)
                     self.assertEqual(result["exit_code"], 0)
 
+    def test_terminal_timeout_aliases_workers_use(self):
+        # Workers wrote "timeout": 120000 (ms); it was ignored and suites stopped at 60 s.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(Path(td) / "runtime", workspace)
+            for extra, expected in (({"timeout": 120000}, 120), ({"timeout": 600}, 600), ({"timeout_ms": 300000}, 300),
+                                    ({"timeout_seconds": 900, "timeout": 5}, 900), ({"timeout": "x"}, 60)):
+                with self.subTest(args=extra):
+                    args = {"argv": [sys.executable, "-m", "unittest"], **extra}
+                    with patch("workspace_tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok", "")) as run:
+                        service.execute("terminal.run", args, token="x" * 64)
+                    self.assertEqual(run.call_args.kwargs["timeout"], expected)
+
     def make_service(self, root, workspace):
         service = WorkspaceToolService(root)
         service.state_root.mkdir(parents=True, exist_ok=True)

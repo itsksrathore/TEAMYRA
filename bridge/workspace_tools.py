@@ -186,6 +186,23 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     os.replace(temp, path)
 
 
+def _terminal_timeout_seconds(args):
+    """terminal.run's time limit in seconds (default 60). Workers also write
+    ``timeout_ms`` or ``timeout`` (often in milliseconds, e.g. 120000); those
+    were ignored and long test suites stopped at 60 s (2026-11-07)."""
+    try:
+        if args.get("timeout_seconds") is not None:
+            return float(args["timeout_seconds"])
+        if args.get("timeout_ms") is not None:
+            return float(args["timeout_ms"]) / 1000
+        if args.get("timeout") is not None:
+            value = float(args["timeout"])
+            return value / 1000 if value > 1800 else value
+    except (TypeError, ValueError):
+        pass
+    return 60
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -1233,7 +1250,7 @@ class WorkspaceToolService:
             raise PermissionError(
                 "arguments with shell metacharacters cannot be passed to batch-file launchers in the sandbox"
             )
-        timeout = max(1, min(int(args.get("timeout_seconds", 60)), 1800))
+        timeout = max(1, min(int(_terminal_timeout_seconds(args)), 1800))
         cp = subprocess.run(
             [executable, *run_argv[1:]],
             cwd=str(cwd),

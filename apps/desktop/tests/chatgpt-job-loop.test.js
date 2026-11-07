@@ -815,6 +815,37 @@ async function testLateLoadAndUnresponsiveMarkClear() {
   assert.equal(provider.heals, 0);
 }
 
+// ChatGPT and Grok, 2026-11-07: after a reload the message was in the chat
+// but no reply ever started; TEAMYRA waited and reloaded until the job failed.
+async function testDeliveredMessageWithoutReplyGetsANudge() {
+  class NoReplyAfterHang extends FakeChat {
+    async sendTask(text) {
+      if (!this.firstSent) {
+        // Delivered, then the page hangs, and the site never starts the reply.
+        this.firstSent = true;
+        this.sent.push(text);
+        this.users.push(text);
+        this.hangSnaps = 1;
+        return { ok: true };
+      }
+      return super.sendTask(text);
+    }
+  }
+  const fake = new NoReplyAfterHang(['Finished after the nudge.']);
+  const provider = makeProvider(fake);
+  provider.recoveredNoReplyMs = 30;
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'done');
+  assert.equal(provider.reconnects, 1, 'one reload, then a nudge instead of more reloads');
+  assert.equal(fake.sent.length, 2, 'the message is not sent twice');
+  assert.match(fake.sent[1], /^Please answer my previous message now/);
+  assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished after the nudge.');
+  const events = fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8');
+  assert.match(events, /did not start a reply after the reload; asking it to answer \(1\/2\)/);
+}
+
 async function main() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chatgpt-loop-'));
   try {
@@ -846,6 +877,7 @@ async function main() {
     await testLimitNoticeWhileTheReplyIsOverdue();
     await testUnsolvedCheckHandsTheJobOver();
     await testLateLoadAndUnresponsiveMarkClear();
+    await testDeliveredMessageWithoutReplyGetsANudge();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {

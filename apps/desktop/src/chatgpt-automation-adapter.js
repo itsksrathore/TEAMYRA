@@ -240,11 +240,11 @@ const RAW_REPLY_JS = [
   '    if (!match) return "";',
   '    const cache = window.__teamyraAuth || {};',
   '    if (!cache.token || Date.now() - cache.at > 300000) {',
-  '      const session = await fetch("/api/auth/session", { credentials: "include" }).then(r => r.ok ? r.json() : null);',
+  '      const session = await fetch("/api/auth/session", { credentials: "include", signal: AbortSignal.timeout(7000) }).then(r => r.ok ? r.json() : null);',
   '      if (!session || !session.accessToken) return "";',
   '      window.__teamyraAuth = { token: session.accessToken, at: Date.now() };',
   '    }',
-  '    const response = await fetch("/backend-api/conversation/" + match[1], { credentials: "include",',
+  '    const response = await fetch("/backend-api/conversation/" + match[1], { credentials: "include", signal: AbortSignal.timeout(7000),',
   '      headers: { Authorization: "Bearer " + window.__teamyraAuth.token } });',
   '    if (!response.ok) { if (response.status === 401) window.__teamyraAuth = null; return ""; }',
   '    const data = await response.json();',
@@ -318,7 +318,11 @@ class ChatGPTAutomationAdapter {
 
   async evaluate(source) {
     if (!this.webContents || this.webContents.isDestroyed()) throw new Error('ChatGPT view is unavailable');
-    return this.pageCall(() => this.webContents.executeJavaScript(source, true), 'executeJavaScript');
+    // The label names the site request a script makes, if any: a timed-out
+    // network request and a frozen page then tell apart in the timeout log.
+    const request = /fetch\(\s*['"]([^'"?]{1,60})/.exec(String(source || ''));
+    return this.pageCall(() => this.webContents.executeJavaScript(source, true),
+      request ? 'executeJavaScript (fetch ' + request[1] + ')' : 'executeJavaScript');
   }
 
   async probe() {

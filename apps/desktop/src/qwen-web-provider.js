@@ -63,7 +63,7 @@ const QWEN_RAW_REPLY_JS = idJson => `(async () => {
     const match = location.pathname.match(new RegExp('/c/([0-9a-f-]{36})', 'i'));
     if (!match) return '';
     const response = await fetch('/api/v2/chats/' + match[1], {
-      credentials: 'include', headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') }
+      credentials: 'include', signal: AbortSignal.timeout(7000), headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') }
     });
     if (!response.ok) return '';
     const data = await response.json();

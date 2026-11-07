@@ -86,12 +86,29 @@ async function resolvePython() {
 // Vids tabs) a single wait of 15 s sometimes failed a job before Generate.
 const BUSY_RETRIES = 3;
 
+// Requests that only read, or check, and are safe to send again when the
+// core process stopped before it answered. Anything that changes state (a
+// tool run, a job start, a merge) is never repeated.
+const SAFE_RETRY_ACTIONS = new Set([
+  'chatgpt.process.authorize', 'chatgpt.workspace.status', 'transfer.check', 'scheduler.dispatch',
+  'media.status', 'media.status-many', 'media.connection-status', 'media.claimed-keys',
+  'worktree.status', 'worktree.list', 'worktree.diff', 'worktree.conflict.detail',
+  'observability.usage', 'observability.timeline', 'observability.search',
+  'memory.search', 'memory.list', 'memory.get', 'memory.context'
+]);
+
 async function callCore(action, payload = {}, options = {}) {
+  let restarted = false;
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await callCoreOnce(action, payload, options);
     } catch (error) {
-      if (attempt >= BUSY_RETRIES || !/media state is busy/i.test(String(error?.message || error))) throw error;
+      const message = String(error?.message || error);
+      if (!restarted && /TEAMYRA Core stopped while answering/.test(message) && SAFE_RETRY_ACTIONS.has(action)) {
+        restarted = true;
+        continue;
+      }
+      if (attempt >= BUSY_RETRIES || !/media state is busy/i.test(message)) throw error;
       await new Promise(resolve => setTimeout(resolve, 500 + attempt * 1000 + Math.random() * 500));
     }
   }
@@ -138,9 +155,13 @@ class CoreServer {
     });
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', chunk => this.onData(child, chunk));
-    child.stderr.on('data', () => {});
+    // Keep the end of the core's error output: if it stops, the reason is in
+    // logs/core-exits.log (it used to be thrown away).
+    child.teamyraStderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { child.teamyraStderr = (child.teamyraStderr + chunk).slice(-4000); });
     child.stdin.on('error', () => {});
-    child.on('exit', () => this.onExit(child));
+    child.on('exit', (code, signal) => this.onExit(child, code, signal));
     this.child = child;
     this.calls = 0;
     return child;
@@ -195,7 +216,17 @@ class CoreServer {
     try { old.stdin.end(); } catch {}
   }
 
-  onExit(child) {
+  onExit(child, code = null, signal = null) {
+    const open = [...this.pending.values()].filter(entry => entry.child === child).length;
+    // A recycled process ends on purpose (code 0, nothing open); log the rest.
+    if (code !== 0 || open || this.child === child) {
+      try {
+        const file = path.join(ROOT, 'logs', 'core-exits.log');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.appendFileSync(file, `${new Date().toISOString()} pid=${child.pid} code=${code} signal=${signal} ` +
+          `open_requests=${open} calls=${this.calls}\n${String(child.teamyraStderr || '').trim().slice(-2000)}\n---\n`);
+      } catch {}
+    }
     for (const [id, entry] of this.pending) {
       if (entry.child !== child) continue;
       this.pending.delete(id);

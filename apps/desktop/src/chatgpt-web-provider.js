@@ -14,6 +14,12 @@ const LIMIT_CHECK_AFTER_MS = 30000;
 // While a job is paused for the user (a check, a sign-in), ask the core this
 // often whether another agent should take it over (bridge/job_transfer.py).
 const HANDOVER_CHECK_MS = 60000;
+// After a reload, a message the site already has may never get its reply:
+// ChatGPT and Grok do not start one again (2026-11-07). Wait this long for the
+// reply to start, then ask for it (at most MAX_REPLY_NUDGES times).
+const RECOVERED_NO_REPLY_MS = 90000;
+const MAX_REPLY_NUDGES = 2;
+const REPLY_NUDGE = 'Please answer my previous message now, following its instructions.';
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
 // One tool result per message. ChatGPT never answered messages of 120-132k
@@ -349,7 +355,7 @@ class ChatGPTWebProvider {
     const generation = this.pageGeneration;
     return boundedPageCall(operation, {
       timeoutMs: this.pageCallTimeoutMs, label,
-      onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+      onTimeout: error => { this.notePageTimeout(error); if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
   }
 
@@ -462,7 +468,7 @@ class ChatGPTWebProvider {
     this.automation = this.site.adapter(this.view.webContents, {
       isVisible: () => this.visible === true,
       timeoutMs: this.pageCallTimeoutMs,
-      onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+      onTimeout: error => { this.notePageTimeout(error); if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
@@ -506,6 +512,20 @@ class ChatGPTWebProvider {
 
   // A page load outside the site's allowed hosts was stopped. Recorded so a
   // stuck sign-in can be traced (logs/web-blocked-navigation.log).
+  // Which page call ran past the page-call limit (logs/web-page-timeouts.log).
+  // A slow page script and a frozen page both end up as "page unresponsive";
+  // this line says which call it was, for the next diagnosis.
+  notePageTimeout(error) {
+    try {
+      const file = path.join(this.runtimeRoot, 'logs', 'web-page-timeouts.log');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const job = this.activeJobDir ? path.basename(this.activeJobDir) : '-';
+      fs.appendFileSync(file, `${new Date().toISOString()} ${this.site.id} ${this.activeProfileId} lane${this.lane || 0} ` +
+        `${this.visible ? 'visible' : 'hidden'} job=${job} ${String(error?.message || error || '').slice(0, 200)}
+`);
+    } catch {}
+  }
+
   noteBlockedNavigation(url) {
     let host = '';
     try { host = new URL(url).hostname; } catch {}
@@ -688,7 +708,7 @@ class ChatGPTWebProvider {
     this.automation = this.site.adapter(view.webContents, {
       isVisible: () => this.visible === true,
       timeoutMs: this.pageCallTimeoutMs,
-      onTimeout: () => { if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+      onTimeout: error => { this.notePageTimeout(error); if (generation === this.pageGeneration) this.markPageUnresponsive(); }
     });
     this.loaded = false;
     this.lastProbe = null;
@@ -1501,6 +1521,9 @@ class ChatGPTWebProvider {
 
   async jobExchange(job, text, resumeSnap = null) {
     let snap = resumeSnap;
+    // The message is in the chat after a reload, and its reply has not started.
+    let deliveredAfterRecovery = false;
+    let nudges = 0;
     for (;;) {
       this.checkJobActive(job);
       try {
@@ -1521,7 +1544,9 @@ class ChatGPTWebProvider {
           // A usage-limit notice ends the wait too (handled in the catch below).
           shouldCancel: () => job.isCancelled() || Boolean(job.limitNotice),
           detectChallenge: true,
-          noProgressMs: this.noProgressMs ?? 300000,
+          noProgressMs: deliveredAfterRecovery
+            ? (this.recoveredNoReplyMs ?? RECOVERED_NO_REPLY_MS)
+            : (this.noProgressMs ?? 300000),
           shouldRecover: () => Boolean(this.pageUnresponsiveSince),
           pollMs: this.replyPollMs,
           progressIntervalMs: this.progressIntervalMs ?? PROGRESS_INTERVAL_MS,
@@ -1554,6 +1579,21 @@ class ChatGPTWebProvider {
         if (job.limitNotice && !job.isCancelled()) throw this.limitError(job);
         // A page that stopped answering may be showing a usage limit.
         if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE' && await this.checkLimit(job)) throw this.limitError(job);
+        // The page answers, the message is in the chat, and no reply started
+        // after a reload: another reload will not start it either. Ask for it.
+        if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE' && /made no progress/.test(String(error.message)) &&
+            deliveredAfterRecovery && !this.pageUnresponsiveSince &&
+            nudges < (this.maxReplyNudges ?? MAX_REPLY_NUDGES)) {
+          const probe = await this.automation.probe().catch(() => null);
+          if (probe?.promptFound && !probe.challenged && !probe.loginVisible) {
+            nudges += 1;
+            this.appendJobEvent(job.dir, 'info',
+              `${this.site.name} did not start a reply after the reload; asking it to answer (${nudges}/${this.maxReplyNudges ?? MAX_REPLY_NUDGES})`);
+            snap = await this.sendJobMessage(job, REPLY_NUDGE);
+            this.saveJobState(job, { phase: 'awaiting', message: REPLY_NUDGE, baseline: snapBaseline(snap) });
+            continue;
+          }
+        }
         if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') {
           try {
             const delivered = await this.recoverJobPage(job, () => snap ? this.lastMessageDelivered(job, text) : false);
@@ -1561,6 +1601,7 @@ class ChatGPTWebProvider {
               if (snap) this.appendJobEvent(job.dir, 'info', `the last message did not reach ${this.site.name} before the page hung; sending it again`);
               snap = null;
             }
+            deliveredAfterRecovery = Boolean(delivered);
             continue;
           } catch (recoveryError) {
             // The reload showed a verification or sign-in page: pause below.
@@ -1717,7 +1758,7 @@ class ChatGPTWebProvider {
         'TEAMYRA_TOOL_REQUEST {"tool":"filesystem.read","args":{"path":"relative/path"}}',
         'Send one tool request per reply and wait for its TEAMYRA_TOOL_RESULT. The JSON must be valid; write paths with forward slashes (D:/project/file.txt), never backslashes.',
         'Available tools: filesystem.list, filesystem.stat, filesystem.read, filesystem.search, filesystem.create, filesystem.write, filesystem.patch, filesystem.move, filesystem.rename, filesystem.delete, terminal.run, process.start, process.read, process.write, process.stop, process.list, page.check, screen.capture, git.status, git.diff, git.log, git.add, git.commit, git.restore.',
-        'terminal.run waits for its command to finish. For a program that keeps running (dev server, the app, a watcher, an interactive program) use process.start {"command":"<PowerShell command>","cwd":"...","wait_for":"<regex of a ready line>","wait_seconds":30}: it returns a session_id and the output so far, and the program keeps running. Then process.read {"session_id","wait_for","wait_seconds"} for new output, process.write {"session_id","input"} to type into it, process.stop {"session_id"}; process.list shows them. They stop when the job ends.',
+        'terminal.run waits for its command to finish, 60 s by default; for test suites and builds pass "timeout_seconds" (up to 1800), e.g. {"argv":["npm","run","check"],"timeout_seconds":600}. For a program that keeps running (dev server, the app, a watcher, an interactive program) use process.start {"command":"<PowerShell command>","cwd":"...","wait_for":"<regex of a ready line>","wait_seconds":30}: it returns a session_id and the output so far, and the program keeps running. Then process.read {"session_id","wait_for","wait_seconds"} for new output, process.write {"session_id","input"} to type into it, process.stop {"session_id"}; process.list shows them. They stop when the job ends.',
         'To see what you built: page.check {"url":"http://localhost:<port>/","wait_for":"<text or CSS selector>"} opens a local page and returns its text, controls, console errors, failed requests and a screenshot; screen.capture {"window":"<part of a window title>"} screenshots an open window. A screenshot is attached to the next message when it can be. Test changes this way (start the server, check the page, read the errors) instead of guessing.',
         'filesystem.read is paged: use offset and max_bytes (at most 30000) for large files, then next_offset when clipped. Keep command output short (filter it); a tool result is cut to about 40000 characters.',
         fullAccess

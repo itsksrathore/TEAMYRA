@@ -122,7 +122,7 @@ const GLM_SITE = {
     // The page drops backslashes and Markdown characters, and Z.ai keeps no
     // copy of the reply as written; JSON \\u escapes pass through unchanged.
     'This page changes some characters in your answer. Inside the JSON of a TEAMYRA_TOOL_REQUEST, write every backslash as \\u005c, ' +
-      'every double quote inside a string as \\u0022, and * _ ` $ inside strings as \\u002a \\u005f \\u0060 \\u0024. Line breaks stay \\n.'
+      'every double quote inside a string as \\u0022, < and > as \\u003c and \\u003e, and * _ ` $ inside strings as \\u002a \\u005f \\u0060 \\u0024. Line breaks stay \\n.'
   ]
 };
 
