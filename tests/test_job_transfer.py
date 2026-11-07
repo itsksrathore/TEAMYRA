@@ -296,6 +296,19 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(job_transfer.site_block_left(metas, "muse-web", now), 0)
         self.assertEqual(job_transfer.site_block_left(metas, "deepseek-web", now), 0)
 
+    def test_move_after_an_automatic_hand_over_starts_no_second_job(self):
+        # ISS-20261107-173858: job_move and the sweep both started a continuation.
+        write_status(self.root, "chatgpt", {"web": ready()})
+        write_status(self.root, "muse", {"web": ready()})
+        write_job(self.root, "j1", reason="page_unresponsive")
+        start = FakeStart(self.root)
+        job_transfer.sweep(self.root, start, CONFIG)
+        self.assertEqual(len(start.calls), 1)
+        with self.assertRaisesRegex(ValueError, "already continues"):
+            job_transfer.move_job(self.root, read_meta(self.root, "j1"), start, worker="muse-normal")
+        self.assertEqual(len(start.calls), 1, "no second continuation")
+        self.assertFalse((self.root / "jobs" / "j1" / job_transfer.CLAIM_FILE).exists(), "the claim is released")
+
     def test_pause_over(self):
         now = time.time()
         self.assertFalse(job_transfer.pause_over({"attention": {"since": now - 60}}, CONFIG, now))

@@ -541,6 +541,31 @@ def move_job(root, meta, start_job, worker=None, provider=None, config=None):
     job_move). ``worker`` names the account; ``provider`` (e.g. "deepseek-web")
     asks for the best ready account of that site; neither picks the best ready
     web-chat agent. The new job gets the same context pack as a hand-over."""
+    # The same claim as an automatic hand-over: job_move and the sweep raced
+    # and started two continuations in one worktree (ISS-20261107-173858).
+    job_dir = Path(root) / "jobs" / meta["id"]
+    claim = None
+    deadline = time.time() + 30
+    while claim is None:
+        claim = _claim(job_dir)
+        if claim is None:
+            if time.time() > deadline:
+                raise ValueError("an automatic hand-over of this job is in progress; check job_status")
+            time.sleep(0.5)
+    try:
+        current = scheduler._read_json(job_dir / "meta.json") or {}
+        if current.get("failover_job_id"):
+            raise ValueError(f"this job already continues as {current['failover_job_id']} "
+                             "(moved automatically); move that job instead")
+        return _move_claimed(root, dict(meta, **current), start_job, worker, provider, config)
+    finally:
+        try:
+            claim.unlink()
+        except OSError:
+            pass
+
+
+def _move_claimed(root, meta, start_job, worker=None, provider=None, config=None):
     registry = build_worker_registry(root)
     fresh = dict(meta, reason="moved_by_request")
     if worker:
