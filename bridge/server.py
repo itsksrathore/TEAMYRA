@@ -1536,7 +1536,7 @@ TOOLS = [
              "filesystem.list", "filesystem.stat", "filesystem.read", "filesystem.search", "filesystem.create",
              "filesystem.write", "filesystem.patch", "filesystem.move", "filesystem.rename",
              "filesystem.delete", "terminal.run", "git.status", "git.diff", "git.log",
-             "git.add", "git.commit", "git.restore"
+             "git.add", "git.commit", "git.restore", "code.map", "code.symbol"
          ]},
          "args": {"type": "object"},
          "agent": {"type": "string", "description": "Optional agent identity recorded in workspace-tool audit logs."},

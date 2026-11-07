@@ -193,3 +193,19 @@ async function main() {
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
+
+// 2026-11-07: DeepSeek's "Continue" button at its length limit was not
+// pressed; the user had to click it. The page reports where the button is,
+// and the adapter clicks there with a real mouse event.
+(async () => {
+  const { DeepSeekAutomationAdapter: Adapter } = require('../src/deepseek-automation-adapter');
+  const events = [];
+  const adapter = new Adapter({ isDestroyed: () => false, sendInputEvent: event => events.push(event) });
+  adapter.drawFrame = async () => {};
+  adapter.pageSnapshot = async () => ({ count: 3, text: 'part one', messageId: '7', generating: true, continued: true,
+    continueAt: { x: 410.4, y: 620.6 }, activity: 'x' });
+  const snap = await adapter.assistantSnapshot();
+  assert.equal(snap.generating, true, 'the reply goes on after Continue');
+  assert.deepEqual(events.map(e => [e.type, e.x, e.y]), [['mouseMove', 410, 621], ['mouseDown', 410, 621], ['mouseUp', 410, 621]]);
+  console.log('deepseek continue button test passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

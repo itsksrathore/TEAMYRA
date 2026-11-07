@@ -53,8 +53,14 @@ const PAGE_JS = `
     const icon = (send.querySelector('svg path') || { getAttribute: () => '' }).getAttribute('d') || '';
     return icon ? icon.startsWith('M2 4.88') : true;
   };
+  // "Continue" at DeepSeek's length limit. The label may carry an icon or a
+  // longer wording ("Continue generating", "继续生成"), so it is matched on
+  // the start of the text or aria-label (2026-11-07: it was not clicked).
   const dsContinueButton = () => [...document.querySelectorAll('.ds-button, button, [role=button]')]
-    .find(node => dsVisible(node) && /^(continue|continue generating|继续|继续生成)$/i.test((node.innerText || '').trim()));
+    .find(node => {
+      const label = ((node.innerText || '') + ' ' + (node.getAttribute('aria-label') || '')).trim();
+      return dsVisible(node) && label.length <= 40 && /^(continue|继续)/i.test(label);
+    });
 `;
 const LOGIN_DETECT_JS = `(() => {
   if (/\\/sign_in|\\/login/.test(location.pathname)) return true;
@@ -203,8 +209,22 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
   // ended, or the page has shown no progress for 30 s, its status is read
   // from DeepSeek's data; an INCOMPLETE reply becomes a busy reply, which the
   // job loop asks again.
+  // A real mouse click at (x, y) in the page; a scripted click as fallback.
+  async clickContinue(point) {
+    const contents = this.webContents;
+    try {
+      const at = { x: Math.round(point.x), y: Math.round(point.y) };
+      contents.sendInputEvent({ type: 'mouseMove', ...at });
+      contents.sendInputEvent({ type: 'mouseDown', ...at, button: 'left', clickCount: 1 });
+      contents.sendInputEvent({ type: 'mouseUp', ...at, button: 'left', clickCount: 1 });
+    } catch {
+      await this.evaluate('(() => { const b = window.__teamyraContinueButton; if (b) b.click(); return !!b; })()').catch(() => false);
+    }
+  }
+
   async assistantSnapshot() {
     const snap = await this.pageSnapshot();
+    if (snap?.continueAt) await this.clickContinue(snap.continueAt);
     if (!snap || !snap.messageId) return snap;
     const now = Date.now();
     if (snap.activity !== this.lastActivity) {
@@ -256,12 +276,16 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
       const key = last ? (last.getAttribute('data-virtual-list-item-key') || String(replies.length)) : '';
       let generating = dsGenerating();
       let continued = false;
+      let continueAt = null;
       if (!generating && last) {
         const button = dsContinueButton();
         window.__teamyraContinues = window.__teamyraContinues || {};
         if (button && (window.__teamyraContinues[key] || 0) < 30) {
           window.__teamyraContinues[key] = (window.__teamyraContinues[key] || 0) + 1;
-          button.click();
+          button.scrollIntoView({ block: 'center' });
+          const rect = button.getBoundingClientRect();
+          continueAt = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          window.__teamyraContinueButton = button;
           generating = true;
           continued = true;
         }
@@ -273,6 +297,7 @@ class DeepSeekAutomationAdapter extends ChatGPTAutomationAdapter {
         messageId: key,
         generating,
         continued,
+        continueAt,
         challenged: (${CHALLENGE_DETECT_JS} || Boolean(${SHARED_CHALLENGE_JS})),
         images: 0,
         // Thinking text counts as progress before the answer starts.
