@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('teamyra', {
   usage: (options) => ipcRenderer.invoke('teamyra:usage', options || {}),
   chatgptStatus: () => ipcRenderer.invoke('teamyra:chatgpt-status'),
   openChatgpt: (profileId = 'web') => ipcRenderer.invoke('teamyra:chatgpt-open', profileId),
+  openJobChat: (jobId) => ipcRenderer.invoke('teamyra:job-open-chat', String(jobId || '')),
   closeChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-close'),
   reloadChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-reload'),
   reconnectChatgpt: () => ipcRenderer.invoke('teamyra:chatgpt-reconnect'),

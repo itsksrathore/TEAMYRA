@@ -227,6 +227,18 @@ async function reloadRuleTests(root) {
   assert.equal(reloads, 1, 'one reload a minute');
   provider.reloadIntervalMs = 0;
 
+  // A page still unusable after its reloads marks the waiting job as needing
+  // the user ("Action required" in the Tasks view).
+  const waiting = path.join(root, 'jobs', 'stuck-job');
+  fs.mkdirSync(waiting, { recursive: true });
+  fs.writeFileSync(path.join(waiting, 'meta.json'), JSON.stringify({ provider: 'qwen-web', profile_id: 'web', state: 'waiting_for_desktop' }));
+  provider.notifyUser = () => true;
+  provider.heals = 3;
+  provider.markWaitingJobs([{ dir: waiting, meta: { state: 'waiting_for_desktop' } }], { workerReady: false });
+  const stuckMeta = JSON.parse(fs.readFileSync(path.join(waiting, 'meta.json'), 'utf8'));
+  assert.equal(stuckMeta.attention.kind, 'qwen_stuck');
+  assert.match(stuckMeta.last_event, /not responding/);
+
   // Extra tabs wait until the account's first tab has a usable page.
   fs.writeFileSync(provider.statusFile, JSON.stringify({ profiles: { web: { automation_ready: false, heartbeat_at: Date.now() / 1000 } } }));
   assert.equal(provider.accountReady(), false);

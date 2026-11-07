@@ -46,9 +46,12 @@
             </div>
             <div class="head-actions">
               <div class="segmented" aria-label="Task filter">
-                <button id="filterActive" class="active" type="button">Active</button>
-                <button id="filterAll" type="button">All</button>
+                <button id="filterActive" class="active" type="button" data-task-filter="active">Active</button>
+                <button id="filterAction" type="button" data-task-filter="action">Action required <b id="countAction" class="filter-count" hidden>0</b></button>
+                <button id="filterCaptcha" type="button" data-task-filter="captcha">Captcha <b id="countCaptcha" class="filter-count" hidden>0</b></button>
+                <button id="filterAll" type="button" data-task-filter="all">All</button>
               </div>
+              <button id="alertSound" class="icon-btn alert-sound" type="button" aria-pressed="true" title="Sound when a task needs you">&#128276;</button>
               <button id="newTask" class="btn primary" type="button">
                 <span class="plus">+</span> New task
               </button>
@@ -236,6 +239,16 @@
         <button id="bulkStart" class="btn primary" type="submit">Generate</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="transcriptDialog" class="glass-dialog changes-dialog">
+    <div class="dialog-card">
+      <div class="dialog-head">
+        <div><span class="micro-label">TASK</span><h2 id="transcriptTitle">Transcript</h2></div>
+        <button id="transcriptClose" class="icon-btn" type="button" aria-label="Close">×</button>
+      </div>
+      <pre id="transcriptOutput">Loading…</pre>
+    </div>
   </dialog>
 
   <dialog id="changesDialog" class="glass-dialog changes-dialog">

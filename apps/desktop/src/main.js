@@ -453,6 +453,8 @@ function cachedJobMeta(file) {
   return data;
 }
 
+const { jobNeed } = require('./job-needs');
+
 function listJobs(limit = 30) {
   if (!fs.existsSync(JOBS)) return [];
   return fs.readdirSync(JOBS, { withFileTypes: true })
@@ -478,6 +480,8 @@ function listJobs(limit = 30) {
           workerPid: data.worker_pid || 0,
           lastEvent: data.last_event || '',
           provider: data.provider || '',
+          profileId: data.profile_id || '',
+          attention: data.attention || null,
           done: fs.existsSync(path.join(JOBS, entry.name, 'DONE'))
         };
       } catch {
@@ -485,8 +489,51 @@ function listJobs(limit = 30) {
       }
     })
     .filter(Boolean)
+    .map(job => ({ ...job, ...jobNeed({ state: job.state, reason: job.reason, last_event: job.lastEvent, attention: job.attention }, job.done) }))
     .sort((a, b) => (b.created || b.started || 0) - (a.created || a.started || 0))
     .slice(0, limit);
+}
+
+// Shows the chat a job works in, at once: the answer comes before any page
+// loads, which happen in the background.
+// - A running web-chat job: the very tab running it (already on its chat).
+// - Otherwise: a tab of that account with no job of its own, moved to the
+//   job's conversation, so a tab running another job is never disturbed.
+// - Codex, Claude and other CLI agents have no web chat: the window shows
+//   the job's live transcript instead.
+async function openJobChat(jobId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(jobId || '')) throw new Error('Invalid job id');
+  const dir = path.join(JOBS, jobId);
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+  const site = WEB_CHAT_SITES[meta.provider];
+  if (!site) return { kind: 'transcript', jobId };
+  const profileId = String(meta.profile_id || 'web');
+  const base = site.prefix + profileId;
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(path.join(dir, 'chatgpt-state.json'), 'utf8')); } catch {}
+  const url = String(saved.conversation_url || meta.chatgpt_url || '');
+  const resolved = path.resolve(dir);
+  let key = [...chatgptProviders.entries()]
+    .find(([, provider]) => provider.activeJobDir && path.resolve(provider.activeJobDir) === resolved)?.[0] || '';
+  const running = Boolean(key);
+  if (!running) {
+    const lanes = [base];
+    for (let lane = 2; lane <= webLaneCount(meta.provider, profileId); lane += 1) lanes.push(base + '#' + lane);
+    key = lanes.find(id => !chatgptProviders.get(id)?.busy) || base;
+  }
+  const provider = await ensureChatgptProvider(key);
+  activeChatgptProfileId = key;
+  for (const [id, other] of chatgptProviders) if (id !== key) other.setVisible(false);
+  provider.cancelUnload();
+  const view = provider.ensureView();
+  provider.setVisible(true);
+  const current = view.webContents.getURL();
+  if (!running && !provider.busy && url && current !== url) {
+    provider.openConversation(url).catch(() => {});
+  } else if (!current || current === 'about:blank') {
+    provider.open().catch(() => {});
+  }
+  return { kind: 'web', key, running, site: site.name, url };
 }
 
 function pidAlive(pid) {
@@ -1029,6 +1076,7 @@ ipcMain.handle('teamyra:chatgpt-open', async (_event, profileId = 'web') => {
   for (const [otherId, other] of chatgptProviders) other.setVisible(otherId === id);
   return provider.open();
 });
+ipcMain.handle('teamyra:job-open-chat', (_event, jobId) => openJobChat(String(jobId || '')));
 ipcMain.handle('teamyra:chatgpt-close', () => activeChatgptProvider()?.close() || { connected: false });
 ipcMain.handle('teamyra:chatgpt-reload', () => {
   const provider = activeChatgptProvider();

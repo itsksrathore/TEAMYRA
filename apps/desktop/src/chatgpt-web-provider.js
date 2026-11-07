@@ -57,7 +57,12 @@ function userActions({ name, id }) {
       message: `This ${name} account is signed out. Open TEAMYRA Desktop, select the ${name} worker and sign in; the job resumes automatically.`,
       title: `TEAMYRA: ${name} sign-in needed`,
       waiting: `waiting: ${name} sign-in required in TEAMYRA Desktop`, paused: `needs_user: ${name} sign-in required`,
-      resumed: `${name} signed in again; resuming the same conversation` }
+      resumed: `${name} signed in again; resuming the same conversation` },
+    stuck: { kind: id + '_stuck',
+      message: `The ${name} page in TEAMYRA is not responding. Open the task's chat in TEAMYRA Desktop and check the page; the job continues once it works.`,
+      title: `TEAMYRA: ${name} page needs a look`,
+      waiting: `waiting: ${name} page not responding; open it in TEAMYRA Desktop`, paused: `needs_user: ${name} page not responding`,
+      resumed: `${name} page works again` }
   };
 }
 const TOOL_ERROR_HINT = 'Reply with one line: TEAMYRA_TOOL_REQUEST {"tool":"<name>","args":{...}} using valid JSON and forward slashes in paths (D:/dir/file). If the task is complete, reply with the final answer without the TEAMYRA_TOOL_REQUEST marker.';
@@ -1134,10 +1139,13 @@ class ChatGPTWebProvider {
   // Writes attention / last_event on jobs that wait for this worker. `status`
   // is the not-ready worker status, or null when the worker is ready again.
   markWaitingJobs(candidates, status) {
-    const action = status?.challenged ? this.userActions.verification : status?.loginVisible ? this.userActions.sign_in : null;
+    const stuck = status && !status.challenged && !status.loginVisible &&
+      (this.heals || 0) >= (this.maxHeals ?? MAX_NOT_READY_RELOADS);
+    const action = status?.challenged ? this.userActions.verification : status?.loginVisible ? this.userActions.sign_in
+      : stuck ? this.userActions.stuck : null;
     let notify = false;
     for (const { dir, meta } of candidates) {
-      const userKinds = [this.userActions.verification.kind, this.userActions.sign_in.kind];
+      const userKinds = [this.userActions.verification.kind, this.userActions.sign_in.kind, this.userActions.stuck.kind];
       const current = userKinds.includes(meta.attention?.kind) ? meta.attention.kind : null;
       const patch = {};
       if (action) {

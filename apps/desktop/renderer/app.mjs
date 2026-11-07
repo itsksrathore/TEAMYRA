@@ -174,6 +174,118 @@ function updateLiveBadge() {
   const active = currentJobs.filter(isActive).length;
   $('#liveBadge').hidden = active === 0;
   $('#liveLabel').textContent = active === 1 ? '1 live' : active + ' live';
+  for (const [need, id] of [['action', '#countAction'], ['captcha', '#countCaptcha']]) {
+    const count = currentJobs.filter(job => job.need === need).length;
+    $(id).textContent = String(count);
+    $(id).hidden = count === 0;
+  }
+  playNeedAlerts(currentJobs);
+}
+
+// A sound when a task starts to need the user, different for a captcha and
+// for any other action, and again every 3 minutes while it still waits.
+const ALERT_TONES = {
+  action: { wave: 'sine', notes: [[880, 0.16], [622, 0.26]] },
+  captcha: { wave: 'triangle', notes: [[1046, 0.09], [1318, 0.09], [1568, 0.09], [1318, 0.16]] }
+};
+const ALERT_REPEAT_MS = 180000;
+const alertedJobs = new Map();
+let alertAudio = null;
+
+function alertSoundOn() {
+  try { return localStorage.getItem('teamyra.alertSound') !== 'off'; } catch { return true; }
+}
+
+function playAlert(need) {
+  const tone = ALERT_TONES[need];
+  if (!tone || !alertSoundOn()) return;
+  try {
+    alertAudio ||= new AudioContext();
+    if (alertAudio.state === 'suspended') alertAudio.resume().catch(() => {});
+    let at = alertAudio.currentTime + 0.03;
+    for (const [frequency, length] of tone.notes) {
+      const oscillator = alertAudio.createOscillator();
+      const gain = alertAudio.createGain();
+      oscillator.type = tone.wave;
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.28, at + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + length);
+      oscillator.connect(gain).connect(alertAudio.destination);
+      oscillator.start(at);
+      oscillator.stop(at + length + 0.03);
+      at += length + 0.05;
+    }
+  } catch {}
+}
+
+function playNeedAlerts(jobs) {
+  const now = Date.now();
+  const due = new Set();
+  const seen = new Set();
+  for (const job of jobs) {
+    if (!NEED_LABELS[job.need]) continue;
+    const key = job.id + ':' + job.need;
+    seen.add(key);
+    const last = alertedJobs.get(key);
+    if (!last || now - last >= ALERT_REPEAT_MS) {
+      alertedJobs.set(key, now);
+      due.add(job.need);
+    }
+  }
+  for (const key of [...alertedJobs.keys()]) if (!seen.has(key)) alertedJobs.delete(key);
+  // One sound per kind; a captcha first, then the other one.
+  if (due.has('captcha')) playAlert('captcha');
+  if (due.has('action')) setTimeout(() => playAlert('action'), due.has('captcha') ? 700 : 0);
+}
+
+// "Open" on a task: its chat in the site panel (web-chat agents) or its live
+// transcript (CLI agents). The desktop answers at once; pages load after.
+async function openTaskChat(jobId, button) {
+  if (button) button.disabled = true;
+  try {
+    const target = await window.teamyra.openJobChat(jobId);
+    if (target?.kind === 'web') await openChatgptDetail(target.key, { opened: true });
+    else openTranscript(jobId);
+  } catch (error) {
+    alert('Could not open the task: ' + String(error?.message || error));
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+let transcriptTimer = null;
+
+async function openTranscript(jobId) {
+  const job = currentJobs.find(item => item.id === jobId);
+  $('#transcriptTitle').textContent = job ? taskTitle(job) : jobId;
+  const output = $('#transcriptOutput');
+  output.textContent = 'Loading…';
+  const dialog = $('#transcriptDialog');
+  if (!dialog.open) dialog.showModal();
+  let offset = 0;
+  let text = '';
+  const pull = async () => {
+    try {
+      const result = await window.teamyra.transcript(jobId, offset);
+      const chunk = String(result?.text || '');
+      offset = Number(result?.next) || offset;
+      if (chunk) {
+        const atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 30;
+        text = (text + chunk).slice(-400000);
+        output.textContent = text;
+        if (atBottom) output.scrollTop = output.scrollHeight;
+      } else if (!text) {
+        output.textContent = 'No transcript yet.';
+      }
+    } catch (error) {
+      if (!text) output.textContent = String(error?.message || error);
+    }
+  };
+  clearInterval(transcriptTimer);
+  await pull();
+  output.scrollTop = output.scrollHeight;
+  transcriptTimer = setInterval(() => { if (dialog.open) pull(); else clearInterval(transcriptTimer); }, 2000);
 }
 
 async function loadTranscriptPreview(job) {
@@ -206,47 +318,72 @@ async function loadTranscriptPreview(job) {
   }
 }
 
+const NEED_LABELS = { action: 'Action required', captcha: 'Captcha required' };
+
 function taskCardHtml(job) {
   const meta = workerMeta(job.worker);
   const active = isActive(job);
+  const need = NEED_LABELS[job.need] ? job.need : '';
   const preview = transcriptState.get(job.id)?.text || job.lastEvent || (active ? 'Agent is starting…' : 'No transcript preview.');
+  const pill = need
+    ? `<span class="status-pill need-${need}"><i class="status-dot"></i>${NEED_LABELS[need]}</span>`
+    : `<span class="status-pill ${escapeHtml(job.state)}"><i class="status-dot"></i>${escapeHtml(stateLabel(job.state))}</span>`;
   return `
-    <article class="task-card ${active ? 'running' : ''}" data-job-id="${escapeHtml(job.id)}">
+    <article class="task-card ${active ? 'running' : ''} ${need ? 'need-' + need : ''}" data-job-id="${escapeHtml(job.id)}">
       <div class="task-head">
         <span class="agent-avatar ${meta.cls}">${agentIconSvg(meta.icon) || escapeHtml(meta.code)}</span>
         <div class="task-title">
           <strong title="${escapeHtml(taskTitle(job))}">${escapeHtml(taskTitle(job))}</strong>
           <span>${escapeHtml(meta.label)} · ${escapeHtml(shortTime(job.started || job.created))}</span>
         </div>
-        <span class="status-pill ${escapeHtml(job.state)}"><i class="status-dot"></i>${escapeHtml(stateLabel(job.state))}</span>
+        ${pill}
       </div>
+      ${need ? `<div class="task-need ${need}">${escapeHtml(job.needMessage || NEED_LABELS[need])}</div>` : ''}
       <pre class="task-output ${preview ? '' : 'empty'}" data-task-output="${escapeHtml(job.id)}">${escapeHtml(preview)}</pre>
       <div class="task-foot">
         <span class="task-path" title="${escapeHtml(job.cwd)}">${escapeHtml(job.cwd || job.branch || '')}</span>
+        <button class="task-open" type="button" data-open-job="${escapeHtml(job.id)}" title="${isWebChat(job.provider) ? 'Open this task\'s chat' : 'Open this task\'s transcript'}">${isWebChat(job.provider) ? 'Open chat' : 'Open'}</button>
         ${active ? `<button class="task-cancel" type="button" data-cancel-job="${escapeHtml(job.id)}">Stop</button>` : ''}
       </div>
     </article>
   `;
 }
 
+const TASK_FILTERS = {
+  active: { pick: jobs => jobs.filter(isActive), empty: ['No active tasks', 'Start one and its agent will appear here.'] },
+  action: { pick: jobs => jobs.filter(job => job.need === 'action'), empty: ['Nothing needs you', 'Tasks waiting for a sign-in, a stuck page or your answer appear here.'] },
+  captcha: { pick: jobs => jobs.filter(job => job.need === 'captcha'), empty: ['No captcha waiting', 'Tasks paused on a human check (Qwen, DeepSeek, GLM…) appear here.'] },
+  all: { pick: jobs => jobs.slice(0, 18), empty: ['No tasks yet', 'Your recent agent work will appear here.'] }
+};
+
+function setTaskFilter(name) {
+  taskFilter = TASK_FILTERS[name] ? name : 'active';
+  document.querySelectorAll('[data-task-filter]').forEach(button => {
+    button.classList.toggle('active', button.dataset.taskFilter === taskFilter);
+  });
+  renderJobs();
+}
+
 function renderJobs() {
-  const jobs = taskFilter === 'active'
-    ? currentJobs.filter(isActive)
-    : currentJobs.slice(0, 18);
+  const filter = TASK_FILTERS[taskFilter] || TASK_FILTERS.active;
+  const jobs = filter.pick(currentJobs);
 
   const desk = $('#taskDesk');
   if (!jobs.length) {
     desk.innerHTML = `
       <div class="empty-state">
         <div class="empty-orb"></div>
-        <strong>${taskFilter === 'active' ? 'No active tasks' : 'No tasks yet'}</strong>
-        <span>${taskFilter === 'active' ? 'Start one and its agent will appear here.' : 'Your recent agent work will appear here.'}</span>
+        <strong>${filter.empty[0]}</strong>
+        <span>${filter.empty[1]}</span>
       </div>
     `;
     return;
   }
 
   desk.innerHTML = jobs.map(taskCardHtml).join('');
+  desk.querySelectorAll('[data-open-job]').forEach(button => {
+    button.addEventListener('click', () => openTaskChat(button.dataset.openJob, button));
+  });
   desk.querySelectorAll('[data-cancel-job]').forEach(button => {
     button.addEventListener('click', async () => {
       const id = button.dataset.cancelJob;
@@ -275,7 +412,7 @@ async function refreshJobs() {
     const jobs = await window.teamyra.jobs();
     currentJobs = jobs;
     updateLiveBadge();
-    const signature = jobs.map(job => [job.id, job.state, job.updated, job.heartbeatAt, job.lastEvent].join(':')).join('|');
+    const signature = jobs.map(job => [job.id, job.state, job.updated, job.heartbeatAt, job.lastEvent, job.need].join(':')).join('|');
     if (signature !== jobsRenderSignature) {
       jobsRenderSignature = signature;
       renderJobs();
@@ -758,7 +895,7 @@ function syncChatgptBounds() {
   }).catch(() => {});
 }
 
-async function openChatgptDetail(profileId = 'web') {
+async function openChatgptDetail(profileId = 'web', { opened = false } = {}) {
   activeChatgptProfileId = profileId || 'web';
   const webSite = webChatSiteForKey(activeChatgptProfileId);
   const site = webSite.name;
@@ -776,14 +913,15 @@ async function openChatgptDetail(profileId = 'web') {
   $('#tasksView').hidden = true;
 
   setBrowserCloseVisible(true);
-  await window.teamyra.setChatgptVisible(false).catch(() => {});
+  if (!opened) await window.teamyra.setChatgptVisible(false).catch(() => {});
   if (!chatgptBoundsObserver) {
     chatgptBoundsObserver = new ResizeObserver(syncChatgptBounds);
     chatgptBoundsObserver.observe($('#chatgptViewport'));
     window.addEventListener('resize', syncChatgptBounds);
   }
   syncChatgptBounds();
-  await window.teamyra.openChatgpt(activeChatgptProfileId);
+  if (opened) await window.teamyra.setChatgptVisible(true).catch(() => {});
+  else await window.teamyra.openChatgpt(activeChatgptProfileId);
   setTimeout(() => refreshChatgptStatus().catch(() => {}), 800);
 }
 
@@ -911,9 +1049,7 @@ async function submitTask(event) {
     });
     $('#newTaskDialog').close();
     $('#taskPrompt').value = '';
-    taskFilter = 'active';
-    $('#filterActive').classList.add('active');
-    $('#filterAll').classList.remove('active');
+    setTaskFilter('active');
     setView('tasks');
     await refreshJobs();
   } catch (error) {
@@ -954,18 +1090,18 @@ $('#refresh').addEventListener('click', () => {
   action.catch(error => alert(String(error?.message || error)));
 });
 
-$('#filterActive').addEventListener('click', () => {
-  taskFilter = 'active';
-  $('#filterActive').classList.add('active');
-  $('#filterAll').classList.remove('active');
-  renderJobs();
+document.querySelectorAll('[data-task-filter]').forEach(button => {
+  button.addEventListener('click', () => setTaskFilter(button.dataset.taskFilter));
 });
-$('#filterAll').addEventListener('click', () => {
-  taskFilter = 'all';
-  $('#filterAll').classList.add('active');
-  $('#filterActive').classList.remove('active');
-  renderJobs();
+$('#alertSound').setAttribute('aria-pressed', String(alertSoundOn()));
+$('#alertSound').addEventListener('click', () => {
+  const on = !alertSoundOn();
+  try { localStorage.setItem('teamyra.alertSound', on ? 'on' : 'off'); } catch {}
+  $('#alertSound').setAttribute('aria-pressed', String(on));
+  if (on) playAlert('action');
 });
+$('#transcriptClose').addEventListener('click', () => $('#transcriptDialog').close());
+$('#transcriptDialog').addEventListener('close', () => clearInterval(transcriptTimer));
 
 $('#newTask').addEventListener('click', openNewTask);
 $('#newTaskClose').addEventListener('click', () => $('#newTaskDialog').close());
@@ -1288,7 +1424,7 @@ function scheduleJobsPoll(delayMs) {
   if (jobsPollTimer) clearTimeout(jobsPollTimer);
   jobsPollTimer = setTimeout(async () => {
     jobsPollTimer = null;
-    if (!document.hidden) await refreshJobs().catch(() => {});
+    await refreshJobs().catch(() => {});
     const hasActive = currentJobs.some(isActive);
     const next = document.hidden ? 15000
       : activeView === 'tasks'

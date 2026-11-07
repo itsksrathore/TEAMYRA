@@ -519,6 +519,51 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 .status-pill.failed .status-dot { background: var(--red); box-shadow: none; }
 .status-pill.cancelled .status-dot { background: var(--faint); box-shadow: none; }
 
+/* A task that needs the user: a captcha (amber) or another action (red). */
+.status-pill.need-action { color: var(--red); border-color: rgba(178,50,47,.35); background: rgba(178,50,47,.08); }
+.status-pill.need-captcha { color: var(--amber); border-color: rgba(170,116,23,.4); background: rgba(170,116,23,.10); }
+.status-pill.need-action .status-dot { background: var(--red); animation: breathe 0.9s ease-in-out infinite; }
+.status-pill.need-captcha .status-dot { background: var(--amber); animation: breathe 0.9s ease-in-out infinite; }
+.task-card.need-action { box-shadow: 0 0 0 1.5px rgba(178,50,47,.45), 0 10px 30px rgb(var(--shadow) / .10); }
+.task-card.need-captcha { box-shadow: 0 0 0 1.5px rgba(170,116,23,.5), 0 10px 30px rgb(var(--shadow) / .10); }
+.task-need {
+  margin: 0 12px 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.task-need.action { color: var(--red); background: rgba(178,50,47,.08); }
+.task-need.captcha { color: var(--amber); background: rgba(170,116,23,.10); }
+.filter-count {
+  display: inline-block;
+  min-width: 15px;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--red);
+  font-size: 8px;
+  line-height: 15px;
+}
+#filterCaptcha .filter-count { background: var(--amber); }
+.alert-sound[aria-pressed="false"] { opacity: .45; }
+.task-open {
+  height: 27px;
+  padding: 0 10px;
+  border: 1px solid var(--rim);
+  border-radius: 999px;
+  color: var(--ink);
+  background: rgba(255,255,255,.6);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.task-open:disabled { opacity: .5; cursor: default; }
+
 .task-output {
   flex: 1;
   min-height: 150px;

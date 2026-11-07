@@ -265,3 +265,17 @@ Automated CI verifies:
 - no OpenAI API integration in the ChatGPT web subsystem.
 
 Live acceptance additionally requires a real TEAMYRA Windows desktop session and user ChatGPT account to verify login, restart persistence and the current chatgpt.com page against production UI. These checks must not be marked passed without running them on a live desktop.
+
+## Tasks view: open a task's chat, and tasks that need you
+
+- **Open / Open chat** on every task card (`teamyra:job-open-chat`, `openJobChat` in `main.js`). The desktop answers at once and pages load afterwards.
+  - A running web-chat job is shown in the very tab that runs it.
+  - Any other web-chat job opens in a tab of its account that has no job of its own, moved to the job's conversation (`chatgpt-state.json`).
+  - CLI agents (Codex, Claude, Antigravity) open the job's live transcript.
+- **Needs you** (`apps/desktop/src/job-needs.js`): each unfinished task has `need`:
+  - `captcha`: a site's human check (attention `<site>_verification`);
+  - `action`: sign-in (`<site>_sign_in`), a page still unusable after its reload limit (`<site>_stuck`), or a job paused for the user (`needs_user`).
+
+  The card shows **Captcha required** (amber) or **Action required** (red) with the message.
+- **Filters:** Active, Action required, Captcha, All, with counts.
+- **Sounds:** two different tones, one for a captcha and one for any other action. Each plays once when a task starts to need you, and again every 3 minutes while it still waits. The bell button turns them off. The job list keeps refreshing (every 15 s) while the window is hidden, so the sounds still play.
