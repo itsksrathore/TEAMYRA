@@ -111,7 +111,11 @@ def chatgpt_ready(root, info):
     if web_account_blocked(account):
         return False
     if profile == str(status.get("active_profile_id") or "web"):
-        return bool(status.get("worker_ready") or account.get("automation_ready") or account.get("session_present"))
+        # The account's own flag when it has one: the shared worker_ready can
+        # still be another account's (DeepSeek 2 on a sign-in page got a job,
+        # ISS-20261107-163755).
+        shared = account.get("worker_ready") if "worker_ready" in account else status.get("worker_ready")
+        return bool(shared or account.get("automation_ready") or account.get("session_present"))
     return bool(account.get("automation_ready") or account.get("session_present"))
 
 

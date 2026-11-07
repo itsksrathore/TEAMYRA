@@ -121,6 +121,17 @@ class AccountRotationTests(unittest.TestCase):
         scheduler.dispatch_once(self.root, spawn=Spawned())
         self.assertTrue(all(m["worker"] == "chatgpt-normal" for m in scheduler.load_jobs(self.root)))
 
+    def test_active_account_uses_its_own_worker_ready(self):
+        # ISS-20261107-163755: the shared worker_ready said ready while the
+        # active account itself sat on a sign-in page.
+        root = self.root
+        (root / "deepseek").mkdir(exist_ok=True)
+        (root / "deepseek" / "status.json").write_text(json.dumps({
+            "heartbeat_at": time.time(), "active_profile_id": "d2", "worker_ready": True,
+            "profiles": {"d2": {"worker_ready": False, "automation_ready": False, "session_present": False}}}),
+            encoding="utf-8")
+        self.assertFalse(scheduler.chatgpt_ready(root, {"provider": "deepseek-web", "profile_id": "d2"}))
+
     def test_pinned_jobs_are_not_rotated(self):
         # ISS-20261107-162044: pin=true on ChatGPT Normal 3 was rotated away.
         self.status()

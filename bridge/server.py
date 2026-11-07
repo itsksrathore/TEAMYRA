@@ -165,7 +165,8 @@ def _probe_worker_auth(info, now):
             profile_status = (status.get("profiles") or {}).get(profile_id) or {}
             if profile_id == str(status.get("active_profile_id") or "web"):
                 profile_ready = (
-                    status.get("worker_ready") is True or
+                    (profile_status.get("worker_ready") if "worker_ready" in profile_status
+                     else status.get("worker_ready")) is True or
                     profile_status.get("automation_ready") is True or
                     profile_status.get("session_present") is True
                 )
