@@ -615,7 +615,11 @@ def pick_worker(worker, exclude=None, order=None, last_resort=None):
     if not order:
         raise ValueError("no enabled workers are configured or discovered")
 
-    free = [w for w in order if not cooldown_left(w)]
+    # A whole web-chat site that is down or refuses this PC is skipped too.
+    metas = all_jobs()
+    down = {provider for provider in {registry[w].get("provider") for w in order if w in registry}
+            if provider in job_transfer.WEB_SITES and job_transfer.site_block_left(metas, provider)}
+    free = [w for w in order if not cooldown_left(w) and registry.get(w, {}).get("provider") not in down]
     idle = [w for w in free if not running_jobs(w)]
     # Busy workers last, the shortest queue first (a stable sort keeps the configured order).
     busy = sorted((w for w in free if w not in idle), key=lambda w: len(running_jobs(w)))
@@ -1057,6 +1061,13 @@ def worker_status():
         item["cooldown_seconds"] = scheduler.cooldown_left(jobs_root(), w, metas)
         if item["cooldown_seconds"]:
             item["ready"] = False
+        # The account may be fine while its site is down (Z.ai answered every
+        # chat with error pages, 2026-11-07): not ready until the pause ends.
+        site_left = job_transfer.site_block_left(metas, item["provider"])             if item["provider"] in job_transfer.WEB_SITES else 0
+        if site_left:
+            item["ready"] = False
+            item["site_down_seconds"] = site_left
+            item["detail"] = f"site down or refusing this PC; skipped for {max(1, site_left // 60)} more min"
     return out
 
 

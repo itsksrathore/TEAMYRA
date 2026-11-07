@@ -165,6 +165,14 @@ def blocked_sites(metas, now=None):
             if m.get("reason") in ("site_blocked", "site_down") and now - float(m.get("ended") or 0) < SITE_BLOCK_SECONDS}
 
 
+def site_block_left(metas, provider, now=None):
+    """Seconds this site stays skipped after a job ended site_blocked/site_down (0 = usable)."""
+    now = time.time() if now is None else now
+    ends = [float(m.get("ended") or 0) for m in metas
+            if m.get("provider") == provider and m.get("reason") in ("site_blocked", "site_down")]
+    return max(0, int(max(ends, default=0) + SITE_BLOCK_SECONDS - now))
+
+
 def candidates(root, meta, config=None, metas=None, registry=None):
     """Ready workers for a hand-over, best first: [(worker_id, info, free)]."""
     cfg = settings(config)

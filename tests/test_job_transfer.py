@@ -287,6 +287,15 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(read_meta(self.root, "w1")["worker"], "muse-normal")
         self.assertIn("did not get its page ready", read_meta(self.root, "w1")["last_event"])
 
+    def test_site_block_left(self):
+        now = time.time()
+        metas = [{"provider": "glm-web", "reason": "site_down", "ended": now - 600},
+                 {"provider": "glm-web", "reason": "worker_error", "ended": now},
+                 {"provider": "muse-web", "reason": "site_down", "ended": now - 2000}]
+        self.assertAlmostEqual(job_transfer.site_block_left(metas, "glm-web", now), 1200, delta=1)
+        self.assertEqual(job_transfer.site_block_left(metas, "muse-web", now), 0)
+        self.assertEqual(job_transfer.site_block_left(metas, "deepseek-web", now), 0)
+
     def test_pause_over(self):
         now = time.time()
         self.assertFalse(job_transfer.pause_over({"attention": {"since": now - 60}}, CONFIG, now))
