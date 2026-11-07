@@ -163,6 +163,29 @@ SANDBOX_TERMINAL_HINT = (
 )
 
 
+# filesystem.patch: web models also write the edit the way other agents do
+# ({"old_string", "new_string"} at the top level, DeepSeek 2026-11-07).
+PATCH_FIND_KEYS = ("find", "old_string", "old_text", "old", "search")
+PATCH_REPLACE_KEYS = ("replace", "new_string", "new_text", "new")
+
+
+def _first_of(item, keys):
+    for key in keys:
+        if item.get(key) is not None:
+            return item.get(key)
+    return None
+
+
+def _patch_replacements(args):
+    replacements = args.get("replacements") or args.get("edits")
+    if isinstance(replacements, dict):
+        replacements = [replacements]
+    if not replacements and _first_of(args, PATCH_FIND_KEYS) is not None:
+        replacements = [{key: args[key] for key in (*PATCH_FIND_KEYS, *PATCH_REPLACE_KEYS, "count", "expected", "replace_all")
+                         if key in args}]
+    return replacements
+
+
 class WorkspaceToolError(ValueError):
     pass
 
@@ -996,14 +1019,18 @@ class WorkspaceToolService:
             if b"\x00" in raw[:8192]:
                 raise WorkspaceToolError("binary files cannot be patched as text")
             text = raw.decode("utf-8", errors="strict")
-            replacements = args.get("replacements")
+            replacements = _patch_replacements(args)
             if not isinstance(replacements, list) or not replacements or len(replacements) > 100:
-                raise WorkspaceToolError("replacements must be a non-empty list of at most 100 items")
+                raise WorkspaceToolError(
+                    'replacements must be a non-empty list of at most 100 items, e.g. '
+                    '{"path": "a.js", "replacements": [{"find": "old text", "replace": "new text"}]}')
             for item in replacements:
                 if not isinstance(item, dict):
                     raise WorkspaceToolError("invalid replacement")
-                old = str(item.get("find") or "")
-                new = str(item.get("replace") or "")
+                old = str(_first_of(item, PATCH_FIND_KEYS) or "")
+                new = str(_first_of(item, PATCH_REPLACE_KEYS) or "")
+                if item.get("count") is None and item.get("replace_all") is False:
+                    item = dict(item, count=1)
                 if not old:
                     raise WorkspaceToolError("replacement find text is required")
                 actual = text.count(old)

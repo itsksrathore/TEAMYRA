@@ -66,6 +66,25 @@ class WorkspaceToolTests(unittest.TestCase):
         git("config", "user.name", "Test")
         return git
 
+    def test_patch_accepts_old_string_new_string(self):
+        # DeepSeek, 2026-11-07: the edit came as top-level old_string/new_string.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            token = "x" * 64
+            (workspace / "a.txt").write_text("one two two\n", encoding="utf-8")
+            service.execute("filesystem.patch", {"path": "a.txt", "old_string": "one", "new_string": "1"}, token=token)
+            service.execute("filesystem.patch", {"path": "a.txt", "edits": [{"old_text": "two", "new_text": "2"}]},
+                            token=token)
+            self.assertEqual((workspace / "a.txt").read_text(encoding="utf-8"), "1 2 2\n")
+            service.execute("filesystem.patch", {"path": "a.txt", "old_string": "2", "new_string": "x",
+                                                 "replace_all": False}, token=token)
+            self.assertEqual((workspace / "a.txt").read_text(encoding="utf-8"), "1 x 2\n")
+            with self.assertRaisesRegex(Exception, "replacements"):
+                service.execute("filesystem.patch", {"path": "a.txt"}, token=token)
+
     def test_filesystem_lifecycle_and_search(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "runtime"
