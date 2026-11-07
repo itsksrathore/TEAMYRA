@@ -119,6 +119,8 @@ def transfer_expected(meta, now=None, config=None, done=True):
         return False
     if meta.get("reason") not in TRANSFER_REASONS or meta.get("transfer") is False:
         return False
+    if _stays_put(meta):
+        return False
     if meta.get("auto_failover_enabled"):
         return False  # the older failover monitor owns this chain
     if meta.get("failover_job_id") or meta.get("transfer_exhausted"):
@@ -134,7 +136,15 @@ def transferable_now(meta, config=None):
     """For a running job: may it be handed over if it stops (desktop asks)?"""
     cfg = settings(config)
     return bool(cfg["enabled"] and meta.get("provider") in WEB_SITES and meta.get("transfer") is not False
+                and not _stays_put(meta)
                 and not meta.get("auto_failover_enabled") and _attempt(meta) < cfg["max_transfers"])
+
+
+def _stays_put(meta):
+    """pin / account_fixed keep a job on its account: it is not handed over
+    on its own unless it was started with transfer=true (a pinned job went to
+    a signed-out DeepSeek account, ISS-20261107-192516)."""
+    return bool(meta.get("pin") or meta.get("account_fixed")) and meta.get("transfer") is not True
 
 
 # --- which worker ----------------------------------------------------------------------
@@ -642,6 +652,8 @@ def move_unstarted(root, config=None, registry=None):
     moved = []
     for meta in metas:
         if meta.get("_done") or meta.get("provider") not in WEB_SITES or meta.get("transfer") is False:
+            continue
+        if _stays_put(meta):
             continue
         if meta.get("auto_failover_enabled") or meta.get("state") not in (scheduler.QUEUED, "waiting_for_desktop"):
             continue

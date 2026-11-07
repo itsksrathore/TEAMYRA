@@ -320,6 +320,17 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(read_meta(self.root, "w1")["worker"], "muse-normal")
         self.assertIn("kept hanging", read_meta(self.root, "w1")["last_event"])
 
+    def test_pinned_jobs_are_not_handed_over_unless_asked(self):
+        # ISS-20261107-192516: a pinned job went to a signed-out account.
+        write_status(self.root, "chatgpt", {"web": ready()})
+        write_status(self.root, "muse", {"web": ready()})
+        write_job(self.root, "pinned", reason="page_unresponsive", pin=True)
+        write_job(self.root, "fixed", reason="page_unresponsive", account_fixed=True)
+        write_job(self.root, "asked", reason="page_unresponsive", pin=True, transfer=True)
+        start = FakeStart(self.root)
+        job_transfer.sweep(self.root, start, CONFIG)
+        self.assertEqual([call["parent"] for call in start.calls], ["asked"])
+
     def test_pause_over(self):
         now = time.time()
         self.assertFalse(job_transfer.pause_over({"attention": {"since": now - 60}}, CONFIG, now))

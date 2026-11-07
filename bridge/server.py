@@ -762,8 +762,10 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             "auto_failover_enabled": bool(auto_failover), "max_failovers": max_failovers,
             "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
             "worker_order": list(worker_order or []), "teamyra_mcp": bool(teamyra_mcp)}
-    if transfer is False:
-        meta["transfer"] = False  # never hand this job over to another agent (job_transfer)
+    if transfer is not None:
+        # False: never hand this job over (job_transfer); True: hand it over
+        # even when it is pinned to its account.
+        meta["transfer"] = bool(transfer)
     if account_fixed:
         meta["account_fixed"] = True  # web-chat account rotation leaves this job on its account
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1773,7 +1775,7 @@ TOOLS = [
          "write": {"type": "boolean", "default": True},
          "pin": {"type": "boolean", "default": False, "description": "Keep the job on its assigned worker."},
          "account_fixed": {"type": "boolean", "default": False, "description": "Web-chat jobs rotate over the ready accounts of their site (least used first). true keeps this job on the account named in worker."},
-         "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is."},
+         "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is. A job with pin or account_fixed is not handed over unless you pass transfer=true."},
          "pool": {"type": "boolean", "default": False, "description": "Allow idle workers of the same provider to take this queued job."},
          "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
          "auto_failover": {"type": "boolean", "description": "Automatically reassign eligible provider/worker failures. Defaults on when worker=auto."},
@@ -1881,7 +1883,7 @@ TOOLS = [
                      "write": {"type": "boolean", "default": True},
                      "pin": {"type": "boolean", "default": False},
                      "account_fixed": {"type": "boolean", "default": False, "description": "Web-chat jobs rotate over the ready accounts of their site (least used first). true keeps this job on the account named in worker."},
-                     "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is."},
+                     "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is. A job with pin or account_fixed is not handed over unless you pass transfer=true."},
                      "pool": {"type": "boolean", "default": False},
                      "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
                      "auto_failover": {"type": "boolean", "description": "Defaults on when worker=auto."},
