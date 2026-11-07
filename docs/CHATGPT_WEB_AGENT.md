@@ -109,6 +109,8 @@ Supported tools:
 - `filesystem.rename`
 - `filesystem.delete`
 - `terminal.run`
+- `code.map`
+- `code.symbol`
 - `git.status`
 - `git.diff`
 - `git.log`
@@ -116,6 +118,20 @@ Supported tools:
 - `git.add`
 - `git.commit`
 - `git.restore`
+
+### Code map, one symbol, and short terminal output
+
+Start with code.map to see the project, and use code.symbol to read one function instead of a whole file.
+
+code.map takes path, with optional budget_chars and focus. It returns a compact map of a folder, by default cut to 8000 characters: each file with its top-level classes, functions, exports and methods, giving kind, name and line. Files imported by the most other files rank first, with recently changed and focus-matching files ahead of the rest. code.symbol takes path and name, and returns one definition with its line range and body, at most 300 lines, plus up to 30 reference lines. Both are read tools with the same permission and path checks as filesystem.search, so they add no new permission and no bypass. Parsing uses tree-sitter only when it is already installed, otherwise a built-in extractor for common languages; nothing new is installed. Results are cached by file mtime under ROOT/cache/code-intel.
+
+Examples, one line each, using the existing protocol:
+TEAMYRA_TOOL_REQUEST {"tool":"code.map","args":{"path":"bridge"}}
+TEAMYRA_TOOL_REQUEST {"tool":"code.symbol","args":{"path":"bridge","name":"code_map"}}
+
+terminal.run has a digest by default when the combined stdout and stderr are over 6000 characters. The digest keeps the command, the exit code, the first 40 lines, error lines with 2 lines of context, summary lines for pytest, unittest, node:test, npm, tsc and git, and the last 60 lines, with a cut marker for what was removed. The full output is saved at ROOT/logs/terminal/<job>/<n>.txt and returned as full_log. With digest:false, terminal.run returns the legacy output under the old caps (stdout up to 500000 characters, stderr up to 200000 characters); a web job tool result is separately bounded to about 40000 characters, so this is not unlimited output. The job value in that path is the one set by the runtime; do not put a job value in terminal.run arguments to try to choose it.
+
+These tools are available to workers after Checkpoint A, when feat/lead-chat is merged into TEAMYRA and TEAMYRA is restarted.
 
 MCP callers use the same implementation through `teamyra.workspace_tool`; they do not mutate the selected ChatGPT workspace. Explicit-workspace calls (`execute_in_workspace`, used by MCP and delegated jobs) take the user-only switches from the persisted user setting: a caller may lower `full_access`, `outside_workspace` or `destructive_without_confirmation`, but any attempt to raise one is rejected and audited. Without Full PC access their terminal surface is the sandboxed dev allowlist described under Permissions.
 
