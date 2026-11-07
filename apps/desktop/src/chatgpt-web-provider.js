@@ -641,7 +641,18 @@ class ChatGPTWebProvider {
     try {
       await this.pageCall(() => view.webContents.loadURL(url), label);
     } catch (error) {
-      const probe = this.automation ? await this.automation.probe().catch(() => null) : null;
+      // ERR_ABORTED (-3): the site redirected or navigated itself while
+      // loading (chat.z.ai does). The page is still coming: let it settle
+      // for a while before deciding (2026-11-07: GLM jobs failed at turn 0).
+      if (/ERR_ABORTED|\(-3\)/.test(String(error?.message || error))) {
+        const until = Date.now() + (this.abortSettleMs ?? 15000);
+        while (Date.now() < until && !view.webContents.isDestroyed?.() && view.webContents.isLoading()) await sleep(200);
+      }
+      let probe = this.automation ? await this.automation.probe().catch(() => null) : null;
+      if (!probe?.promptFound && /ERR_ABORTED|\(-3\)/.test(String(error?.message || error))) {
+        await sleep(this.abortSettleMs ? 0 : 3000);
+        probe = this.automation ? await this.automation.probe().catch(() => null) : null;
+      }
       if (!probe?.promptFound) throw error;
       this.pageUnresponsiveSince = null;
       this.lastProbe = probe;
