@@ -32,11 +32,15 @@ class DesktopContractTests(unittest.TestCase):
 
     def test_tasks_surface_is_minimal_live_tile_desk(self):
         for element_id in (
-            "tasksView", "taskDesk", "newTask", "filterActive", "filterAll",
+            "tasksView", "taskDesk", "newTask",
             "newTaskDialog", "taskPrompt", "taskWorkspacePick", "taskAgent", "taskStart",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
             self.assertIn(f"#{element_id}", self.renderer)
+        # Filter buttons (Active, Action required, Captcha, All) are wired by data-task-filter.
+        for name in ("active", "action", "captcha", "all"):
+            self.assertIn(f'data-task-filter="{name}"', self.html)
+        self.assertIn("[data-task-filter]", self.renderer)
         self.assertIn("task-card", self.renderer)
         self.assertIn("data-task-output", self.renderer)
         self.assertIn("data-cancel-job", self.renderer)

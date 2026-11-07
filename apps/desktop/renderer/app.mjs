@@ -325,9 +325,18 @@ function taskCardHtml(job) {
   const active = isActive(job);
   const need = NEED_LABELS[job.need] ? job.need : '';
   const preview = transcriptState.get(job.id)?.text || job.lastEvent || (active ? 'Agent is starting…' : 'No transcript preview.');
+  // Hand-overs to another agent (bridge/job_transfer.py).
+  const moved = job.movedTo ? 'moved' : job.state === 'failed' && job.movingSince ? 'moving' : '';
   const pill = need
     ? `<span class="status-pill need-${need}"><i class="status-dot"></i>${NEED_LABELS[need]}</span>`
-    : `<span class="status-pill ${escapeHtml(job.state)}"><i class="status-dot"></i>${escapeHtml(stateLabel(job.state))}</span>`;
+    : moved
+      ? `<span class="status-pill moved"><i class="status-dot"></i>${moved === 'moved' ? 'Moved' : 'Moving…'}</span>`
+      : `<span class="status-pill ${escapeHtml(job.state)}"><i class="status-dot"></i>${escapeHtml(stateLabel(job.state))}</span>`;
+  const transferNote = moved === 'moved'
+    ? `Moved to ${job.movedToLabel || 'another agent'}: it continues there with everything done so far.`
+    : moved === 'moving'
+      ? 'Waiting for a free agent to take this task over.'
+      : job.continuesFrom ? `Continues the task of ${job.continuesFromLabel || 'another agent'}, with its work so far.` : '';
   return `
     <article class="task-card ${active ? 'running' : ''} ${need ? 'need-' + need : ''}" data-job-id="${escapeHtml(job.id)}">
       <div class="task-head">
@@ -339,6 +348,7 @@ function taskCardHtml(job) {
         ${pill}
       </div>
       ${need ? `<div class="task-need ${need}">${escapeHtml(job.needMessage || NEED_LABELS[need])}</div>` : ''}
+      ${transferNote ? `<div class="task-transfer">${escapeHtml(transferNote)}</div>` : ''}
       <pre class="task-output ${preview ? '' : 'empty'}" data-task-output="${escapeHtml(job.id)}">${escapeHtml(preview)}</pre>
       <div class="task-foot">
         <span class="task-path" title="${escapeHtml(job.cwd)}">${escapeHtml(job.cwd || job.branch || '')}</span>

@@ -535,6 +535,18 @@ body[data-platform="darwin"] .lights-deck { display: block; height: 22px; }
 }
 .task-need.action { color: var(--red); background: rgba(178,50,47,.08); }
 .task-need.captcha { color: var(--amber); background: rgba(170,116,23,.10); }
+/* A task handed over to another agent (job_transfer), or continuing one. */
+.status-pill.moved { color: #3d6fb4; }
+.status-pill.moved .status-dot { background: #3d6fb4; box-shadow: none; }
+.task-transfer {
+  margin: 0 12px 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  color: #3d6fb4;
+  background: rgba(61,111,180,.09);
+  font-size: 11px;
+  line-height: 1.45;
+}
 .filter-count {
   display: inline-block;
   min-width: 15px;

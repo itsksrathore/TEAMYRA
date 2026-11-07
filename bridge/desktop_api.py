@@ -43,7 +43,38 @@ def handle(action, payload):
 
     if action == "scheduler.dispatch":
         import scheduler
-        return scheduler.dispatch_once(ROOT, BRIDGE, sys.executable)
+        import job_transfer
+        # A web-chat job that just stopped (limit, check, error) moves to
+        # another agent first, so its continuation is dispatched right here.
+        moved = []
+        try:
+            import server
+            moved = job_transfer.sweep(ROOT, server.start_job)
+        except Exception as exc:
+            print("TEAMYRA hand-over error:", exc, file=sys.stderr, flush=True)
+        result = scheduler.dispatch_once(ROOT, BRIDGE, sys.executable)
+        if moved and isinstance(result, dict):
+            result = {**result, "transferred": moved}
+        return result
+
+    if action == "transfer.check":
+        # Asked by a web-chat tab before it gives up on a paused job: is there
+        # another ready agent that could continue it?
+        import job_transfer
+        import scheduler
+        job_id = str(payload.get("job_id") or "")
+        if not job_id or any(c in job_id for c in "/\\") or ".." in job_id:
+            raise ValueError("job_id is required")
+        meta = scheduler._read_json(ROOT / "jobs" / job_id / "meta.json")
+        if not isinstance(meta, dict):
+            raise ValueError("no such job")
+        meta.setdefault("id", job_id)
+        config = job_transfer.load_config()
+        options = job_transfer.candidates(ROOT, meta, config) if job_transfer.transferable_now(meta, config) else []
+        return {"possible": bool(options),
+                # Paused long enough (transfer.pause_minutes) and someone can take it: move it now.
+                "handover": bool(options) and job_transfer.pause_over(meta, config),
+                "to": [info.get("label") or worker for worker, info, _ in options[:3]]}
 
     if action == "task.start":
         import server

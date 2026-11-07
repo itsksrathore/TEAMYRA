@@ -7,6 +7,13 @@ const { WorkspaceBridge } = require('./workspace-bridge');
 const { JobProcesses, jobProcesses } = require('./job-processes');
 const { JobInspector } = require('./job-inspect');
 const { callCore } = require('./core-api');
+const { limitNotice, replyLimitNotice, limitScript } = require('./limit-detect');
+// A reply overdue this long with nothing being written: look for a usage-limit
+// notice on the page (limit-detect.js).
+const LIMIT_CHECK_AFTER_MS = 30000;
+// While a job is paused for the user (a check, a sign-in), ask the core this
+// often whether another agent should take it over (bridge/job_transfer.py).
+const HANDOVER_CHECK_MS = 60000;
 
 const CHATGPT_HOME = 'https://chatgpt.com/';
 // One tool result per message. ChatGPT never answered messages of 120-132k
@@ -1230,6 +1237,31 @@ class ChatGPTWebProvider {
     try { this.writeJobMeta(job.dir, { usage: { ...job.usage } }); } catch {}
   }
 
+  // Looks once for a usage-limit notice on the page (limit-detect.js) and
+  // remembers it on the job. Returns the notice or ''. Never throws.
+  async checkLimit(job) {
+    if (job.limitNotice) return job.limitNotice;
+    const view = this.view;
+    if (this.limitCheckRunning || !view?.webContents || view.webContents.isDestroyed?.()) return '';
+    this.limitCheckRunning = true;
+    try {
+      const text = await this.pageCall(() => view.webContents.executeJavaScript(limitScript(), true), 'limit check');
+      const notice = limitNotice(text);
+      if (notice) job.limitNotice = notice;
+      return notice;
+    } catch {
+      return '';
+    } finally {
+      this.limitCheckRunning = false;
+    }
+  }
+
+  // The job ends with reason usage_or_rate_limit: the core cools this account
+  // down and hands the job to another agent (bridge/job_transfer.py).
+  limitError(job) {
+    return teamyraError(`${this.site.name} usage limit: ${job.limitNotice}`, 'TEAMYRA_LIMIT', 'usage_or_rate_limit');
+  }
+
   // Pauses the job as needs_user until the ChatGPT verification is gone. The
   // job keeps its conversation; it fails only on cancel or deadline.
   // Pauses the job as needs_user until the user acted (verification passed,
@@ -1248,9 +1280,24 @@ class ChatGPTWebProvider {
     this.notifyUser(action.title, action.message);
     this.awaitingUser = true;
     await this.setInteractionLocked(false).catch(() => {});
+    let nextHandoverCheck = Date.now() + (this.handoverCheckMs ?? HANDOVER_CHECK_MS);
     try {
       for (;;) {
         this.checkJobActive(job);
+        // Nobody did the check in time and another agent is ready: end here,
+        // and the core continues the job there with everything done so far.
+        // Not while the user has this chat open (they may be solving it).
+        if (Date.now() >= nextHandoverCheck) {
+          nextHandoverCheck = Date.now() + (this.handoverCheckMs ?? HANDOVER_CHECK_MS);
+          if (!this.visible) {
+            const check = await callCore('transfer.check', { job_id: path.basename(job.dir) }).catch(() => null);
+            if (check?.handover) {
+              const to = (check.to || []).slice(0, 1).join('');
+              throw teamyraError(`${action.paused}; nobody completed it, so the task moves to another agent` +
+                (to ? ` (${to})` : ''), 'TEAMYRA_HANDOVER', 'needs_user_timeout');
+            }
+          }
+        }
         let probe = null;
         try { probe = await this.automation.probe(); } catch (error) {
           if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') throw error;
@@ -1301,6 +1348,8 @@ class ChatGPTWebProvider {
           await sleep(this.sendRetryMs ?? 5000);
           continue;
         }
+        // A site at its limit can block the message box or the Send button.
+        if (!kind && await this.checkLimit(job)) throw this.limitError(job);
         if (!kind) throw error;
         await this.waitForChallengeResolution(job, kind);
       }
@@ -1430,13 +1479,15 @@ class ChatGPTWebProvider {
           previousText: snap.text,
           previousMessageId: snap.messageId,
           deadline: job.deadline,
-          shouldCancel: job.isCancelled,
+          // A usage-limit notice ends the wait too (handled in the catch below).
+          shouldCancel: () => job.isCancelled() || Boolean(job.limitNotice),
           detectChallenge: true,
           noProgressMs: this.noProgressMs ?? 300000,
           shouldRecover: () => Boolean(this.pageUnresponsiveSince),
           pollMs: this.replyPollMs,
           progressIntervalMs: this.progressIntervalMs ?? PROGRESS_INTERVAL_MS,
           onProgress: ({ elapsedMs, generating }) => {
+            if (!generating && elapsedMs >= (this.limitCheckAfterMs ?? LIMIT_CHECK_AFTER_MS)) this.checkLimit(job);
             const seconds = Math.round(elapsedMs / 1000);
             this.writeJobMeta(job.dir, {
               last_event: generating ? `${this.site.id} generating ${seconds} s` : `waiting for ${this.site.id} reply ${seconds} s`
@@ -1447,6 +1498,12 @@ class ChatGPTWebProvider {
         this.recordJobUsage(job);
         const conversation = await this.getCurrentConversation().catch(() => null);
         this.rememberConversation(job, conversation);
+        // The "reply" is the site's limit message, not an answer.
+        const limitReply = replyLimitNotice(reply.text);
+        if (limitReply) {
+          job.limitNotice = limitReply;
+          throw this.limitError(job);
+        }
         // A reply arrived: the page works again, so a later hang gets a fresh
         // set of recoveries.
         job.consecutiveRecoveries = 0;
@@ -1454,6 +1511,10 @@ class ChatGPTWebProvider {
         return reply;
       } catch (caught) {
         let error = caught;
+        if (error?.code === 'TEAMYRA_LIMIT') throw error;
+        if (job.limitNotice && !job.isCancelled()) throw this.limitError(job);
+        // A page that stopped answering may be showing a usage limit.
+        if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE' && await this.checkLimit(job)) throw this.limitError(job);
         if (error?.code === 'TEAMYRA_PAGE_UNRESPONSIVE') {
           try {
             const delivered = await this.recoverJobPage(job, () => snap ? this.lastMessageDelivered(job, text) : false);

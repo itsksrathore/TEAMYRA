@@ -722,6 +722,74 @@ async function testIdleWorkerNudgesTheQueue() {
   fs.writeFileSync(path.join(queued, 'DONE'), 'cancelled');
 }
 
+// Hand-overs (bridge/job_transfer.py): the job ends with a reason the core
+// moves to another agent.
+async function testLimitReplyEndsTheJobAsUsageLimit() {
+  const fake = new FakeChat(["You've hit your limit. Please try again later."]);
+  const provider = makeProvider(fake);
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'usage_or_rate_limit');
+  assert.ok(!fs.existsSync(path.join(dir, 'final.txt')), 'a limit message is not a final answer');
+}
+
+async function testLimitNoticeWhileTheReplyIsOverdue() {
+  // The site writes nothing (no new reply at all) and shows a limit banner.
+  class SilentChat extends FakeChat {
+    async sendTask(text) { this.sent.push(text); this.users.push(text); return { ok: true }; }
+  }
+  const fake = new SilentChat([]);
+  const provider = makeProvider(fake);
+  provider.limitCheckAfterMs = 0;
+  provider.view = { webContents: {
+    isDestroyed: () => false,
+    executeJavaScript: async () => "You've reached your message limit. Your limit resets at 5:00 PM."
+  } };
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'usage_or_rate_limit');
+  assert.match(meta.last_event, /usage limit: You've reached your message limit/);
+}
+
+async function testUnsolvedCheckHandsTheJobOver() {
+  const fake = new FakeChat([{ text: 'never shown', challenge: { snaps: 1, probes: 100000 } }]);
+  const provider = makeProvider(fake);
+  provider.handoverCheckMs = 1;
+  provider.visible = false;
+  const restore = dispatchResult;
+  dispatchResult = () => Promise.resolve({ possible: true, handover: true, to: ['Muse'] });
+  try {
+    const dir = makeJob();
+    await ChatGPTWebProvider.prototype.runDelegatedJob.call(provider, dir);
+    const meta = readMeta(dir);
+    assert.equal(meta.state, 'failed');
+    assert.equal(meta.reason, 'needs_user_timeout');
+    assert.equal(meta.attention, null);
+    assert.ok(dispatchCalls.includes('transfer.check'));
+    assert.equal(dispatchCalls.at(-1), 'scheduler.dispatch', 'the core moves it right after');
+  } finally {
+    dispatchResult = restore;
+  }
+  // Not while the user has the chat open, and not when nobody can take it.
+  for (const [visible, answer] of [[true, { handover: true }], [false, { handover: false }]]) {
+    const again = makeProvider(new FakeChat([{ text: 'Done after the check.', challenge: { snaps: 1, probes: 30 } }]));
+    again.handoverCheckMs = 1;
+    again.visible = visible;
+    dispatchResult = () => Promise.resolve(answer);
+    try {
+      const dir = makeJob();
+      await ChatGPTWebProvider.prototype.runDelegatedJob.call(again, dir);
+      assert.equal(readMeta(dir).state, 'done');
+    } finally {
+      dispatchResult = restore;
+    }
+  }
+}
+
 async function main() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chatgpt-loop-'));
   try {
@@ -749,6 +817,9 @@ async function main() {
     await testWaitingJobPastDeadlineFailsWithReason();
     await testNotReadyWorkerIsReloaded();
     await testIdleWorkerNudgesTheQueue();
+    await testLimitReplyEndsTheJobAsUsageLimit();
+    await testLimitNoticeWhileTheReplyIsOverdue();
+    await testUnsolvedCheckHandsTheJobOver();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
     console.log('chatgpt job loop tests passed');
   } finally {

@@ -482,6 +482,13 @@ function listJobs(limit = 30) {
           provider: data.provider || '',
           profileId: data.profile_id || '',
           attention: data.attention || null,
+          // Hand-overs (bridge/job_transfer.py): where this task went, or
+          // which agent's task it continues.
+          movedTo: data.failover_job_id || '',
+          movedToLabel: data.failover_worker_label || data.failover_worker || '',
+          movingSince: data.transfer_waiting_since || 0,
+          continuesFrom: data.transferred_from || '',
+          continuesFromLabel: data.transferred_from_label || '',
           done: fs.existsSync(path.join(JOBS, entry.name, 'DONE'))
         };
       } catch {

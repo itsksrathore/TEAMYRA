@@ -21,6 +21,7 @@ import handoff_store
 import mcp_pool
 import recovery
 import scheduler
+import job_transfer
 import media_engine
 import media_support
 import codex_images
@@ -327,6 +328,15 @@ def chatgpt_desktop_watch(root, wake=None, desktop_ready=None):
     return {"pending": len(alive), "woke": woke, "expired": expired}
 
 
+def scheduler_tick(root):
+    """Every scheduler pass: keep the desktop up for web jobs, and hand
+    stopped web-chat jobs over to another agent (job_transfer)."""
+    try:
+        chatgpt_desktop_watch(root)
+    finally:
+        job_transfer.sweep(root, start_job)
+
+
 def start_background_services(scheduler_interval=5.0, auth_interval=AUTH_REFRESH_SECONDS):
     """Start the queue dispatcher and the readiness refresher once per process."""
     if _BACKGROUND_STARTED.is_set():
@@ -334,7 +344,7 @@ def start_background_services(scheduler_interval=5.0, auth_interval=AUTH_REFRESH
     _BACKGROUND_STARTED.set()
     scheduler.start_background_dispatcher(
         jobs_root(), BRIDGE, PYTHON, spawn=scheduler_spawn, is_ready=scheduler_worker_ready,
-        interval=scheduler_interval, on_tick=chatgpt_desktop_watch,
+        interval=scheduler_interval, on_tick=scheduler_tick,
     )
 
     def auth_loop():
@@ -422,6 +432,10 @@ def chain_is_complete(job_id):
     if not is_done(terminal["id"]):
         return False
     if root.get("auto_failover_enabled") and not root.get("failover_complete"):
+        return False
+    # A web-chat job that stopped on a limit, a check or an error is handed
+    # over to another agent (job_transfer); the chain is not over yet.
+    if job_transfer.transfer_expected(terminal):
         return False
     return True
 
@@ -628,7 +642,8 @@ def wake_chatgpt_worker(worker_info, heartbeat_wait=20.0):
 def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=True,
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
-              queue=False, pin=False, pool=False, expect_files=None, worker_order=None, teamyra_mcp=False):
+              queue=False, pin=False, pool=False, expect_files=None, worker_order=None, teamyra_mcp=False,
+              transfer=None):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
@@ -699,6 +714,8 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             "auto_failover_enabled": bool(auto_failover), "max_failovers": max_failovers,
             "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
             "worker_order": list(worker_order or []), "teamyra_mcp": bool(teamyra_mcp)}
+    if transfer is False:
+        meta["transfer"] = False  # never hand this job over to another agent (job_transfer)
     (jdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (jdir / "task.txt").write_text(full_task, encoding="utf-8")
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
@@ -1690,6 +1707,7 @@ TOOLS = [
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
          "write": {"type": "boolean", "default": True},
          "pin": {"type": "boolean", "default": False, "description": "Keep the job on its assigned worker."},
+         "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is."},
          "pool": {"type": "boolean", "default": False, "description": "Allow idle workers of the same provider to take this queued job."},
          "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
          "auto_failover": {"type": "boolean", "description": "Automatically reassign eligible provider/worker failures. Defaults on when worker=auto."},
@@ -1779,6 +1797,7 @@ TOOLS = [
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
                      "write": {"type": "boolean", "default": True},
                      "pin": {"type": "boolean", "default": False},
+                     "transfer": {"type": "boolean", "default": True, "description": "Web-chat jobs (ChatGPT, Muse, DeepSeek, GLM, Qwen, Grok): if the site hits a usage limit, a human check nobody completes, or the chat breaks, TEAMYRA continues the job on another account or model with the task, every step done so far and the folder state; job_wait/job_result on this job id follow it. false keeps the job where it is."},
                      "pool": {"type": "boolean", "default": False},
                      "expect_files": {"type": "array", "items": {"type": "string"}, "description": "Required non-empty output files, relative to project_path."},
                      "auto_failover": {"type": "boolean", "description": "Defaults on when worker=auto."},
@@ -2142,6 +2161,7 @@ def tool_call(name, a):
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
+            transfer=a.get("transfer"),
         )
         result = {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
         hint = media_guide.image_task_hint(a["task"], worker)
@@ -2296,6 +2316,7 @@ def tool_call(name, a):
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
+            transfer=a.get("transfer"),
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
         res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}
