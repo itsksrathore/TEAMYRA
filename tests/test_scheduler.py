@@ -132,6 +132,16 @@ class AccountRotationTests(unittest.TestCase):
             encoding="utf-8")
         self.assertFalse(scheduler.chatgpt_ready(root, {"provider": "deepseek-web", "profile_id": "d2"}))
 
+    def test_a_job_for_a_named_account_stays_there(self):
+        # ISS-20261107-183145: worker=ChatGPT Normal 3 ran on ChatGPT Normal.
+        self.status()
+        write_job(self.root, "old", worker="chatgpt-acc2", provider="chatgpt-web", state="done", done=True,
+                  dispatched_at=time.time() - 120)
+        write_job(self.root, "named", worker="chatgpt-acc2", provider="chatgpt-web", state="queued",
+                  created=2000, queued_at=2000, queue_order=2000, profile_id="acc2")
+        scheduler.dispatch_once(self.root, spawn=Spawned())
+        self.assertEqual(read_meta(self.root, "named")["worker"], "chatgpt-acc2")
+
     def test_pinned_jobs_are_not_rotated(self):
         # ISS-20261107-162044: pin=true on ChatGPT Normal 3 was rotated away.
         self.status()

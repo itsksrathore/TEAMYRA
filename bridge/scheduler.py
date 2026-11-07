@@ -539,8 +539,12 @@ def rotate_web_queues(root, metas, registry, now=None):
     planned = {}  # worker -> jobs given to it in this pass
     # pin=true (and account_fixed) keep a job on the account it names
     # (ISS-20261107-162044: a pinned ChatGPT Normal 3 job was rotated away).
+    # Only jobs sent to a site's default account ("... Normal") are spread:
+    # a job addressed to a named account (ChatGPT Normal 3, DeepSeek 3) stays
+    # there (ISS-20261107-183145: explicit workers ran on other accounts).
     queued = sorted((m for m in metas if is_queued(m) and m.get("provider") in by_provider
-                     and not m.get("account_fixed") and not m.get("pin")), key=queue_key)
+                     and not m.get("account_fixed") and not m.get("pin")
+                     and str(m.get("profile_id") or "web") == "web"), key=queue_key)
     for meta in queued:
         accounts = [a for a in by_provider[meta["provider"]] if _account_usable(root, a, metas)]
         allowed = set(meta.get("worker_order") or [])
