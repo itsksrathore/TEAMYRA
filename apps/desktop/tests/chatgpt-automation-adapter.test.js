@@ -287,3 +287,15 @@ async function domTests() {
   assert.equal(lastUser, 'TEAMYRA_TOOL_RESULT {"tool":"x"}');
 }
 replyTests().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Qwen, 2026-11-07: a tool request in the model's own <tool_call> format was
+// taken as the final answer. It is a request when it names a TEAMYRA tool.
+{
+  const parse = text => new ChatGPTAutomationAdapter(null).parseToolRequestDetailed(text);
+  const native = parse('<tool_call>\n{"tool": "filesystem.write", "args": {"path": "D:/x/ops.py", "content": "a = 1\n"}}\n</tool_call>');
+  assert.deepEqual(native.request, { tool: 'filesystem.write', args: { path: 'D:/x/ops.py', content: 'a = 1\n' } });
+  const named = parse('<tool_call>{"name": "terminal.run", "arguments": {"argv": ["python", "-V"]}}</tool_call>');
+  assert.deepEqual(named.request, { tool: 'terminal.run', args: { argv: ['python', '-V'] } });
+  const other = parse('Models emit <tool_call>{"name": "get_weather", "arguments": {}}</tool_call> in their template. Done.');
+  assert.equal(other.marker, false, 'a reply that only mentions the tag is not a request');
+}

@@ -268,11 +268,34 @@ const RAW_REPLY_JS = [
   '})()'
 ].join('\n');
 
+// Some models write a tool request in their own chat-template format instead
+// of the TEAMYRA line: Qwen answered '<tool_call>\n{"tool": "filesystem.write",
+// "args": {...}}' and TEAMYRA took it as the final answer (2026-11-07). It is
+// accepted as a request when it names a TEAMYRA tool; {"name", "arguments"}
+// is read as {"tool", "args"}.
+const NATIVE_TOOL_CALL = '<tool_call>';
+const TEAMYRA_TOOL_NAME = /^(?:filesystem|terminal|git|process|page|screen|code)\.[a-z_]+$/;
+
+function fromNativeCall(data) {
+  if (!data || typeof data !== 'object') return data;
+  const tool = typeof data.tool === 'string' ? data.tool : data.name;
+  const args = data.args !== undefined ? data.args : data.arguments;
+  if (typeof tool !== 'string' || !TEAMYRA_TOOL_NAME.test(tool.trim())) return null;
+  return { tool, args: typeof args === 'string' ? (() => { try { return JSON.parse(args); } catch { return args; } })() : args };
+}
+
 function parseToolRequestDetailed(text) {
   const value = String(text || '');
-  const markerAt = value.indexOf(TOOL_REQUEST_MARKER);
+  let markerAt = value.indexOf(TOOL_REQUEST_MARKER);
+  let markerLength = TOOL_REQUEST_MARKER.length;
+  let native = false;
+  if (markerAt < 0) {
+    markerAt = value.indexOf(NATIVE_TOOL_CALL);
+    markerLength = NATIVE_TOOL_CALL.length;
+    native = markerAt >= 0;
+  }
   if (markerAt < 0) return { marker: false, request: null, error: null };
-  const afterMarker = markerAt + TOOL_REQUEST_MARKER.length;
+  const afterMarker = markerAt + markerLength;
   const start = value.indexOf('{', afterMarker);
   // Only whitespace, a colon or a ``` / ```json fence may sit between the marker and the JSON.
   if (start < 0 || !/^[\s:`]*(json)?[\s`]*$/i.test(value.slice(afterMarker, start))) {
@@ -292,6 +315,13 @@ function parseToolRequestDetailed(text) {
       try { data = JSON.parse(source); } catch (error) {
         lastError = 'invalid JSON: ' + String(error?.message || error);
         continue;
+      }
+      if (native) {
+        data = fromNativeCall(data);
+        if (!data) {
+          // Not one of TEAMYRA's tools: an ordinary reply that shows the tag.
+          return { marker: false, request: null, error: null };
+        }
       }
       if (!validToolRequest(data)) {
         lastError = 'the request must be {"tool": "<name>", "args": {...}}';
