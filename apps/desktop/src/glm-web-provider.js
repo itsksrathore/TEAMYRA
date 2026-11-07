@@ -20,12 +20,37 @@ const AVOID_MS = 30 * 60 * 1000;
 const CAPACITY_REPLY = /model is currently at capacity|switch to another model/i;
 const MODEL_TRIGGER = "document.querySelector('.modelSelectorButton, [aria-label=\"Select a model\"]')";
 
+// Z.ai's home page starts new chats in a "scene" (Web Site by default; also
+// Full-Stack, Writing, Data Insight, slides): its own builder agent then
+// answered with "Todos / Explored 1 files / Find File" instead of TEAMYRA
+// tool requests (2026-11-07). The scene shows as a chip in the message box;
+// clicking it exits the scene ("Click to exit the scene").
+const GLM_SCENES = /^(?:web ?site|full[- ]?stack|writing|data insight|ppt|slides|ai slides|deep research|design|poster|image|video)$/i;
+
 const glmSettingsJs = adapter => `(async () => {
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const sceneChip = () => {
+    const input = document.querySelector('#chat-input');
+    let box = input;
+    for (let i = 0; i < 6 && box && box.parentElement && !box.querySelector('#send-message-button'); i += 1) box = box.parentElement;
+    if (!box) return null;
+    return [...box.querySelectorAll('button, [role=button], span, div')].find(node => {
+      const text = (node.innerText || '').trim();
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && node.querySelector('svg') && ${GLM_SCENES}.test(text);
+    }) || null;
+  };
+  let scene = 'off';
+  for (let attempt = 0; attempt < 3 && sceneChip(); attempt += 1) {
+    const chip = sceneChip();
+    (chip.closest('button, [role=button]') || chip).click();
+    await sleep(400);
+  }
+  if (sceneChip()) scene = 'on';
   const avoid = ${JSON.stringify(adapter.avoidedModels())};
   const trigger = () => ${MODEL_TRIGGER};
   const opener = trigger();
-  if (!opener) return { model: 'missing' };
+  if (!opener) return { model: 'missing', scene };
   opener.click();
   await sleep(500);
   const pattern = /^GLM-(\\d+(?:\\.\\d+)?)(?:-([A-Za-z]+))?$/;
@@ -37,7 +62,7 @@ const glmSettingsJs = adapter => `(async () => {
   const item = items.find(node => node.innerText.trim() === name);
   if (item) { item.click(); await sleep(500); }
   const now = ((trigger() || {}).innerText || '').trim();
-  return { model: name && now === name ? 'on' : 'missing', modelName: name, choices: names.join(', ') };
+  return { model: name && now === name ? 'on' : 'missing', modelName: name, choices: names.join(', '), scene };
 })()`;
 
 class GlmAutomationAdapter extends ChatSiteAdapter {
