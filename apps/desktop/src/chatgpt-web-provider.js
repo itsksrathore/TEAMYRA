@@ -668,22 +668,24 @@ class ChatGPTWebProvider {
     this.visible = false;
     view.setVisible(false);
     const current = view.webContents.getURL();
-    if (this.loaded && current && current !== 'about:blank' && !view.webContents.isLoading()) {
+    // A page that has an address is shown at once, even while it still
+    // loads: Qwen and Z.ai keep "loading" in the background for a long time,
+    // and waiting for that (then hiding the view on timeout) meant Open never
+    // showed them (2026-11-07). The user must be able to see the page as it is.
+    if (current && current !== 'about:blank') {
       this.setVisible(true);
       return this.getStatus();
     }
     void (async () => {
       try {
-        if (!current || current === 'about:blank') {
-          await this.loadPage(view, this.site.home, 'navigation');
-        }
-        await this.pageCall(async () => {
-          while (view.webContents.isLoading()) await sleep(120);
-        }, 'navigation wait');
-        await this.refreshStatus().catch(() => {});
+        await this.loadPage(view, this.site.home, 'navigation');
+      } catch {}
+      // Give the first paint a few seconds, then show whatever is there.
+      const until = Date.now() + (this.openWaitMs ?? 8000);
+      while (view.webContents.isLoading() && Date.now() < until) await sleep(150);
+      if (!view.webContents.isDestroyed()) {
         this.setVisible(true);
-      } catch {
-        this.setVisible(false);
+        this.refreshStatus().catch(() => {});
       }
     })();
     return this.getStatus();

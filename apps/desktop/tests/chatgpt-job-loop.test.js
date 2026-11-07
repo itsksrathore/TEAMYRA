@@ -884,6 +884,20 @@ async function testDeliveredMessageWithoutReplyGetsANudge() {
   assert.match(events, /did not start a reply after the reload; asking it to answer \(1\/2\)/);
 }
 
+// Qwen / Z.ai, 2026-11-07: Open never showed a page that kept "loading".
+async function testOpenShowsAPageThatIsStillLoading() {
+  const provider = makeProvider(new FakeChat([]));
+  const shown = [];
+  provider.view = { setVisible: () => {}, webContents: {
+    isDestroyed: () => false, getURL: () => 'https://chat.qwen.ai/c/abc', isLoading: () => true
+  } };
+  provider.ensureView = () => provider.view;
+  provider.setVisible = visible => shown.push(visible);
+  provider.getStatus = async () => ({});
+  await ChatGPTWebProvider.prototype.open.call(provider);
+  assert.equal(shown.at(-1), true, 'the page is shown while it still loads');
+}
+
 async function main() {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'teamyra-chatgpt-loop-'));
   try {
@@ -916,6 +930,7 @@ async function main() {
     await testUnsolvedCheckHandsTheJobOver();
     await testSiteBlockEndsTheJobAsSiteBlocked();
     await testSiteErrorResendsAndAgentTraceGetsReminder();
+    await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();
     await testDeliveredMessageWithoutReplyGetsANudge();
     assert.ok(!fs.existsSync(path.resolve('undefined.tmp-' + process.pid)), 'status must be written under the test root');
