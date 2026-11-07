@@ -1870,6 +1870,14 @@ class ChatGPTWebProvider {
           reply = await this.jobExchange(job, again);
           continue;
         }
+        // The site kept failing after the retries (Z.ai answered its own chat
+        // requests with "405 Method Not Allowed" pages for every account and
+        // even for guests, 2026-11-07). That text is not an answer: end the job
+        // as site_down so the core hands it to another site.
+        if (siteError) {
+          throw teamyraError(`${this.site.name} is not answering (site error): ${String(reply.text).slice(0, 160)}`,
+            'TEAMYRA_SITE_DOWN', 'site_down');
+        }
         let parsed = this.automation.parseToolRequestDetailed(reply.text);
         if (parsed.marker && typeof this.automation.rawReplyText === 'function') {
           // Parse the reply as written, not as rendered on the page.

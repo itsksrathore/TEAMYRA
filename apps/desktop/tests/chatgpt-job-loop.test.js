@@ -773,6 +773,21 @@ async function testSiteErrorResendsAndAgentTraceGetsReminder() {
   assert.equal(fs.readFileSync(path.join(dir, 'final.txt'), 'utf8'), 'Finished: all done.');
 }
 
+// Z.ai, 2026-11-07: every chat request failed (405 error pages); after the
+// retries the error text was taken as the final answer.
+async function testSiteThatKeepsFailingEndsAsSiteDown() {
+  const error = 'SyntaxError: Unexpected token \'<\', "<!doctypeh"... is not valid JSON';
+  const fake = new FakeChat([error, error, error, error, 'never reached']);
+  const provider = makeProvider(fake);
+  provider.transientRetryMs = 1;
+  const dir = makeJob();
+  await provider.runDelegatedJob(dir);
+  const meta = readMeta(dir);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.reason, 'site_down');
+  assert.ok(!fs.existsSync(path.join(dir, 'final.txt')), 'the error text is not a final answer');
+}
+
 // ChatGPT, 2026-11-07: "Our systems have detected unusual activity coming
 // from your system" in the chat, and no reply.
 async function testSiteBlockEndsTheJobAsSiteBlocked() {
@@ -982,6 +997,7 @@ async function main() {
     await testUnsolvedCheckHandsTheJobOver();
     await testSiteBlockEndsTheJobAsSiteBlocked();
     await testSiteErrorResendsAndAgentTraceGetsReminder();
+    await testSiteThatKeepsFailingEndsAsSiteDown();
     await testOpenShowsAPageThatIsStillLoading();
     await testLateLoadAndUnresponsiveMarkClear();
     await testDeliveredMessageWithoutReplyGetsANudge();

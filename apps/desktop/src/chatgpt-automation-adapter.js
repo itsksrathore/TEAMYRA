@@ -335,8 +335,22 @@ class ChatGPTAutomationAdapter {
   }
 
   async newChat() {
-    await this.pageCall(() => this.webContents.loadURL('https://chatgpt.com/'), 'navigation');
+    await this.navigate('https://chatgpt.com/');
     return { ok: true };
+  }
+
+  // loadURL rejects with ERR_ABORTED (-3) when the site redirects or routes
+  // itself while loading (chat.z.ai does). That is not a failure: let the page
+  // settle (up to 15 s) and go on. Other errors stand (2026-11-07: GLM's
+  // "New chat" and new jobs failed with ERR_ABORTED).
+  async navigate(url) {
+    try {
+      await this.pageCall(() => this.webContents.loadURL(url), 'navigation');
+    } catch (error) {
+      if (!/ERR_ABORTED|\(-3\)/.test(String(error?.message || error))) throw error;
+      const until = Date.now() + (this.abortSettleMs ?? 15000);
+      while (Date.now() < until && !this.webContents.isDestroyed?.() && this.webContents.isLoading()) await sleep(200);
+    }
   }
 
   async getCurrentConversation() {

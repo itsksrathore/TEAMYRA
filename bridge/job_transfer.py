@@ -45,6 +45,7 @@ BRIDGE = Path(__file__).resolve().parent
 TRANSFER_REASONS = {
     "usage_or_rate_limit",   # the site's usage limit
     "site_blocked",          # the site refuses this PC for now (ChatGPT "unusual activity")
+    "site_down",             # the site keeps failing its own requests (Z.ai 405 error pages)
     "needs_user_timeout",    # a human check / sign-in not done in time
     "account_unavailable",   # the account never became usable for a waiting job
     "page_unresponsive",     # the page stayed broken after reloads
@@ -57,6 +58,7 @@ ACCOUNT_REASONS = {"usage_or_rate_limit", "needs_user_timeout", "account_unavail
 REASON_TEXT = {
     "usage_or_rate_limit": "its site reported a usage limit",
     "site_blocked": "its site refused this PC for now (\"unusual activity\")",
+    "site_down": "its site was not answering (server errors)",
     "needs_user_timeout": "it was paused on a human check or sign-in that nobody completed",
     "account_unavailable": "its account was not usable (human check, sign-in or a broken page)",
     "page_unresponsive": "its chat page stopped responding",
@@ -159,7 +161,7 @@ def blocked_sites(metas, now=None):
     Every account of such a site is skipped: the block is for the PC, not one account."""
     now = time.time() if now is None else now
     return {m.get("provider") for m in metas
-            if m.get("reason") == "site_blocked" and now - float(m.get("ended") or 0) < SITE_BLOCK_SECONDS}
+            if m.get("reason") in ("site_blocked", "site_down") and now - float(m.get("ended") or 0) < SITE_BLOCK_SECONDS}
 
 
 def candidates(root, meta, config=None, metas=None, registry=None):

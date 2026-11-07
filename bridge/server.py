@@ -472,7 +472,7 @@ def cooldown_left(worker):
     except Exception:
         cleared = 0
     for m in all_jobs():
-        if m["worker"] == worker and m.get("reason") in ("usage_or_rate_limit", "site_blocked"):
+        if m["worker"] == worker and m.get("reason") in ("usage_or_rate_limit", "site_blocked", "site_down"):
             ended = m.get("ended") or 0
             if ended > cleared:
                 return max(0, int(ended + COOLDOWN_SECONDS - time.time()))

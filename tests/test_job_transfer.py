@@ -159,6 +159,16 @@ class TransferTests(unittest.TestCase):
         moved = job_transfer.move_unstarted(self.root, CONFIG)
         self.assertEqual([(m["job_id"], m["to"]) for m in moved], [("q1", "deepseek-normal")])
 
+    def test_site_down_moves_to_another_site(self):
+        add_profile(self.root, "glm-web", "acc2", "GLM 2")
+        write_status(self.root, "glm", {"web": ready(), "acc2": ready()})
+        write_status(self.root, "muse", {"web": ready()})
+        write_job(self.root, "j1", worker="glm-normal", provider="glm-web", reason="site_down")
+        start = FakeStart(self.root)
+        job_transfer.sweep(self.root, start, CONFIG)
+        self.assertEqual(start.calls[0]["worker"], "muse-normal")
+        self.assertIn("not answering", start.calls[0]["task"])
+
     def test_a_free_tab_beats_a_busy_account_of_the_same_site(self):
         add_profile(self.root, "chatgpt-web", "acc2", "ChatGPT Normal 2")
         write_status(self.root, "chatgpt", {"web": ready(), "acc2": ready(lanes=1)})

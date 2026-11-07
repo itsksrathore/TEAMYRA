@@ -90,7 +90,7 @@ class ChatSiteAdapter extends ChatGPTAutomationAdapter {
   }
 
   async newChat() {
-    await this.pageCall(() => this.webContents.loadURL(this.chatSite.newChatUrl || this.chatSite.home), 'navigation');
+    await this.navigate(this.chatSite.newChatUrl || this.chatSite.home);
     return { ok: true };
   }
 
