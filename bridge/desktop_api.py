@@ -462,6 +462,11 @@ def serve():
     # terminal.run with "surrogates not allowed" (ISS-20261107-170009).
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    try:  # OpenCode's free models as workers (profiles/opencode/<model>), once
+        import worker_registry
+        worker_registry.seed_opencode_profiles(ROOT)
+    except Exception as exc:
+        print("OpenCode profiles not seeded:", exc, file=sys.stderr, flush=True)
     out = sys.stdout
     # A stray print in an action must never corrupt the reply stream.
     sys.stdout = sys.stderr

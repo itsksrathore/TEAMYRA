@@ -231,6 +231,53 @@ class Job:
             if denied:
                 self.emit("error", f"permission denied: {json.dumps(denied)}")
 
+    # --- opencode run --format json -------------------------------------------------
+    # One JSON object per line: {"type", "sessionID", "part": {...}}. Types seen:
+    # step_start, text (part.text), tool_use (part.tool, part.state with
+    # status/input/output/title), step_finish (part.tokens, part.cost), error.
+    def opencode_event(self, ev):
+        kind = ev.get("type")
+        part = ev.get("part") or {}
+        sid = ev.get("sessionID") or part.get("sessionID")
+        if sid and sid != self.meta.get("session_id"):
+            self.save_meta(session_id=sid)
+            self.emit("info", f"opencode session {sid}")
+        if kind == "text":
+            text = part.get("text") or ""
+            if text.strip():
+                self.final_text = text
+                self.emit("message", clip(text, 4000))
+        elif kind in ("tool_use", "tool"):
+            state = part.get("state") or {}
+            name = part.get("tool") or state.get("title") or "tool"
+            args = state.get("input") or {}
+            what = args.get("command") if isinstance(args, dict) and args.get("command") else                 f"{name} {clip(json.dumps(args, ensure_ascii=False), 300) if args else ''}"
+            status = state.get("status")
+            if status in ("completed", "error") or "output" in state:
+                out = state.get("output") or state.get("error") or ""
+                self.emit("command", clip(str(what), 600))
+                self.emit("error" if status == "error" else "result", f"{name} {status or 'done'}",
+                          block=[clip(l, 300) for l in tail_lines(str(out), 12)] if out else None)
+            else:
+                self.emit("command", clip(str(what), 600))
+        elif kind == "step_finish":
+            tokens = part.get("tokens") or {}
+            usage = dict(self.meta.get("usage") or {})
+            for key in ("input", "output", "reasoning"):
+                if isinstance(tokens.get(key), (int, float)):
+                    usage[key + "_tokens"] = usage.get(key + "_tokens", 0) + tokens[key]
+            if isinstance(part.get("cost"), (int, float)):
+                usage["cost"] = usage.get("cost", 0) + part["cost"]
+            self.save_meta(usage=usage)
+        elif kind == "error":
+            error = ev.get("error") or part.get("error") or {}
+            message = (error.get("data") or {}).get("message") if isinstance(error, dict) else None
+            message = message or (error.get("message") if isinstance(error, dict) else None) or str(error or ev)
+            # A free model's rate limit can end the run with exit code 0.
+            limited = any(marker in str(message).lower() for marker in LIMIT_MARKERS)
+            self.save_meta(reported_error=True, limit_reported=limited or self.meta.get("limit_reported"))
+            self.emit("error", clip(str(message), 1000))
+
     # --- main -----------------------------------------------------------------------
     def run_once(self, cmd, env, deadline):
         """Runs one worker process to its end; returns (rc, stderr, timed_out, cancelled)."""
@@ -270,7 +317,8 @@ class Job:
         provider = self.spec.get("provider")
         if not provider:
             provider = "codex" if self.spec["worker"].startswith("codex") else "antigravity"
-        handlers = {"codex": self.codex_event, "claude": self.claude_event, "antigravity": self.agy_event}
+        handlers = {"codex": self.codex_event, "claude": self.claude_event, "antigravity": self.agy_event,
+                    "opencode": self.opencode_event}
         handler = handlers.get(provider)
         if handler is None:
             raise RuntimeError(f"unsupported worker provider: {provider}")
@@ -328,7 +376,7 @@ class Job:
             attempt_start = time.time()
             rc, err, timed_out, cancelled = self.run_once(cmd, env, deadline)
             low = (err + "\n" + "\n".join(self.raw_tail)).lower()
-            limit = rc != 0 and any(m in low for m in LIMIT_MARKERS)
+            limit = (rc != 0 or bool(self.meta.get("limit_reported"))) and any(m in low for m in LIMIT_MARKERS)
             # A worker that dies mid-run (exit != 0 with no limit, timeout or cancel) is resumed in the
             # same session, like an interrupted agent: its work so far is on disk and in the thread.
             sid, template = self.meta.get("session_id"), spec.get("resume_cmd")

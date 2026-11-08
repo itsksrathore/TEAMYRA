@@ -37,6 +37,17 @@ const PROVIDERS = [
     color: 'violet'
   },
   {
+    // OpenCode's free models: each model is one account (profiles/opencode/<model>),
+    // seeded by the core; "model" in its settings is what opencode run -m uses.
+    id: 'opencode',
+    name: 'OpenCode (free models)',
+    bin: 'opencode',
+    nativeHome: null,
+    status: { kind: 'command', argv: ['models'], timeout: 45000, successLabel: 'Free models available' },
+    managed: { verified: true, env: null, modelProfiles: true, noNative: true },
+    color: 'green'
+  },
+  {
     id: 'chatgpt-web',
     name: 'ChatGPT Normal',
     kind: 'web',
@@ -337,7 +348,7 @@ async function detectProviders() {
       : { signedIn: false, label: 'CLI not installed' };
 
     const profiles = [];
-    if (binary && status.signedIn) {
+    if (binary && status.signedIn && !provider.managed?.noNative) {
       profiles.push({
         id: 'native',
         name: 'Default',

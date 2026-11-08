@@ -44,6 +44,7 @@ const WORKER_META = {
   claude: { code: 'CL', icon: 'claude', cls: 'claude', label: 'Claude' },
   codex: { code: 'CX', icon: 'openai', cls: 'codex', label: 'Codex' },
   antigravity: { code: 'AG', icon: 'antigravity', cls: 'antigravity', label: 'Antigravity' },
+  opencode: { code: 'OC', icon: '', cls: 'codex', label: 'OpenCode' },
   chatgpt: { code: 'GPT', icon: 'openai', cls: 'chatgpt', label: 'ChatGPT' },
   muse: { code: 'MU', icon: '', cls: 'antigravity', label: 'Muse' },
   deepseek: { code: 'DS', icon: '', cls: 'codex', label: 'DeepSeek' },
@@ -92,6 +93,7 @@ function workerIdForProfile(providerId, profileId) {
     return 'codex-' + safeSlug(profileId);
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
+  if (providerId === 'opencode') return 'opencode-' + safeSlug(profileId);
   const site = WEB_CHAT_SITES[providerId];
   if (site) return profileId === 'web' ? site.builtin : site.workerPrefix + safeSlug(profileId);
   return '';
@@ -108,6 +110,7 @@ function workerMeta(worker) {
   if (value.includes('claude')) return WORKER_META.claude;
   if (value.includes('codex')) return WORKER_META.codex;
   if (value.includes('antigravity') || value.includes('agy')) return WORKER_META.antigravity;
+  if (value.startsWith('opencode')) return WORKER_META.opencode;
   return WORKER_META.other;
 }
 

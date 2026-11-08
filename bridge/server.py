@@ -9,7 +9,8 @@ import json, os, subprocess, sys, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from worker_registry import build_worker_registry
-from runtime_paths import codex_launch, agy_launch, claude_launch
+import worker_registry as worker_registry_module
+from runtime_paths import codex_launch, agy_launch, claude_launch, opencode_launch
 import task_graph
 import test_policy
 import review_cycle
@@ -60,9 +61,9 @@ AUTH_CACHE_SECONDS = 20
 # A CLI worker that answered "ready" stays ready for this long when later probes
 # only time out, so one slow probe (agy models often takes >8 s) cannot flip it.
 AUTH_LAST_GOOD_SECONDS = 600
-AUTH_PROBE_TIMEOUTS = {"codex": 8, "claude": 8, "antigravity": 30}
+AUTH_PROBE_TIMEOUTS = {"codex": 8, "claude": 8, "antigravity": 30, "opencode": 45}
 AUTH_REFRESH_SECONDS = 60
-CLI_PROVIDERS = {"codex", "claude", "antigravity"}
+CLI_PROVIDERS = {"codex", "claude", "antigravity", "opencode"}
 _AUTH_LOCK = threading.Lock()
 _AUTH_INFLIGHT = set()
 _BACKGROUND_STARTED = threading.Event()
@@ -153,6 +154,13 @@ def _probe_worker_auth(info, now):
             rc, out, err = run([*launch, "models"], timeout=timeout)
             detail = (out + err).strip()
             ready = rc == 0 and bool(out.strip())
+        elif provider == "opencode":
+            model = (info.get("settings") or {}).get("model") or ""
+            models = opencode_models(timeout)
+            ready = bool(model) and model in models
+            detail = (f"{model} available (free)" if ready else
+                      f"{model or 'no model set'} is not offered by OpenCode right now"
+                      if models else "OpenCode CLI not found or `opencode models` failed")
         elif provider in scheduler.DESKTOP_PROVIDERS:
             site = scheduler.site_name(provider)
             status_file = ROOT / scheduler.WEB_STATUS_DIRS[provider] / "status.json"
@@ -563,6 +571,48 @@ def claude_cmd(task, cwd, write, session_id=None, settings=None):
     return cmd
 
 
+_OPENCODE_MODELS = {"at": 0.0, "models": set()}
+_OPENCODE_LOCK = threading.Lock()
+
+
+def opencode_models(timeout=45):
+    """The models `opencode models` lists, cached for 2 minutes: every
+    OpenCode worker's readiness probe shares one call."""
+    with _OPENCODE_LOCK:
+        if time.time() - _OPENCODE_MODELS["at"] < 120 and _OPENCODE_MODELS["models"]:
+            return set(_OPENCODE_MODELS["models"])
+        launch = opencode_launch()
+        models = set()
+        if launch:
+            try:
+                rc, out, _err = run([*launch, "models"], timeout=timeout)
+                if rc == 0:
+                    models = {line.strip() for line in out.splitlines() if "/" in line.strip()}
+            except Exception:
+                models = set()
+        _OPENCODE_MODELS.update(at=time.time(), models=models)
+        return set(models)
+
+
+def opencode_cmd(task, cwd, write, session_id=None, settings=None):
+    """opencode run, one model per worker. Write jobs auto-approve OpenCode's
+    own permission asks (TEAMYRA jobs run unattended); read-only jobs use
+    OpenCode's plan agent, which does not edit files."""
+    settings = settings or {}
+    launch = opencode_launch()
+    if not launch:
+        raise RuntimeError("OpenCode CLI not found. Install opencode-ai (npm) or set TEAMYRA_OPENCODE.")
+    model = settings.get("model") or config().get("opencode", {}).get("model") or "opencode/glm-5.3-flash-free"
+    cmd = [*launch, "run", "--model", model, "--format", "json", "--dir", str(cwd)]
+    cmd += ["--auto"] if write else ["--agent", "plan"]
+    if settings.get("effort"):
+        cmd += ["--variant", str(settings["effort"])]
+    if session_id:
+        cmd += ["--session", session_id]
+    cmd.append(task)
+    return cmd
+
+
 def agy_cmd(task, cwd, write, timeout, session_id=None):
     a = config().get("antigravity", {})
     launch = agy_launch()
@@ -744,6 +794,9 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     elif provider == "antigravity":
         cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
         resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
+    elif provider == "opencode":
+        cmd, env = opencode_cmd(task, cwd, write, session_id, settings), {}
+        resume_cmd = opencode_cmd(RESUME_MESSAGE, cwd, write, "{SESSION}", settings)
     elif provider in scheduler.DESKTOP_PROVIDERS:
         cmd, env, resume_cmd = [], {}, []
     else:
@@ -1386,12 +1439,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "codex", "claude", "antigravity"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "codex", "claude", "antigravity", "opencode"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
     {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "codex", "claude", "antigravity", "google-media"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "codex", "claude", "antigravity", "opencode", "google-media"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},
@@ -2598,6 +2651,10 @@ def handle_and_send(msg):
 
 def main():
     sys.stdin.reconfigure(encoding="utf-8")
+    try:
+        worker_registry_module.seed_opencode_profiles(ROOT)
+    except Exception as e:
+        print("OpenCode profiles not seeded:", e, file=sys.stderr, flush=True)
     try:
         import dashboard
         dashboard.serve(int(config().get("dashboard_port", 8765)))

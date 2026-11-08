@@ -266,3 +266,27 @@ def share_codex_sandbox(home, primary=None):
             if backup is not None and not link.exists():
                 backup.rename(link)
     return shared
+
+
+def find_opencode(env=None, home=None):
+    """The OpenCode CLI binary. The npm package's opencode.cmd only forwards to
+    node_modules/opencode-ai/bin/opencode.exe; calling the .exe directly keeps
+    long task text intact (a .cmd re-parses its arguments)."""
+    env = env or os.environ
+    home = Path(home) if home else Path.home()
+    appdata = env.get("APPDATA")
+    return (
+        env.get("TEAMYRA_OPENCODE")
+        or first_existing([
+            Path(appdata) / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe" if appdata else None,
+            home / "AppData" / "Roaming" / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe",
+            home / ".opencode" / "bin" / "opencode.exe",
+            home / ".opencode" / "bin" / "opencode",
+        ])
+        or which("opencode", env)
+    )
+
+
+def opencode_launch(env=None, home=None):
+    binary = find_opencode(env, home)
+    return [binary] if binary else []

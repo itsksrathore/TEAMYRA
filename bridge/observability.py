@@ -562,6 +562,8 @@ def _provider_name(explicit, worker):
         return "claude"
     if worker_id.startswith("antigravity") or worker_id.startswith("agy"):
         return "antigravity"
+    if worker_id.startswith("opencode"):
+        return "opencode"
     return "unknown"
 
 

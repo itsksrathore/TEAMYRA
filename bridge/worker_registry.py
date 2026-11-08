@@ -45,6 +45,47 @@ def profile_label(path):
     return profile_metadata(path)["name"]
 
 
+# OpenCode's free models (opencode models, 2026-11-08). Each is one TEAMYRA
+# worker, an "account" under profiles/opencode/<slug> that can be enabled,
+# disabled or renamed like any other; its "model" is what opencode run -m uses.
+OPENCODE_DEFAULT_MODELS = (
+    # (model, label, enabled)
+    ("opencode/glm-5.3-flash-free", "OpenCode GLM 5.3 Flash", True),
+    ("opencode/deepseek-v4.1-flash-free", "OpenCode DeepSeek V4.1 Flash", True),
+    ("opencode/mimo-v2.6-flash-free", "OpenCode MiMo V2.6 Flash", True),
+    ("opencode/nemotron-3.5-super-vl-free", "OpenCode Nemotron 3.5 Super", True),
+    ("opencode/big-pickle", "OpenCode Big Pickle", True),
+    ("opencode/nemotron-3.5-lightning-free", "OpenCode Nemotron 3.5 Lightning", False),
+    ("opencode/flint-40b-free", "OpenCode Flint 40B", False),
+    ("opencode/beam-free", "OpenCode Beam", False),
+    ("opencode/crouton-alpha-free", "OpenCode Crouton Alpha", False),
+    ("opencode/iceman-free", "OpenCode Iceman", False),
+    ("opencode/inkling-2-small-free", "OpenCode Inkling 2 Small", False),
+)
+OPENCODE_PRIORITY = 600  # after the Codex, Claude and web-chat workers
+
+
+def opencode_slug(model):
+    return safe_worker_part(str(model).split("/", 1)[-1])
+
+
+def seed_opencode_profiles(root):
+    """Create profiles/opencode/<slug> for each default free model once (an
+    existing folder, and so the user's own settings, is never touched)."""
+    base = Path(root) / "profiles" / "opencode"
+    created = []
+    for model, label, enabled in OPENCODE_DEFAULT_MODELS:
+        folder = base / opencode_slug(model)
+        if folder.exists():
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "teamyra-profile.json").write_text(json.dumps({
+            "name": label, "provider": "opencode", "model": model, "enabled": enabled,
+            "priority": OPENCODE_PRIORITY}, indent=2), encoding="utf-8")
+        created.append(folder.name)
+    return created
+
+
 def build_worker_registry(root, home=None):
     root = Path(root)
     home = Path(home) if home else Path.home()
@@ -157,6 +198,26 @@ def build_worker_registry(root, home=None):
                 "enabled": meta["enabled"],
                 "priority": meta["priority"],
                 "settings": {k: meta[k] for k in ("model", "effort", "permission_mode") if meta[k] is not None},
+            }
+
+    opencode = profiles / "opencode"
+    if opencode.exists():
+        for path in sorted((p for p in opencode.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
+            worker_id = "opencode-" + safe_worker_part(path.name)
+            if worker_id in workers:
+                continue
+            meta = profile_metadata(path)
+            model = meta["model"] or ("opencode/" + path.name)
+            workers[worker_id] = {
+                "id": worker_id,
+                "provider": "opencode",
+                "label": meta["name"],
+                "profile_id": path.name,
+                "home": None,
+                "native": False,
+                "enabled": meta["enabled"],
+                "priority": meta["priority"],
+                "settings": {"model": model},
             }
 
     for provider, prefix in ((provider, site["prefix"]) for provider, site in WEB_SITES.items()):

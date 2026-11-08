@@ -423,6 +423,7 @@ function workerIdForProfile(providerId, profileId) {
     return 'codex-' + safeWorkerPart(profileId);
   }
   if (providerId === 'antigravity' && profileId === 'native') return 'antigravity';
+  if (providerId === 'opencode') return 'opencode-' + safeWorkerPart(profileId);
   const site = WEB_CHAT_SITES[providerId];
   if (site) return profileId === 'web' ? site.builtin : site.workerPrefix + safeWorkerPart(profileId);
   return '';
@@ -1414,7 +1415,8 @@ async function desktopCreateAccount(providerId, requestedName) {
   const mediaProfile = provider.kind === 'media' && provider.managed?.mediaProfiles === true;
   const mcpProfile = provider.kind === 'mcp' && provider.managed?.mcpProfiles === true;
   const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
-  if (!webProfile && !mediaProfile && !mcpProfile && !cliProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
+  const modelProfile = provider.managed?.modelProfiles === true;  // OpenCode: one account per model
+  if (!webProfile && !mediaProfile && !mcpProfile && !cliProfile && !modelProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
 
   const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
   const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
