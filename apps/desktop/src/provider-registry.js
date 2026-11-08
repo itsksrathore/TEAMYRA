@@ -364,6 +364,11 @@ async function detectProviders() {
       });
     }
     profiles.push(...managedProfiles(provider));
+    // OpenCode's model accounts have no login of their own: they work when the
+    // CLI is installed and lists its models (they showed "Sign in needed").
+    if (provider.managed?.modelProfiles) {
+      for (const profile of profiles) profile.signedIn = Boolean(binary && status.signedIn);
+    }
 
     return {
       id: provider.id,

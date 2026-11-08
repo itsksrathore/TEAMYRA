@@ -510,7 +510,7 @@ function agentCardHtml(provider) {
         <div class="profile-row">
           <div class="profile-name">
             <strong>${escapeHtml(profile.name || profile.id)}</strong>
-            <span>${provider.id === 'google-media' && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : isWebChat(provider.id) ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
+            <span>${(provider.id === 'google-media' || provider.id === 'opencode') && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : isWebChat(provider.id) ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
           </div>
           <div class="profile-actions">
             <button class="profile-action" type="button"

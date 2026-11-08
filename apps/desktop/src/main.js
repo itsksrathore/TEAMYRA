@@ -1307,10 +1307,17 @@ ipcMain.handle('teamyra:terminal-open', async (event, options = {}) => {
     launchCommand = launchLine(binary, args);
 
     const profileId = typeof options.profileId === 'string' ? options.profileId : 'native';
-    if (profileId === 'native' && provider.managed?.env) {
+    if (provider.managed?.modelProfiles && /^[A-Za-z0-9._-]+$/.test(profileId)) {
+      // OpenCode: "Open" starts an OpenCode chat with this account's model.
+      let model = '';
+      try {
+        model = String(JSON.parse(fs.readFileSync(path.join(profileRoot(provider.id), profileId, 'teamyra-profile.json'), 'utf8')).model || '');
+      } catch {}
+      launchCommand = launchLine(binary, /^[\w./:-]+$/.test(model) ? ['--model', model] : []);
+    } else if (profileId === 'native' && provider.managed?.env) {
       delete env[provider.managed.env];
     }
-    if (profileId !== 'native') {
+    if (profileId !== 'native' && !provider.managed?.modelProfiles) {
       let home = '';
       if (provider.id === 'codex' && profileId === 'codex2') {
         const legacy = path.join(PROFILES_ROOT, 'codex2');
