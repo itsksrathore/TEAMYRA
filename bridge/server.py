@@ -5,7 +5,7 @@ in its own process, so a bridge restart or an MCP timeout never stops a worker.
 Claude starts jobs, follows them (follow.py as a background task, or the dashboard),
 reads compact results, sends follow-up messages and cancels them.
 """
-import json, os, subprocess, sys, threading, time, uuid
+import json, os, re, subprocess, sys, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from worker_registry import build_worker_registry
@@ -613,7 +613,51 @@ def opencode_cmd(task, cwd, write, session_id=None, settings=None):
     return cmd
 
 
-def agy_cmd(task, cwd, write, timeout, session_id=None):
+ANTIGRAVITY_DEFAULT_MODEL = "gemini-4-argon-high"
+_AGY_MODELS = {"at": 0.0, "models": []}
+
+
+def antigravity_models(refresh=False, timeout=45):
+    """[{id, label}] from `agy models`, cached 5 minutes."""
+    with _OPENCODE_LOCK:
+        if not refresh and _AGY_MODELS["models"] and time.time() - _AGY_MODELS["at"] < 300:
+            return list(_AGY_MODELS["models"])
+        launch = agy_launch()
+        models = []
+        if launch:
+            rc, out, _err = run([*launch, "models"], timeout=timeout)
+            if rc == 0:
+                for line in out.splitlines():
+                    parts = line.strip().split("	", 1)
+                    if len(parts) == 2 and re.fullmatch(r"[a-z0-9][a-z0-9._-]+", parts[0]):
+                        models.append({"id": parts[0], "label": parts[1].strip()})
+        if models:
+            _AGY_MODELS.update(at=time.time(), models=models)
+        return models
+
+
+def antigravity_model_state(refresh=False):
+    current = config().get("antigravity", {}).get("model") or ANTIGRAVITY_DEFAULT_MODEL
+    return {"current": current, "models": antigravity_models(refresh)}
+
+
+def set_antigravity_model(model):
+    """Antigravity's default model for every new job (config.json)."""
+    model = str(model or "").strip()
+    known = [m["id"] for m in antigravity_models()]
+    if known and model not in known:
+        raise ValueError(f"unknown Antigravity model {model!r}; available: {', '.join(known)}")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]+", model):
+        raise ValueError("invalid model id")
+    data = config()
+    data.setdefault("antigravity", {})["model"] = model
+    tmp = CONFIG.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, CONFIG)
+    return antigravity_model_state()
+
+
+def agy_cmd(task, cwd, write, timeout, session_id=None, model=None):
     a = config().get("antigravity", {})
     launch = agy_launch()
     if not launch:
@@ -622,7 +666,7 @@ def agy_cmd(task, cwd, write, timeout, session_id=None):
     if session_id:
         cmd += ["--conversation", session_id]
     cmd += ["-p", task, "--output-format", "stream-json",
-            "--model", a.get("model", "gemini-3.1-pro-high"),
+            "--model", model or a.get("model") or ANTIGRAVITY_DEFAULT_MODEL,
             "--mode", a.get("mode", "accept-edits") if write else "plan",
             "--print-timeout", f"{int(timeout)}s", "--add-dir", str(cwd)]
     if a.get("sandbox", True):
@@ -741,7 +785,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
               queue=False, pin=False, pool=False, expect_files=None, worker_order=None, teamyra_mcp=False,
-              transfer=None, account_fixed=False):
+              transfer=None, account_fixed=False, model=None):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
@@ -765,6 +809,9 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     if not ready:
         raise ValueError(f"{worker} is not authenticated/ready: {clip(auth_detail, 300)}")
     settings = worker_settings(worker_info)
+    if model:
+        # A model for this job only (any provider whose CLI takes one).
+        settings = {**settings, "model": str(model).strip()}
     left = cooldown_left(worker)
     if left:
         raise ValueError(f"{worker} is cooling down after a usage limit ({left} s left); "
@@ -792,8 +839,8 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
             env["CLAUDE_CONFIG_DIR"] = str(worker_info["home"])
         resume_cmd = claude_cmd(RESUME_MESSAGE, cwd, write, "{SESSION}", settings)
     elif provider == "antigravity":
-        cmd, env = agy_cmd(task, cwd, write, timeout, session_id), {}
-        resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}")
+        cmd, env = agy_cmd(task, cwd, write, timeout, session_id, settings.get("model")), {}
+        resume_cmd = agy_cmd(RESUME_MESSAGE, cwd, write, timeout, "{SESSION}", settings.get("model"))
     elif provider == "opencode":
         cmd, env = opencode_cmd(task, cwd, write, session_id, settings), {}
         resume_cmd = opencode_cmd(RESUME_MESSAGE, cwd, write, "{SESSION}", settings)
@@ -808,6 +855,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     meta = {"id": job_id, "label": label or clip(task.splitlines()[0] if task else job_id, 80),
             "worker": worker, "provider": provider, "worker_label": worker_info.get("label"),
             "profile_id": worker_info.get("profile_id"), "state": "starting", "cwd": str(cwd), "write": write,
+            "model": settings.get("model"),
             "created": time.time(), "head_start": head, "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
             "parent": parent, "resumed_session": session_id, "timeout_s": timeout,
             "failover_root": root_id, "failover_attempt": int(failover_attempt),
@@ -1392,6 +1440,10 @@ def media_helper_state(ticket):
 
 
 # --- MCP tools -------------------------------------------------------------------------------
+MODEL_PROP = {"type": "string", "description": (
+    "Model for this job only, as the worker's CLI names it. Antigravity: an id from antigravity_models "
+    "(e.g. gemini-4-carbon-high, gemini-4-argon-high, claude-opus-5-5-high); Codex/Claude/OpenCode: their "
+    "own model names. Omit to use the worker's default.")}
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
 MEDIA_TYPE_ENUM = ["image", "video", "music", "background_music", "instrumental", "song", "sound_effect"]
@@ -1822,7 +1874,7 @@ TOOLS = [
         "providers share within their provider only with pool=true. expect_files requires non-empty output files. "
         "Not for drawing images: use codex_image_batch (Codex/gpt-image) or media_batch (Google Flow); see media_guide."),
      "inputSchema": {"type": "object", "properties": {
-         "worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
+         "worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"}, "model": MODEL_PROP,
          "label": {"type": "string", "description": "short name shown in lists and the dashboard"},
          "timeout_minutes": {"type": "integer", "default": 90, "minimum": 1, "maximum": 360},
          "write": {"type": "boolean", "default": True},
@@ -1901,6 +1953,16 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"}, "worker": {"type": "string"}, "provider": {"type": "string"}},
          "required": ["job_id"], "additionalProperties": False}},
+    {"name": "antigravity_models", "description": (
+        "Antigravity's models (from `agy models`: Gemini 4 Carbon/Argon, Gemini 3.8 Flash, Claude 5.5, GPT-OSS, "
+        "each in Low/Medium/High) and the current default. Use an id with antigravity_set_model, or as model= "
+        "in start_task for one job."),
+     "inputSchema": {"type": "object", "properties": {"refresh": {"type": "boolean", "default": False}},
+                     "additionalProperties": False}},
+    {"name": "antigravity_set_model", "description": (
+        "Set Antigravity's default model for every new job, e.g. gemini-4-carbon-high. Running jobs keep theirs."),
+     "inputSchema": {"type": "object", "properties": {"model": {"type": "string"}}, "required": ["model"],
+                     "additionalProperties": False}},
     {"name": "job_move_options", "description": "Where job_move could send a job now: ready accounts and models, best first.",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"],
                      "additionalProperties": False}},
@@ -1932,6 +1994,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"worker": {"type": "string"}}, "additionalProperties": False}},
     {"name": "run_ai_worker", "description": "Compatibility: start_task, then wait up to timeout_seconds. If the job is still running, returns its job_id instead of stopping it. Not for drawing images: use codex_image_batch or media_batch (see media_guide).",
      "inputSchema": {"type": "object", "properties": {"worker": W_ENUM, "project_path": {"type": "string"}, "task": {"type": "string"},
+                     "model": MODEL_PROP,
                      "timeout_seconds": {"type": "integer", "default": 1800, "minimum": 30, "maximum": 3000},
                      "write": {"type": "boolean", "default": True},
                      "pin": {"type": "boolean", "default": False},
@@ -1947,7 +2010,7 @@ TOOLS = [
     {"name": "run_ai_parallel", "description": "Start up to three independent tasks, each in a new git worktree and branch under D:/AI-Orchestrator/worktrees, and return their job_ids (non-blocking).",
      "inputSchema": {"type": "object", "properties": {"project_path": {"type": "string"},
                      "tasks": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "properties": {
-                         "task": {"type": "string"}, "worker": W_ENUM, "label": {"type": "string"}},
+                         "task": {"type": "string"}, "worker": W_ENUM, "label": {"type": "string"}, "model": MODEL_PROP},
                          "required": ["task"], "additionalProperties": False}},
                      "timeout_minutes": {"type": "integer", "default": 90}, "write": {"type": "boolean", "default": True},
                      "auto_failover": {"type": "boolean", "default": True},
@@ -2300,7 +2363,7 @@ def tool_call(name, a):
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
-            transfer=a.get("transfer"), account_fixed=a.get("account_fixed", False),
+            transfer=a.get("transfer"), account_fixed=a.get("account_fixed", False), model=a.get("model"),
         )
         result = {"job_id": job_id, "worker": worker, "auto_failover": auto_failover, **follow_info(job_id)}
         hint = media_guide.image_task_hint(a["task"], worker)
@@ -2432,6 +2495,10 @@ def tool_call(name, a):
                     "note": "the web-chat job was waiting for its account and never started"}
         return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
                 "note": "the active terminal worker stops within a few seconds"}
+    if name == "antigravity_models":
+        return antigravity_model_state(bool(a.get("refresh")))
+    if name == "antigravity_set_model":
+        return {"ok": True, **set_antigravity_model(a["model"])}
     if name == "job_move_options":
         terminal_id = failover_terminal_job_id(a["job_id"])
         return {"job_id": a["job_id"], "current_job_id": terminal_id,
@@ -2468,7 +2535,7 @@ def tool_call(name, a):
             auto_failover=auto_failover, max_failovers=a.get("max_failovers"),
             queue=a.get("queue", True),
             pin=a.get("pin", False), pool=a.get("pool", False), expect_files=a.get("expect_files"),
-            transfer=a.get("transfer"), account_fixed=a.get("account_fixed", False),
+            transfer=a.get("transfer"), account_fixed=a.get("account_fixed", False), model=a.get("model"),
         )
         waited = job_wait([job_id], "all", a.get("timeout_seconds", 1800))
         res = job_result(job_id) if not waited["timed_out"] else {**chain_summary(job_id), "still_running": True}
@@ -2483,6 +2550,7 @@ def tool_call(name, a):
             job_id, worker = start_job(
                 worker, t["task"], path, t.get("label"), a.get("timeout_minutes", 90), a.get("write", True),
                 auto_failover=a.get("auto_failover", True), max_failovers=a.get("max_failovers"),
+                model=t.get("model"),
             )
             patch_job_meta(job_id, worktree_id=wt["id"], worktree_branch=branch)
             started.append({"job_id": job_id, "worker": worker, "worktree_id": wt["id"],

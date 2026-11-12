@@ -119,6 +119,12 @@ def handle(action, payload):
             result = {**result, "transferred": moved}
         return result
 
+    if action == "antigravity.models":
+        import server
+        return server.antigravity_model_state(bool(payload.get("refresh")))
+    if action == "antigravity.set_model":
+        import server
+        return server.set_antigravity_model(payload.get("model"))
     if action == "transfer.check":
         # Asked by a web-chat tab before it gives up on a paused job: is there
         # another ready agent that could continue it?

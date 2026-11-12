@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('teamyra', {
   cancelMediaBatch: (batchId) => ipcRenderer.invoke('teamyra:media-batch-cancel', batchId),
   openMediaFolder: (projectPath) => ipcRenderer.invoke('teamyra:media-open-folder', projectPath),
   mcpConnections: () => ipcRenderer.invoke('teamyra:mcp-connections'),
+  antigravityModels: (refresh = false) => ipcRenderer.invoke('teamyra:agy-models', refresh === true),
+  setAntigravityModel: (model) => ipcRenderer.invoke('teamyra:agy-set-model', String(model || '')),
   connectMcp: (providerId) => ipcRenderer.invoke('teamyra:mcp-connect', providerId),
   jobs: () => ipcRenderer.invoke('teamyra:jobs'),
   transcript: (jobId, offset = 0) => ipcRenderer.invoke('teamyra:transcript', jobId, offset),

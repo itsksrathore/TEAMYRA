@@ -956,6 +956,12 @@ ipcMain.handle('teamyra:media-open-folder', async (_event, projectPath) => {
   if (error) throw new Error(error);
   return { ok: true, path: target };
 });
+// Antigravity's model picker in the Agents panel (config.json antigravity.model).
+ipcMain.handle('teamyra:agy-models', async (_event, refresh) =>
+  callCore('antigravity.models', { refresh: refresh === true }, { timeout: 60000 }));
+ipcMain.handle('teamyra:agy-set-model', async (_event, model) =>
+  callCore('antigravity.set_model', { model: String(model || '').slice(0, 80) }, { timeout: 60000 }));
+
 ipcMain.handle('teamyra:mcp-connections', async () => {
   const state = await getMcpConnections();
   if (state?.service?.running) mcpBootError = null;

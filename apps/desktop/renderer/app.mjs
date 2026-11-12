@@ -20,6 +20,9 @@ let googleMediaBoundsObserver = null;
 let activeChatgptProfileId = 'web';
 let jobsRefreshPromise = null;
 let agentsRefreshPromise = null;
+// Antigravity's models (agy models) and its default, for the card's picker.
+let agyModelState = null;
+let agyModelLoading = null;
 let jobsRenderSignature = '';
 let jobsPollTimer = null;
 
@@ -541,6 +544,7 @@ function agentCardHtml(provider) {
         <i class="agent-state ${connected ? 'ready' : ''}"></i>
       </div>
       <div class="profile-list">${rows}</div>
+      ${provider.id === 'antigravity' && provider.installed ? agyModelPickerHtml() : ''}
       <div class="agent-card-foot">
         ${mcpButtonHtml(provider)}
         ${provider.managedProfilesVerified && provider.installed
@@ -551,8 +555,33 @@ function agentCardHtml(provider) {
   `;
 }
 
+function agyModelPickerHtml() {
+  const state = agyModelState;
+  if (!state) {
+    loadAgyModels();
+    return '<div class="agy-model-row"><span>Model</span><span class="agy-model-note">loading models…</span></div>';
+  }
+  const models = state.models?.length ? state.models : [{ id: state.current, label: state.current }];
+  const options = models.map(model => `<option value="${escapeHtml(model.id)}" ${model.id === state.current ? 'selected' : ''}>${escapeHtml(model.label || model.id)}</option>`).join('');
+  return `<div class="agy-model-row" title="Default model for every new Antigravity job">
+      <span>Model</span>
+      <select data-agy-model>${options}</select>
+    </div>`;
+}
+
+function loadAgyModels(refresh = false) {
+  if (agyModelLoading) return agyModelLoading;
+  agyModelLoading = window.teamyra.antigravityModels(refresh)
+    .then(state => { if (state && state.current) agyModelState = state; })
+    .catch(() => {})
+    .finally(() => { agyModelLoading = null; refreshAgents().catch(() => {}); });
+  return agyModelLoading;
+}
+
 async function refreshAgents(force = false) {
   if (agentsRefreshPromise) return agentsRefreshPromise;
+  // Do not rebuild the cards while the model list is open: it would close it.
+  if (document.activeElement?.matches?.('[data-agy-model]')) return;
   agentsRefreshPromise = (async () => {
   const [providers, mcpConnections] = await Promise.all([
     window.teamyra.providers(force),
@@ -586,6 +615,22 @@ async function refreshAgents(force = false) {
   grid.querySelectorAll('[data-provider-card]').forEach(card => {
     const list = card.querySelector('.profile-list');
     if (list && listTops.get(card.dataset.providerCard)) list.scrollTop = listTops.get(card.dataset.providerCard);
+  });
+
+  $('#agentGrid').querySelectorAll('[data-agy-model]').forEach(select => {
+    select.addEventListener('change', async () => {
+      const model = select.value;
+      select.disabled = true;
+      try {
+        agyModelState = await window.teamyra.setAntigravityModel(model);
+      } catch (error) {
+        alert('Could not set the Antigravity model: ' + String(error?.message || error));
+      } finally {
+        select.disabled = false;
+        select.blur();
+        refreshAgents().catch(() => {});
+      }
+    });
   });
 
   $('#agentGrid').querySelectorAll('[data-provider][data-profile]').forEach(button => {
