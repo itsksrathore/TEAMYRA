@@ -29,7 +29,7 @@ The browser implementation is isolated from orchestration. Python core code neve
 - Partition: `persist:teamyra-chatgpt-profile`.
 - Cookies/session storage are owned by Chromium. TEAMYRA does not store ChatGPT usernames or passwords.
 - `nodeIntegration=false`, `contextIsolation=true`, and `sandbox=true`.
-- Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled.
+- Browser permission checks/requests are denied by default, and unsolicited web downloads are cancelled. Images ChatGPT generates reach the project only through `chatgpt.save_image` (see "Generated images" below), never as a browser download.
 - Normal ChatGPT browsing and authentication stay inside the sandboxed embedded `WebContentsView`; TEAMYRA does not open an external browser for ChatGPT sign-in.
 - The default account keeps the backward-compatible `persist:teamyra-chatgpt-profile` partition. Extra ChatGPT accounts use their own persistent partitions derived from a safe profile ID, so cookies/local storage and logins remain isolated.
 - The Agents shelf can create additional ChatGPT accounts. Each account owns an isolated persistent Chromium partition and its own background worker view, so multiple Normal ChatGPT accounts can execute delegated jobs concurrently instead of waiting on one shared browser.
@@ -118,6 +118,36 @@ Supported tools:
 - `git.add`
 - `git.commit`
 - `git.restore`
+- `chatgpt.save_image` (ChatGPT accounts only; see "Generated images")
+
+### Generated images (`chatgpt.save_image`)
+
+ChatGPT cannot send a tool request in the reply that shows its picture, so an image task takes two replies: one that generates the image, then `TEAMYRA_TOOL_REQUEST {"tool":"chatgpt.save_image","args":{"path":"images/out.png","index":0}}`.
+
+- `index` counts the images of the newest assistant reply that has images (0 = first). Only large `img` elements count (icons and avatars are skipped); the same picture rendered twice counts once (`ChatGPTAutomationAdapter.generatedImages`).
+- The image is downloaded with the ChatGPT view's own session (`https:`), or read inside the page (`blob:` / `data:`). `image-file.js` checks that the bytes are a PNG, JPEG, WebP or GIF image and reads the pixel size from the header; a file of another format than the extension asks for (`.png`, `.jpg`/`.jpeg`, `.webp`) is re-encoded in the page at full size. Anything that is not an image, empty or over 50 MB is refused.
+- The bytes are staged under the job folder and moved into the workspace by the core (`chatgpt.workspace.save-staged-file` → `WorkspaceToolService.save_staged_file`) with `filesystem.write`'s permission and path checks, a backup of an overwritten file, and an audit entry. No chat can name the staged source. Read-only jobs cannot save images.
+- The result gives `path`, `bytes`, `width`, `height`, `format` (and `converted_from` / `replaced_existing_file` when they apply).
+- A reply that shows generated images that nothing saved gets up to two reminders naming the missing expected file, instead of being taken as the final answer; a turn whose image was saved is not reminded about again (kept in the job state across desktop restarts). When an expected image file is still missing, the usual "expected outputs missing" reminder names `chatgpt.save_image` too.
+- Other web-chat sites (Muse, DeepSeek, Qwen, Grok, GLM) share the job loop but draw no images: their prompt does not list the tool and the request is not run (`site.generatesImages`).
+- A job's `spec.attachments` (workspace-relative image files, at most 10) are attached to its first message before it is sent, and the job waits until the page shows them. Each must be a real image file inside the job's workspace; otherwise the job fails before anything is sent.
+
+### ChatGPT image batches (`chatgpt_image_batch`, `chatgpt_image_status`, `chatgpt_image_cancel`)
+
+The fallback for `codex_image_batch` when the Codex accounts are at their usage limit (`bridge/chatgpt_images.py`).
+
+```json
+{"project_path": "D:/proj", "account": "chatgpt-2",
+ "requests": [{"prompt": "...", "output": "frames/hero.png", "references": ["refs/hero.png"], "size": "1536x1024"}]}
+```
+
+- Up to 50 images. `output` (.png, .jpg or .webp) and `references` (up to 10) must be inside `project_path`; every output is its own file. `size` (`1536x1024`, `1024x1536`, `1024x1024`, `auto`) is asked of ChatGPT as a shape (landscape, portrait, square); ChatGPT picks the exact pixels, and the status reports the real size.
+- Each image is one queued ChatGPT web job (`start_job`, `expect_files: [output]`, `attachments: references`, `transfer: false`, 20 minutes). Its task asks ChatGPT to draw exactly that image and save it with `chatgpt.save_image` to `output`. Without `account`, jobs go to the default account unpinned and the scheduler spreads them over the ready ChatGPT accounts (`rotate_web_queues`); when the default account rests, they are pinned (`account_fixed`) to the first account that does not. `account` (worker id or label) pins every job to that account.
+- Accounts resting after a limit are skipped: a job that ended `usage_or_rate_limit` (or `site_blocked` / `site_down` for the whole site) cools its account down in the scheduler (`cooldown_left`, 30 minutes, cleared by `clear_worker_cooldown`). The limit itself is detected by `limit-detect.js` while a reply is overdue or short; the site's words are kept in the job's `meta.limit_notice`.
+- `chatgpt_image_status({batch_id})` reads the jobs: per image `queued`, `running`, `done`, `failed`, `rate_limited` or `cancelled`, with `output`, `job_id`, `worker`, `attempts`, `width`/`height`/`bytes`, `error` and `attention` (a job that waits for the user, e.g. a human check). `done` needs the job done **and** a real image at `output` written after the job started; otherwise the image is `failed`.
+- An image whose account hit its limit is started again on another ChatGPT account that is not resting, when status is read (up to 3 jobs per image). With none left it is `rate_limited` with `reset_at` (the reset time the site gave, e.g. "try again in 2 hours" or "after 5:30 PM"; `null` when it gave none) and `retry_at` (when the first account's cooldown ends); the next status call after that starts it. `next_retry_at` is the earliest of them.
+- `chatgpt_image_cancel({batch_id})` cancels the batch's queued and running jobs and images waiting out a limit.
+- The same tools are available from a shell: `teamyra tool chatgpt_image_batch --json '{...}'`.
 
 ### Code map, one symbol, and short terminal output
 

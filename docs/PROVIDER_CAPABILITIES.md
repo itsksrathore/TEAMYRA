@@ -33,6 +33,7 @@ TEAMYRA only enables provider features that can be verified through the provider
 - Embedded UI: Electron `WebContentsView` inside TEAMYRA.
 - Persistent login/session storage: dedicated Chromium `persist:teamyra-chatgpt-profile` partition.
 - Local project tools: supported through the shared workspace-scoped TEAMYRA tool layer.
+- Generated images: `chatgpt.save_image` saves an image ChatGPT drew in the job's conversation into the workspace (checked PNG/JPEG/WebP, `filesystem.write` checks). `chatgpt_image_batch` / `chatgpt_image_status` / `chatgpt_image_cancel` run one ChatGPT job per image (references attached), spread over the ready accounts and skipping accounts that rest after a usage limit: the fallback for `codex_image_batch`. See docs/CHATGPT_WEB_AGENT.md.
 - Worker ID: `chatgpt-normal`; routing readiness requires a fresh desktop heartbeat and interactive prompt.
 - Headless/server-only execution: intentionally unavailable because this provider depends on the user-owned embedded web session.
 - CAPTCHA, login and human-verification handling: user-interactive only; TEAMYRA does not bypass provider security.
