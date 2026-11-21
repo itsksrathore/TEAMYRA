@@ -552,6 +552,45 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertTrue(permissions["terminal"])
             self.assertFalse(permissions["destructive_without_confirmation"])
 
+    def test_staged_file_is_saved_with_write_checks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "runtime"
+            workspace = Path(td) / "project"
+            workspace.mkdir()
+            service = self.make_service(root, workspace)
+            stage = root / "jobs" / "job-1" / "chatgpt-images"
+            stage.mkdir(parents=True)
+
+            def staged(name="img.png", data=b"PNG-bytes"):
+                file = stage / name
+                file.write_bytes(data)
+                return file
+
+            source = staged()
+            result = service.save_staged_file(workspace, "02_locations/a/x.png", source, token="x" * 64)
+            self.assertEqual(result["relative_path"], "02_locations/a/x.png")
+            self.assertEqual(result["bytes"], len(b"PNG-bytes"))
+            self.assertEqual((workspace / "02_locations" / "a" / "x.png").read_bytes(), b"PNG-bytes")
+            self.assertFalse(source.exists(), "the staged copy is removed")
+
+            again = service.save_staged_file(workspace, "02_locations/a/x.png", staged(data=b"new"), token="x" * 64)
+            self.assertTrue(again["backup"], "an overwritten file is backed up first")
+
+            for target in ("../outside.png", ".git/x.png", str(Path(td) / "elsewhere.png"), ".env"):
+                with self.subTest(target=target), self.assertRaises(PermissionError):
+                    service.save_staged_file(workspace, target, staged(), token="x" * 64)
+            outside = Path(td) / "not-staged.png"
+            outside.write_bytes(b"x")
+            with self.assertRaises(PermissionError):
+                service.save_staged_file(workspace, "y.png", outside, token="x" * 64)
+            with self.assertRaises(PermissionError):
+                service.save_staged_file(workspace, "y.png", staged(), permissions={"write": False}, token="x" * 64)
+            with self.assertRaises(PermissionError):
+                service.save_staged_file(workspace, "y.png", staged(), token="wrong" * 10)
+            self.assertFalse((workspace / "y.png").exists())
+            audit = [json.loads(line) for line in service.audit_file.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(item["tool"] == "chatgpt.save_image" and item["result"] == "success" for item in audit))
+
     def test_explicit_workspace_execution_does_not_change_chatgpt_selection(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

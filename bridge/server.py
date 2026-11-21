@@ -25,6 +25,7 @@ import scheduler
 import job_transfer
 import media_engine
 import media_support
+import chatgpt_images
 import codex_images
 import media_guide
 import desktop_runtime
@@ -832,11 +833,17 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
               session_id=None, parent=None, auto_failover=False, max_failovers=None,
               failover_attempt=0, failover_root=None, previous_workers=None, start_monitor=True,
               queue=False, pin=False, pool=False, expect_files=None, worker_order=None, teamyra_mcp=False,
-              transfer=None, account_fixed=False, model=None):
+              transfer=None, account_fixed=False, model=None, attachments=None):
     cwd = Path(project_path).resolve()
     if not cwd.exists():
         raise ValueError(f"project_path not found: {cwd}")
     expect_files = validate_expect_files(cwd, expect_files)
+    # Files attached to a web-chat job's first message (chatgpt_image_batch
+    # reference images): existing files inside project_path only.
+    attachments = validate_expect_files(cwd, attachments)
+    for item in attachments:
+        if not (cwd / item).is_file():
+            raise ValueError(f"attachment not found in project_path: {item}")
     requested_worker = worker
     worker = pick_worker(worker, order=worker_order, last_resort=helper_last_resort(worker_order))
     registry = worker_registry()
@@ -921,6 +928,7 @@ def start_job(worker, task, project_path, label=None, timeout_minutes=90, write=
     (jdir / "spec.json").write_text(json.dumps({"worker": worker, "provider": provider, "cmd": cmd, "cwd": str(cwd), "env": env,
                                                  "profile_id": worker_info.get("profile_id"), "write": write,
                                                  "pin": bool(pin), "pool": bool(pool), "expect_files": expect_files,
+                                                 **({"attachments": attachments} if attachments else {}),
                                                  "timeout": timeout, "final_path": str(final_path),
                                                  "session_id": session_id,
                                                  "resume_cmd": resume_cmd,
@@ -1598,6 +1606,21 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
     {"name": "codex_image_cancel", "description": "Stop a codex_image_batch: images not started yet are cancelled; running ones finish.",
      "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
+    {"name": "chatgpt_image_batch", "description": "Generate up to 50 images with the ChatGPT web accounts in TEAMYRA Desktop (ChatGPT's own image generation) and save each to its own file in the project. The fallback when the Codex image accounts are at their usage limit (codex_image_batch is faster). Each image is one ChatGPT web job: the reference images are attached to its first message, ChatGPT draws the picture and TEAMYRA saves it from the conversation (checked to be a real PNG/JPEG/WebP image, written inside project_path only). Jobs spread over the ready ChatGPT accounts; accounts resting after a usage limit are skipped, and an image whose account hits its limit moves to another account. A few minutes per image. Returns a batch_id at once; poll chatgpt_image_status.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_path": {"type": "string", "description": "Project folder; outputs and references must be inside it."},
+         "requests": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object", "properties": {
+             "prompt": {"type": "string", "description": "Full image prompt. Refer to references as Image 1, Image 2... in the order given."},
+             "output": {"type": "string", "description": "Output file (.png, .jpg or .webp), relative to project_path or absolute inside it."},
+             "references": {"type": "array", "maxItems": 10, "items": {"type": "string"}, "description": "Reference image files inside project_path (relative or absolute), attached to the chat."},
+             "size": {"type": "string", "enum": ["1536x1024", "1024x1536", "1024x1024", "auto"], "default": "1536x1024", "description": "Shape asked of ChatGPT (landscape, portrait, square); ChatGPT picks the exact pixels."}},
+             "required": ["prompt", "output"], "additionalProperties": False}},
+         "account": {"type": "string", "description": "Only this ChatGPT account (worker id such as \"chatgpt-normal\" or \"chatgpt-2\", or its label); default: every enabled ChatGPT account."}},
+         "required": ["project_path", "requests"], "additionalProperties": False}},
+    {"name": "chatgpt_image_status", "description": "Progress of a chatgpt_image_batch: per image status (queued, running, done, failed, rate_limited, cancelled), output path, job id, ChatGPT account, pixel size, error, and for rate_limited the site's reset time (reset_at, when it gave one) and retry_at. Reading it also restarts rate-limited images on a ChatGPT account that is no longer resting.",
+     "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
+    {"name": "chatgpt_image_cancel", "description": "Stop a chatgpt_image_batch: its queued and running ChatGPT jobs are cancelled and images waiting out a limit are not started.",
+     "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
     {"name": "media_transform", "description": "Queue an edit/variation/extend/remix operation against an exact TEAMYRA asset id.",
      "inputSchema": {"type": "object", "properties": {
          "operation": {"type": "string", "enum": [
@@ -2127,6 +2150,14 @@ def tool_call(name, a):
         return codex_images.batch_status(ROOT, a["batch_id"])
     if name == "codex_image_cancel":
         return codex_images.cancel_batch(ROOT, a["batch_id"])
+    if name == "chatgpt_image_batch":
+        return chatgpt_images.create_batch(jobs_root(), a["requests"], a["project_path"], account=a.get("account"),
+                                           start_job=start_job, registry=worker_registry())
+    if name == "chatgpt_image_status":
+        return chatgpt_images.batch_status(jobs_root(), a["batch_id"], start_job=start_job, registry=worker_registry())
+    if name == "chatgpt_image_cancel":
+        return chatgpt_images.cancel_batch(jobs_root(), a["batch_id"],
+                                           lambda job_id: tool_call("job_cancel", {"job_id": job_id}))
     if name == "media_batch":
         result = media_engine.create_batch(ROOT, a["requests"], max_parallel=a.get("max_parallel"),
                                            accounts=a.get("accounts"))

@@ -26,5 +26,6 @@ Use TEAMYRA as the control plane instead of manually juggling multiple local age
 - Read `teamyra.media_guide` first: it says which tool to use and shows live capacity.
 - Google Flow videos, images and sound effects: `teamyra.media_generate` for one, `teamyra.media_batch` for two or more (one call, run in several Flow tabs at once). Poll `teamyra.media_status({batch_id})` every 20-30 s; recover with `media_recover` / `media_resume_download` or hand problems to a helper with `media_report_issue` instead of resubmitting.
 - Codex/gpt-image stills (character sheets, turnarounds, look frames): `teamyra.codex_image_batch` with every image of the wave in one call (prompt, output file, references, size), then `teamyra.codex_image_status`. About 1-2 min per image, several in parallel, full quality.
+- Codex image accounts at their usage limit: `teamyra.chatgpt_image_batch` with the same requests (ChatGPT web accounts in TEAMYRA Desktop, a few minutes per image), then `teamyra.chatgpt_image_status`; `rate_limited` items start again on a later status call once an account is free.
 - Never start a worker job (`start_task`, `run_ai_worker`) just to draw images: it makes them one by one at 2-5 min each and blocks the account.
 - Images that build on earlier ones: batch the base images first, then a second batch that lists them as references.

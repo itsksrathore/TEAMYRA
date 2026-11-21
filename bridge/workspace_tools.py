@@ -786,18 +786,69 @@ class WorkspaceToolService:
         Desktop's web-chat jobs pass it; a delete outside the workspace, of a
         large folder, or git.restore still needs confirmation."""
         self._verify_token(token, trusted)
-        scoped = self._scoped_workspace(workspace)
-        try:
-            scoped_permissions = self._effective_permissions(permissions)
-        except PermissionError as exc:
-            self._audit(actor, tool, str(scoped), False, exc, extra={"attempt": "raise_user_only_permission"})
-            raise
+        scoped, scoped_permissions = self._scoped_workspace_permissions(workspace, permissions, actor, tool)
         if (recoverable_deletes and not confirm and tool == "filesystem.delete"
                 and self._recoverable_delete(args, scoped, scoped_permissions)):
             confirm = True
         return self._execute_scoped(
             tool, args, scoped, scoped_permissions, actor, confirm
         )
+
+    def _scoped_workspace_permissions(self, workspace, permissions, actor, tool):
+        scoped = self._scoped_workspace(workspace)
+        try:
+            return scoped, self._effective_permissions(permissions)
+        except PermissionError as exc:
+            self._audit(actor, tool, str(scoped), False, exc, extra={"attempt": "raise_user_only_permission"})
+            raise
+
+    def save_staged_file(
+        self, workspace, path, staged, permissions=None, *,
+        token=None, trusted=False, actor="teamyra", tool="chatgpt.save_image", max_bytes=50 * 1024 * 1024,
+    ):
+        """Move a file TEAMYRA Desktop staged under ``jobs/`` (for example an
+        image downloaded from a web chat) to ``path`` in the workspace, with
+        the same permission and path checks as ``filesystem.write``.  This is
+        not a workspace tool: a chat cannot name the staged source."""
+        self._verify_token(token, trusted)
+        scoped, scoped_permissions = self._scoped_workspace_permissions(workspace, permissions, actor, tool)
+        extra = {"mode": "full_access" if scoped_permissions.get("full_access") else "sandboxed"}
+        try:
+            self._check("filesystem.write", scoped_permissions)
+            source = Path(str(staged or "")).resolve(strict=True)
+            if not _is_relative_to(source, (self.root / "jobs").resolve()) or not source.is_file():
+                raise PermissionError("the staged file must be a file under TEAMYRA jobs")
+            size = source.stat().st_size
+            if size <= 0 or size > max_bytes:
+                raise WorkspaceToolError(f"staged file size {size} is outside 1..{max_bytes} bytes")
+            if not str(path or "").strip():
+                raise WorkspaceToolError("path is required")
+            target = self._path(path, scoped, scoped_permissions)
+            if target.exists() and target.is_dir():
+                raise WorkspaceToolError("path is a directory")
+            backup = self._backup_file(target, scoped)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.teamyra-", dir=str(target.parent))
+            os.close(fd)
+            try:
+                shutil.copyfile(source, temp_name)
+                os.replace(temp_name, target)
+            except Exception:
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+                raise
+            try:
+                source.unlink()
+            except OSError:
+                pass
+            relative = str(target.relative_to(scoped)) if _is_relative_to(target, scoped) else str(target)
+            self._audit(actor, tool, str(target), True, extra={**extra, "bytes": size})
+            return {"path": str(target), "relative_path": relative.replace("\\", "/"), "bytes": size, "backup": backup}
+        except Exception as exc:
+            self._audit(actor, tool, str(path or ""), False, exc, extra=extra)
+            raise
 
     def _scoped_workspace(self, workspace):
         scoped = Path(str(workspace or "")).expanduser().resolve()

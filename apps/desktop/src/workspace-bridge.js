@@ -100,6 +100,17 @@ class WorkspaceBridge {
     }, this.coreOptions({ timeout: 45000 }));
   }
 
+  // Moves a file the desktop staged under the job folder into the workspace,
+  // with the core's filesystem.write permission and path checks.
+  saveStagedFile(workspace, filePath, staged, permissions = null) {
+    return callCore('chatgpt.workspace.save-staged-file', {
+      workspace: String(workspace || ''),
+      path: String(filePath || ''),
+      staged: String(staged || ''),
+      permissions: permissions && typeof permissions === 'object' ? permissions : undefined
+    }, this.coreOptions({ timeout: 45000 }));
+  }
+
   toolTimeout(tool, args) {
     if (tool !== 'terminal.run') return 45000;
     const seconds = Number(args?.timeout_seconds);

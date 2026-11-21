@@ -14,6 +14,7 @@ INSTRUCTIONS = """TEAMYRA media and image generation: use the fast paths.
 - Google accounts: media_accounts lists them and enables/disables them; pass accounts=[ids or names] to media_generate/media_batch to run a job only in the accounts you choose.
 - Google Vids videos (Omni, same Google accounts, no Flow credits, native 1080p): media_generate/media_batch with engine="vids" (vids_mode create/animate/extend/edit, up to 3 reference images, 3-10 s, 16:9 or 9:16).
 - Codex/gpt-image stills (character sheets, look frames, photoreal or illustrated images): codex_image_batch with every image of the job in one call (prompt, output file, reference files, size); poll codex_image_status. Do not start a Codex worker job (start_task/run_ai_worker) to draw images: it makes them one at a time, 2-5 min each.
+- Codex image accounts at their usage limit: chatgpt_image_batch (same requests, ChatGPT web accounts in TEAMYRA Desktop, a few minutes per image); poll chatgpt_image_status.
 - Images that build on earlier images: generate the base images first, then a second batch that lists them as references.
 - Call media_guide for the full rules and current capacity."""
 
@@ -24,6 +25,7 @@ GUIDE = """# Generating media and images through TEAMYRA
 |---|---|---|
 | Video, Omni/Nano Banana image or sound effect from Google Flow | `media_generate` (one) / `media_batch` (2-50) | Runs in every signed-in Google account at once, several Flow tabs each. Video: 720p generation, 1080p download. |
 | Still images with Codex (gpt-image): character sheets, turnarounds, look frames, photoreal or illustrated stills | `codex_image_batch` (1-50) | About 1-2 min per image, two at once per Codex account, full quality. |
+| Still images when the Codex accounts are at their usage limit | `chatgpt_image_batch` (1-50) | ChatGPT web accounts in TEAMYRA Desktop draw them; a few minutes per image, spread over the ready accounts. |
 | Video from Google Vids (Omni): text + up to 3 images, animate an image, extend or edit a video | `media_generate` / `media_batch` with `engine: "vids"` | Same Google accounts, no Flow credits, native 1080p, 3-10 s clips, several at once in each Vids tab. |
 | Music | `media_generate` with type music | One song at a time. |
 
@@ -57,6 +59,11 @@ Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_
 - Dependent images: first batch the base images (e.g. turnarounds), then a second batch that uses them as references (head sheets, hero frames).
 - Poll `codex_image_status({batch_id})` every 20-30 s. `refused` means the image service refused the prompt: reword it. `failed` items can be sent again in a new batch.
 - Each image is checked once by Codex and regenerated once if it clearly misses; quality is not reduced.
+
+## ChatGPT images (`chatgpt_image_batch`)
+- The fallback when `codex_image_status` reports the Codex accounts at their usage limit: send the same requests (`project_path`, `requests[{prompt, output, references, size}]`, optional `account`).
+- Each image is one ChatGPT web job: references (inside `project_path`) are attached, ChatGPT draws the image, TEAMYRA saves and checks it at `output`. `size` is a shape (landscape/portrait/square); the status gives the real pixels.
+- Poll `chatgpt_image_status({batch_id})` every 30-60 s: `queued`, `running`, `done`, `failed`, `rate_limited` (every ChatGPT account at its limit; `reset_at` / `retry_at` say when, and the image starts again on a status call after that), `cancelled`. Stop with `chatgpt_image_cancel`.
 
 ## Problems
 Report anything you cannot fix quickly with `media_report_issue` (Flow jobs) or `maintenance_report` (anything else) and keep working."""
