@@ -1350,6 +1350,8 @@ class GoogleFlowAutomationAdapter {
     const refsKey = (job.resolved_references || []).map(item => item.asset_id || item.path || '').join('|');
     const reuse = Boolean(refsKey && attachedBefore?.key === refsKey &&
       attachedBefore.project === projectId(this.webContents.getURL()) &&
+      // Chips Flow showed without an image UUID cannot be re-verified by identity.
+      attachedBefore.items.every(item => item.provider_asset_id) &&
       await new FlowReferenceController(this).matches(attachedBefore.items).catch(() => false));
     if (!reuse) await new FlowReferenceController(this).clearComposer();
     const intent = await this.stage('intent', () => this.selectIntent(request, job.operation));

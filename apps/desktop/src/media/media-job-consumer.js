@@ -31,6 +31,28 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+function isCoreTimeout(error) {
+  return /teamyra core did not answer|teamyra core stopped while answering|media state is busy/i
+    .test(String(error?.message || error || ''));
+}
+
+// media.update-state only sets a job's state: sending it again is harmless.
+// Core can be slow for a while under heavy bulk load (many tabs claiming at
+// once); a late answer must not fail a job that has not been submitted.
+const UPDATE_TIMEOUT_MS = 30000;
+const UPDATE_RETRY_DELAYS_MS = [1000, 3000, 6000];
+
+async function retryCoreUpdate(call, delays = UPDATE_RETRY_DELAYS_MS) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await call(); }
+    catch (error) {
+      // "media state is busy" is already retried by callCore itself.
+      if (attempt >= delays.length || !/teamyra core (?:did not answer|stopped while answering)/i.test(String(error?.message || error))) throw error;
+      await sleep(delays[attempt] + Math.random() * 250);
+    }
+  }
+}
+
 function classifyError(error) {
   const text = String(error?.message || error || '').toLowerCase();
   if (text.includes('human_verification') || text.includes('captcha')) return { state: 'needs_user_auth', category: 'human_verification' };
@@ -43,7 +65,13 @@ function classifyError(error) {
   if (text.includes('credits_exhausted') || text.includes('credits')) return { state: 'failed', category: 'credits_exhausted' };
   if (text.includes('policy_refusal') || text.includes('policy')) return { state: 'failed', category: 'policy_refusal' };
   if (text.includes('browser_probe_failed')) return { state: 'failed', category: 'browser_probe_failed' };
+  // TEAMYRA Core itself did not answer (busy, or restarting): nothing about the
+  // job or the provider. Recoverable while nothing was submitted.
+  if (isCoreTimeout(text)) return { state: 'failed', category: 'core_timeout' };
   if (/execution context was destroyed|frame was detached|webcontents.*destroyed|err_(?:connection|internet|network|name_not_resolved|address_unreachable|timed_out)|browser_failure/.test(text)) return { state: 'failed', category: 'browser_failure' };
+  // Flow never attached the reference image: the caller may retry, or retry
+  // without references.
+  if (text.includes('reference_attach_failed')) return { state: 'failed', category: 'reference_attach_failed' };
   // Reference attachment happens before Generate; its errors are UI failures.
   if (text.includes('selector_failure') || text.startsWith('references:') || text.includes('upload media control')) return { state: 'failed', category: 'selector_failure' };
   // A wrong-shaped result is the provider's output, not a transfer problem;
@@ -256,7 +284,8 @@ class MediaJobConsumer {
   }
 
   async update(jobId, state, detail, extra) {
-    return callCore('media.update-state', { job_id: jobId, state, detail, extra }, { timeout: 15000 });
+    return retryCoreUpdate(() => callCore('media.update-state', { job_id: jobId, state, detail, extra },
+      { timeout: UPDATE_TIMEOUT_MS }), this.updateRetryDelays);
   }
 
   // This account cannot take new work (signed out, challenged, out of
@@ -610,9 +639,12 @@ class MediaJobConsumer {
     return asset;
   }
 
-  async handleFailure(jobId, error) {
+  async handleFailure(jobId, error, ctx = null) {
     this.downloadManager.cancelJob(jobId);
-    const mapped = classifyError(error);
+    let mapped = classifyError(error);
+    // After the Generate checkpoint a Core timeout is not a safe retry: the
+    // generation may have started. Leave it for inspection/reconciliation.
+    if (mapped.category === 'core_timeout' && ctx?.checkpointed) mapped = { state: 'failed', category: 'generation_failure' };
     // Retain a downloaded SFX source when extraction fails so recovery can reuse it.
     try {
       await this.update(jobId, mapped.state, mapped.category + ': ' + String(error?.message || error).slice(0, 1200), {
@@ -631,7 +663,7 @@ class MediaJobConsumer {
       return await this.downloadAndRegister(ctx);
     } catch (error) {
       if (await this.handOffAfterError(job, ctx, error)) return null;
-      return this.handleFailure(job.job_id, error);
+      return this.handleFailure(job.job_id, error, ctx);
     }
   }
 
@@ -647,7 +679,7 @@ class MediaJobConsumer {
     } catch (error) {
       if (await this.handOffAfterError(job, ctx, error)) return;
       if (await this.tryRelease(job, ctx, error)) return;
-      await this.handleFailure(job.job_id, error);
+      await this.handleFailure(job.job_id, error, ctx);
     }
   }
 
@@ -659,7 +691,7 @@ class MediaJobConsumer {
     const capacity = /capacity_limited/i.test(text);
     const category = classifyError(error).category;
     const running = this.inFlight.size;
-    if (!capacity && !(running && ['selector_failure', 'rate_limited'].includes(category))) return false;
+    if (!capacity && !(running && ['selector_failure', 'reference_attach_failed', 'rate_limited', 'core_timeout'].includes(category))) return false;
     try {
       await callCore('media.release', { job_id: job.job_id, delay: capacity || category === 'rate_limited' ? 30 : 15, reason: text.slice(0, 300) }, { timeout: 15000 });
     } catch { return false; }
@@ -736,7 +768,8 @@ class MediaJobConsumer {
 
   async failJob(ctx, error) {
     this.finish(ctx);
-    await this.handleFailure(ctx.jobId, error);
+    // In-flight jobs were submitted.
+    await this.handleFailure(ctx.jobId, error, { ...ctx, checkpointed: true });
   }
 
   async pollOnce() {
@@ -936,4 +969,4 @@ class MediaJobConsumer {
   }
 }
 
-module.exports = { MediaJobConsumer, classifyError, requestSignature, DEFAULT_PARALLEL, MAX_PARALLEL, DOWNLOAD_PARALLEL, DOWNLOAD_SEPARATION };
+module.exports = { MediaJobConsumer, classifyError, requestSignature, retryCoreUpdate, isCoreTimeout, DEFAULT_PARALLEL, MAX_PARALLEL, DOWNLOAD_PARALLEL, DOWNLOAD_SEPARATION };

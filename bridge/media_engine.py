@@ -96,7 +96,7 @@ def recovery_plan(job):
     text = str(job.get("error") or job.get("detail") or "").lower()
     category = failure.get("category") or next((name for name in (
         "human_verification", "login_required", "credits_exhausted", "policy_refusal",
-        "rate_limited", "selector_failure", "output_mismatch", "result_match_failed", "provider_no_result", "download_failure", "browser_probe_failed",
+        "rate_limited", "reference_attach_failed", "core_timeout", "selector_failure", "output_mismatch", "result_match_failed", "provider_no_result", "download_failure", "browser_probe_failed",
     ) if name in text), "generation_failure")
     submission = job.get("provider_submission") or {}
     submitted = bool(submission.get("submitted_at"))
@@ -137,13 +137,21 @@ def recovery_plan(job):
     elif possible and not (submitted and submission.get("provider_url")):
         plan.update(action="manual_reconciliation", instruction="Submission is uncertain and lacks provider identity. Inspect the provider; never submit again automatically.")
     else:
-        recoverable = category in {"selector_failure", "download_failure", "browser_probe_failed", "browser_failure", "rate_limited"} or (
+        recoverable = category in {"selector_failure", "download_failure", "browser_probe_failed", "browser_failure", "rate_limited",
+                                   "reference_attach_failed", "core_timeout"} or (
             category == "generation_failure" and any(word in text for word in ("timed out", "timeout", "acknowledg", "page_transition")))
         if recoverable:
             action = "resume_existing_submission" if submitted else "retry_before_submission"
             plan.update(action=action, can_recover=True,
                         automatic=plan["auto_attempts"] < MAX_AUTO_RECOVERIES,
                         instruction="Call teamyra.media_recover with this job_id; poll the same job. Existing submissions reconcile and download without another Generate click.")
+            if category == "reference_attach_failed":
+                plan["instruction"] = ("Google Flow did not attach a reference image to the prompt (nothing was submitted). "
+                                       "Call teamyra.media_recover with this job_id to try again, or queue the request again "
+                                       "without references.")
+            elif category == "core_timeout" and not submitted:
+                plan["instruction"] = ("TEAMYRA Core answered too slowly before this job was submitted (nothing was spent). "
+                                       "Call teamyra.media_recover with this job_id; it is retried automatically too.")
         else:
             plan["instruction"] = "Inspect this failure before recovery; do not create a replacement job blindly."
     if state in {"failed", "needs_user_auth", "rate_limited"} and not job.get("assisted_by"):
@@ -290,6 +298,17 @@ def _summarize(job):
     }
 
 
+_INDEX_MEMO = {}
+
+
+def _file_stamp(path):
+    try:
+        stat = Path(path).stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
 def _job_summaries(root):
     """Summaries of every job, re-reading only files changed since last time.
 
@@ -299,9 +318,21 @@ def _job_summaries(root):
     size changed is read again, and a claim re-reads its chosen job in full."""
     folder = _jobs_dir(root)
     cache_path = _index_file(root)
-    cache = _read_json(cache_path, {})
-    entries = cache.get("jobs") if isinstance(cache, dict) and cache.get("version") == 2 else None
-    entries = entries if isinstance(entries, dict) else {}
+    # The parsed index is kept in memory while its file is unchanged: it holds
+    # every job and parsing it on each claim (many tabs, every few seconds)
+    # kept the state lock busy long enough to time out media.update-state.
+    index_stamp = _file_stamp(cache_path)
+    memo = _INDEX_MEMO.get(str(cache_path))
+    if memo and index_stamp and memo[0] == index_stamp:
+        entries = memo[1]
+    else:
+        cache = _read_json(cache_path, {})
+        entries = cache.get("jobs") if isinstance(cache, dict) and cache.get("version") == 2 else None
+        entries = entries if isinstance(entries, dict) else {}
+        if index_stamp:
+            if len(_INDEX_MEMO) > 16:
+                _INDEX_MEMO.clear()
+            _INDEX_MEMO[str(cache_path)] = (index_stamp, entries)
     fresh, changed = {}, False
     try:
         listing = list(os.scandir(folder))
@@ -330,6 +361,9 @@ def _job_summaries(root):
         try:
             tmp.write_text(json.dumps({"version": 2, "jobs": fresh}, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, cache_path)
+            stamp = _file_stamp(cache_path)
+            if stamp:
+                _INDEX_MEMO[str(cache_path)] = (stamp, fresh)
         except OSError:
             pass
         finally:
@@ -1465,6 +1499,9 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
         lanes = max(1, int(lanes or 1))
     except (TypeError, ValueError):
         lane, lanes = 0, 1
+    # Bring the job index up to date before taking the state lock, so the scan
+    # inside it finds (almost) nothing to re-read or rewrite.
+    _job_summaries(root)
     with _state_lock(root):
         candidates = []
         active = {}

@@ -94,6 +94,59 @@ async function main() {
   const attached=await chips.attach({path:'new.png'});
   assert.equal(attached.provider_asset_id,OTHER,'refreshed old thumbnail URLs never identify the new ingredient');
 
+  // ISSUE 2026-11-21 #1: Flow shows the uploaded chip with an opaque thumbnail
+  // (no UUID). One chip expected, one appeared, none busy: it is ours.
+  const opaque = new FlowReferenceController({});
+  let opaqueRead=0;
+  opaque.attachments=async()=>++opaqueRead===1?[]:[{source:'https://flow.google.com/asb/opaque=s200',id:'',busy:false}];
+  opaque.openPicker=async()=>{};opaque.selectExisting=async()=>null;
+  opaque.uploadFile=async()=>({preparation:{optimized:false}});opaque.clickButton=async()=>true;
+  const started=Date.now();
+  const unnamed=await opaque.attach({path:'thumb.jpg'});
+  assert.ok(Date.now()-started<2000,'an unnamed settled chip is accepted at once');
+  assert.equal(unnamed.provider_asset_id,null);
+  assert.equal(unnamed.identity_verified,false);
+  assert.equal(await opaque.matches([unnamed]),true,'the unnamed chip still verifies before Generate');
+  opaque.attachments=async()=>[];
+  assert.equal(await opaque.matches([unnamed]),false,'a vanished chip aborts before Generate');
+  opaque.attachments=async()=>[{source:'',busy:false},{source:'',busy:false}];
+  assert.equal(await opaque.matches([unnamed]),false,'an extra chip aborts before Generate');
+  // A stable data attribute names the chip even when its thumbnail does not.
+  opaqueRead=0;
+  opaque.attachments=async()=>++opaqueRead===1?[]:[{source:'https://flow.google.com/asb/opaque',id:CAR,busy:false}];
+  assert.equal((await opaque.attach({path:'thumb.jpg'})).provider_asset_id,CAR);
+  // An expected image is never matched to a chip that names another image.
+  const wrong = new FlowReferenceController({});
+  wrong.noChipFailMs=50;
+  let wrongRead=0;
+  wrong.attachments=async()=>++wrongRead===1?[]:[{source:`https://flow-content.google/image/${OTHER}`,busy:false}];
+  wrong.openPicker=async()=>{};wrong.selectExisting=async()=>CAR;wrong.clickButton=async()=>true;
+  wrong.waitFor=(read,label)=>FlowReferenceController.prototype.waitFor.call(wrong,read,label,300);
+  await assert.rejects(wrong.attach({path:'car.png',provider_asset_id:CAR}),/reference_attach_failed/);
+  // No chip at all: fail in seconds with reference_attach_failed, not minutes.
+  const never = new FlowReferenceController({});
+  never.noChipFailMs=200;
+  never.attachments=async()=>[];
+  never.openPicker=async()=>{};never.selectExisting=async()=>null;
+  never.uploadFile=async()=>({preparation:{optimized:false}});never.clickButton=async()=>true;
+  const neverStarted=Date.now();
+  await assert.rejects(never.attach({path:'thumb.jpg'}),/^Error: reference_attach_failed: Flow did not add the reference image/);
+  assert.ok(Date.now()-neverStarted<3000,'a reference that never attaches fails fast');
+  // The page script reads the UUID from a chip attribute (opaque img src).
+  const chipNode=(attrs,children=[])=>({getAttribute:name=>attrs[name]??null,querySelectorAll:()=>children,
+    querySelector:sel=>sel==='img'?children[0]||null:null});
+  const chipImg=chipNode({src:'https://flow.google.com/asb/opaque=s200'});
+  const chipButtons=[chipNode({'aria-label':'Ingredient','data-media-id':CAR.toUpperCase()},[chipImg]),
+    chipNode({'aria-label':'Ingredient','aria-busy':'true'},[chipNode({src:`https://flow-content.google/image/${OTHER}?x=1`})]),
+    chipNode({'aria-label':'Ingredient'},[chipNode({src:'blob:https://flow.google.com/abc'})])];
+  chipButtons[1].querySelector=sel=>sel==='img'?chipButtons[1].querySelectorAll()[0]:null;
+  const reader=new FlowReferenceController({executePageScript:async script=>vm.runInNewContext(script,
+    {document:{querySelectorAll:()=>chipButtons}})});
+  assert.deepEqual(JSON.parse(JSON.stringify(await reader.attachments())),[
+    {source:'https://flow.google.com/asb/opaque=s200',id:CAR,busy:false},
+    {source:`https://flow-content.google/image/${OTHER}?x=1`,id:OTHER,busy:true},
+    {source:'blob:https://flow.google.com/abc',id:'',busy:false}]);
+
   // Reference preparation must keep ownership until all upload operations end.
   // A job cannot finish and permit a second job while an old upload mutates UI.
   const adapter=new GoogleFlowAutomationAdapter({});
