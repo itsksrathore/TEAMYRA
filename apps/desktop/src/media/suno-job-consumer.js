@@ -4,7 +4,7 @@ const { callCore } = require('../core-api');
 const { verifyMediaOutput } = require('./media-output-validator');
 const { SunoAdapter, detectLimit, cooldownSeconds, isRefusal, isDone, isFailed } = require('./suno-adapter');
 const { sniffAudio, analyzeAudio, transcribe } = require('./suno-audio');
-const { SUNO_HOME, songUrl } = require('./suno-provider');
+const { SUNO_HOME, SUNO_LIBRARY, songUrl } = require('./suno-provider');
 const { retryCoreUpdate, isCoreTimeout } = require('./media-job-consumer');
 
 // The Suno worker of one account (its hidden tab). It claims surface "suno"
@@ -166,7 +166,8 @@ class SunoJobConsumer {
         await this.core('media.patch', { job_id: jobId, patch: { submission_phase: 'sending' } });
         await adapter.clickCreate();
         sent = true;
-        const created = await adapter.newClips(known, { action: 'generate', title: request.suno_title || '' });
+        const created = await adapter.newClips(known, { action: 'generate', title: request.suno_title || '',
+          refresh: () => this.provider.load(SUNO_LIBRARY) });
         if (!created.ids.length) {
           if (created.limit) return this.handOff(job, created.limit);
           if (created.refusal) throw new Error('policy_refusal: Suno refused the request: ' + created.refusal);
@@ -213,6 +214,7 @@ class SunoJobConsumer {
     const started = Date.now();
     let lastCheck = 0;
     let lastFallback = Date.now();
+    let relinked = false;
     while (Date.now() - started < this.generationTimeoutMs) {
       if (Date.now() - lastCheck > 15000) {
         lastCheck = Date.now();
@@ -222,6 +224,21 @@ class SunoJobConsumer {
         }
       }
       let summaries = ids.map(id => adapter.clips.get(id) || null);
+      // A followed id that never shows clip data is not a clip (an id from the
+      // generate reply): find the job's real clips in the Library instead.
+      if (!relinked && summaries.some(item => !item) && Date.now() - started > 45000) {
+        relinked = true;
+        const since = Number(job.provider_submission?.submitted_at) || started;
+        await this.provider.load(SUNO_LIBRARY).catch(() => null);
+        await sleep(2500);
+        const found = adapter.clipsCreatedSince(since, job.request?.suno_title || '').slice(0, 2);
+        if (found.length) {
+          ids = found;
+          await this.core('media.patch', { job_id: jobId, patch: { provider_submission: { ...(job.provider_submission || {}), clip_ids: ids, clips_found_via: 'library' } } }).catch(() => {});
+          await this.update(jobId, 'generating', 'Suno is making ' + ids.length + ' clip(s): ' + ids.join(', ')).catch(() => {});
+          summaries = ids.map(id => adapter.clips.get(id) || null);
+        }
+      }
       if (summaries.some(item => !isDone(item) && !isFailed(item)) && Date.now() - lastFallback >= this.statusFallbackMs) {
         lastFallback = Date.now();
         for (const id of ids.filter((id, index) => !isDone(summaries[index]) && !isFailed(summaries[index]))) {

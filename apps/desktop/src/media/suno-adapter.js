@@ -1032,12 +1032,21 @@ class SunoAdapter {
   }
 
   // The new clip ids after Create: from the page's generate response, else new rows.
-  async newClips(before, { timeoutMs = 90000, everyMs = 1000, action = 'generate', title = '' } = {}) {
+  async newClips(before, { timeoutMs = 90000, everyMs = 1000, action = 'generate', title = '', refresh = null, refreshEveryMs = 8000 } = {}) {
     this.step = 'new clips';
     const known = new Set(before);
     const since = this.createClickedAt || Date.now();
     const deadline = Date.now() + timeoutMs;
+    let refreshedAt = Date.now();
     while (Date.now() < deadline) {
+      // The Create page does not always refresh its song list; the Library
+      // page's own requests list every clip with its creation time
+      // (2026-11-21: two live jobs never saw their new clips on /create).
+      if (refresh && Date.now() - refreshedAt >= refreshEveryMs) {
+        refreshedAt = Date.now();
+        await refresh().catch(() => null);
+        await this.sleep(2500);
+      }
       // Clips created after the click, as the page's own feed reports them
       // (2026-11-21: an id from the generate reply that was not a clip was
       // followed for 15 minutes while both real clips were done).
@@ -1057,7 +1066,10 @@ class SunoAdapter {
       if (isRefusal(state?.notices)) return { ids: [], refusal: String(state.notices).slice(0, 600) };
       await this.sleep(everyMs);
     }
-    const ids = [...new Set([...this.createdIds.filter(id => !known.has(id)), ...(await this.clipIds().catch(() => [])).filter(id => !known.has(id))])];
+    // Only ids that are clips (seen with clip data): a generate reply also
+    // carries ids that are not clips.
+    const fresh = this.clipsCreatedSince(since, title).filter(id => !known.has(id));
+    const ids = [...new Set([...fresh, ...this.createdIds.filter(id => !known.has(id) && this.clips.has(id))])];
     return { ids: ids.slice(0, 2), via: 'timeout' };
   }
 
