@@ -33,13 +33,39 @@ function isSunoHost(host) {
   return host === 'suno.com' || host.endsWith('.suno.com') || host === 'suno.ai' || host.endsWith('.suno.ai') || host.endsWith('.cloudfront.net');
 }
 
+// Sign-in providers hop across several of their own hosts: after choosing a
+// Google account the page passes accounts.youtube.com, a country domain
+// (accounts.google.co.in) or gstatic; a refused hop left the sign-in stuck
+// (2026-11-21). Their whole domains are allowed while signing in.
+const SIGN_IN_DOMAINS = [
+  /(^|\.)google\.com$/, /(^|\.)google\.[a-z]{2,3}(\.[a-z]{2})?$/, /(^|\.)gstatic\.com$/, /(^|\.)googleusercontent\.com$/,
+  /(^|\.)googleapis\.com$/, /^accounts\.youtube\.com$/,
+  /(^|\.)apple\.com$/, /(^|\.)discord\.com$/, /(^|\.)discordapp\.com$/,
+  /(^|\.)microsoftonline\.com$/, /(^|\.)live\.com$/, /(^|\.)microsoft\.com$/,
+  /(^|\.)facebook\.com$/, /(^|\.)clerk\.com$/, /(^|\.)clerk\.accounts\.dev$/, /(^|\.)hcaptcha\.com$/
+];
+
+function isSignInHost(host) {
+  return SIGN_IN_HOSTS.has(host) || SIGN_IN_DOMAINS.some(pattern => pattern.test(host));
+}
+
 function safeSunoUrl(value, { signIn = true } = {}) {
   if (value === 'about:blank') return true;
   try {
     const url = new URL(value);
     if (url.protocol !== 'https:') return false;
-    return isSunoHost(url.hostname) || (signIn && SIGN_IN_HOSTS.has(url.hostname));
+    return isSunoHost(url.hostname) || (signIn && isSignInHost(url.hostname));
   } catch { return false; }
+}
+
+// A refused address is written to logs/suno-blocked.log, so a sign-in hop
+// that is still missing shows up at once.
+function logBlocked(kind, url) {
+  try {
+    const file = path.resolve(__dirname, '..', '..', '..', '..', 'logs', 'suno-blocked.log');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, new Date().toISOString() + ' ' + kind + ' ' + String(url).slice(0, 300) + '\n');
+  } catch {}
 }
 
 function songUrl(clipId) { return 'https://suno.com/song/' + String(clipId).toLowerCase(); }
@@ -120,13 +146,28 @@ class SunoView {
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);
     this.window.contentView.addChildView(this.view);
-    const guard = (event, url) => { if (!safeSunoUrl(url, { signIn: true })) event.preventDefault(); };
-    this.view.webContents.on('will-navigate', guard);
-    this.view.webContents.on('will-redirect', guard);
+    const guard = kind => (event, url) => {
+      if (!safeSunoUrl(url, { signIn: true })) { event.preventDefault(); logBlocked(kind, url); }
+    };
+    this.view.webContents.on('will-navigate', guard('navigate'));
+    this.view.webContents.on('will-redirect', guard('redirect'));
     // Sign-in popups (Google, Apple, Discord...) open in the same session; anything else is refused.
-    this.view.webContents.setWindowOpenHandler(({ url }) => this.signIn && safeSunoUrl(url, { signIn: true })
-      ? { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 720, autoHideMenuBar: true, webPreferences: { session: this.session } } }
-      : { action: 'deny' });
+    this.view.webContents.setWindowOpenHandler(({ url }) => {
+      if (this.signIn && safeSunoUrl(url, { signIn: true })) {
+        return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 720, autoHideMenuBar: true, webPreferences: { session: this.session } } };
+      }
+      logBlocked('popup', url);
+      return { action: 'deny' };
+    });
+    // A sign-in popup finishes back on Suno: reload the account's view so it
+    // shows the signed-in page instead of the old sign-in screen.
+    this.view.webContents.on('did-create-window', popup => {
+      popup.webContents.on('will-redirect', guard('popup-redirect'));
+      popup.webContents.on('will-navigate', guard('popup-navigate'));
+      popup.on('closed', () => {
+        if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.loadURL(SUNO_HOME).catch(() => {});
+      });
+    });
     return this.view;
   }
 
@@ -190,5 +231,6 @@ function sunoProfiles(root, builtinFile) {
   return profiles;
 }
 
-module.exports = { SunoView, SunoDownloads, safeSunoUrl, partitionForSuno, safeProfileId, songUrl, sunoProfiles,
+module.exports = {
+  isSignInHost, SunoView, SunoDownloads, safeSunoUrl, partitionForSuno, safeProfileId, songUrl, sunoProfiles,
   SUNO_HOME, SUNO_LIBRARY, BUILTIN_PROFILE, SIGN_IN_HOSTS };

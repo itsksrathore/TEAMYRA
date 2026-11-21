@@ -588,3 +588,17 @@ async function engineTests(temp) {
     fs.rmSync(temp, { recursive: true, force: true });
   }
 })().catch(error => { console.error(error); process.exit(1); });
+
+// 2026-11-21: after choosing a Google account the sign-in hops through other
+// Google hosts; a refused hop left Suno's sign-in stuck.
+{
+  const assert = require('node:assert/strict');
+  const { isSignInHost, safeSunoUrl } = require('../src/media/suno-provider');
+  for (const host of ['accounts.google.com', 'accounts.youtube.com', 'accounts.google.co.in', 'ssl.gstatic.com', 'appleid.apple.com', 'discord.com']) {
+    assert.ok(isSignInHost(host), host);
+  }
+  for (const host of ['evil.com', 'google.com.evil.com', 'googlex.com']) assert.ok(!isSignInHost(host), host);
+  assert.ok(safeSunoUrl('https://accounts.youtube.com/accounts/SetSID?x=1', { signIn: true }));
+  assert.ok(!safeSunoUrl('https://accounts.youtube.com/accounts/SetSID', { signIn: false }), 'the worker stays on Suno');
+  console.log('suno sign-in host tests passed');
+}
