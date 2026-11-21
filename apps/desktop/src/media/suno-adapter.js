@@ -1015,20 +1015,42 @@ class SunoAdapter {
     const form = await this.form();
     const button = (form.buttons || []).filter(item => /^create\b/i.test(item.text) && item.text.length < 24 && !item.disabled).pop();
     if (!button) throw new Error('selector_failure: Suno Create button not found');
+    this.createClickedAt = Date.now();
     await this.probe('click', { idx: button.idx });
     return state;
   }
 
+  // Clips the page's own requests reported as created after our Create click
+  // (with the request's title when given), newest first.
+  clipsCreatedSince(since, title = '') {
+    const want = normalizeName(title);
+    return [...this.clips.entries()]
+      .map(([id, clip]) => ({ id, clip, at: Date.parse(clip.created_at || '') || 0 }))
+      .filter(item => item.at >= since - 15000 && (!want || normalizeName(item.clip.title || '') === want))
+      .sort((a, b) => b.at - a.at)
+      .map(item => item.id);
+  }
+
   // The new clip ids after Create: from the page's generate response, else new rows.
-  async newClips(before, { timeoutMs = 90000, everyMs = 1000, action = 'generate' } = {}) {
+  async newClips(before, { timeoutMs = 90000, everyMs = 1000, action = 'generate', title = '' } = {}) {
     this.step = 'new clips';
     const known = new Set(before);
+    const since = this.createClickedAt || Date.now();
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const created = this.createdIds.filter(id => !known.has(id));
+      // Clips created after the click, as the page's own feed reports them
+      // (2026-11-21: an id from the generate reply that was not a clip was
+      // followed for 15 minutes while both real clips were done).
+      const fresh = this.clipsCreatedSince(since, title).filter(id => !known.has(id));
+      if (fresh.length >= 2) return { ids: fresh.slice(0, 2), via: 'feed' };
+      const created = this.createdIds.filter(id => !known.has(id) && this.clips.has(id));
       if (created.length >= 2) return { ids: created.slice(-2), via: 'network' };
       const ids = (await this.clipIds().catch(() => [])).filter(id => !known.has(id));
-      if (ids.length >= 2 || (ids.length && created.length)) return { ids: [...new Set([...created, ...ids])].slice(0, 2), via: created.length ? 'network' : 'page' };
+      if (ids.length >= 2) return { ids: ids.slice(0, 2), via: 'page' };
+      if (fresh.length === 1 && Date.now() > since + 30000) {
+        const extra = [...created, ...ids].find(id => id !== fresh[0]);
+        return { ids: extra ? [fresh[0], extra] : fresh, via: 'feed' };
+      }
       const state = await this.state().catch(() => null);
       const limit = detectLimit(state?.notices, action);
       if (limit) return { ids: [], limit };

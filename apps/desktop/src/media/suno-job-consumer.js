@@ -19,9 +19,9 @@ const { retryCoreUpdate, isCoreTimeout } = require('./media-job-consumer');
 //   verify and register the final asset linked to its preview.
 // Suno's credit / download-limit / rate-limit messages rest the account and
 // hand the job back to the queue (another account for a generation).
-const POLL_MS = 3000;
+const POLL_MS = 2000;
 const GENERATION_TIMEOUT_MS = 15 * 60 * 1000;
-const STATUS_FALLBACK_MS = 45 * 1000;
+const STATUS_FALLBACK_MS = 20 * 1000;
 const IDLE_STOP_MS = 10 * 60 * 1000;
 const MIN_PREVIEW_BYTES = 8 * 1024;
 
@@ -166,7 +166,7 @@ class SunoJobConsumer {
         await this.core('media.patch', { job_id: jobId, patch: { submission_phase: 'sending' } });
         await adapter.clickCreate();
         sent = true;
-        const created = await adapter.newClips(known, { action: 'generate' });
+        const created = await adapter.newClips(known, { action: 'generate', title: request.suno_title || '' });
         if (!created.ids.length) {
           if (created.limit) return this.handOff(job, created.limit);
           if (created.refusal) throw new Error('policy_refusal: Suno refused the request: ' + created.refusal);
