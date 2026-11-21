@@ -120,7 +120,7 @@ const PROBES = {
         min: Number(el.getAttribute('aria-valuemin') ?? el.min ?? 0), max: Number(el.getAttribute('aria-valuemax') ?? el.max ?? 100) });
     }
     const buttons = [];
-    for (const el of main.querySelectorAll('button,[role=tab],[role=radio],[role=combobox],[aria-haspopup]')) {
+    for (const el of main.querySelectorAll('button,[role=button],[role=tab],[role=radio],[role=combobox],[aria-haspopup]')) {
       if (!visible(el) || el.closest('nav,aside,header') || el.hasAttribute('data-tyr-idx')) continue;
       const value = text(el);
       const aria = clean(el.getAttribute('aria-label'));
@@ -189,6 +189,46 @@ const PROBES = {
     return true;
   },
 
+  // Step a custom slider to a value with key events sent to the slider itself
+  // (Suno's sliders listen to React onKeyDown; mouse events and scripted values
+  // do nothing in a hidden tab). Returns the value reached.
+  async sliderKeys(args) {
+    const el = document.querySelector('[data-tyr-idx="' + args.idx + '"]');
+    if (!el) return null;
+    const read = () => Number(el.getAttribute('aria-valuenow') ?? el.value);
+    const press = key => el.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, keyCode: key === 'ArrowLeft' ? 37 : 39, bubbles: true, cancelable: true }));
+    el.focus();
+    let current = read();
+    for (let i = 0; i < 800 && current !== args.target; i += 1) {
+      press(current < args.target ? 'ArrowRight' : 'ArrowLeft');
+      await new Promise(resolve => setTimeout(resolve, 15));
+      const next = read();
+      if (next === current) break;
+      if ((current < args.target && next > args.target) || (current > args.target && next < args.target)) { current = next; break; }
+      current = next;
+    }
+    return current;
+  },
+
+  // The track of a custom (div role=slider) slider: the nearest ancestor much
+  // wider than the thumb. Its screen box, scrolled into view.
+  sliderTrack(args) {
+    const el = document.querySelector('[data-tyr-idx="' + args.idx + '"]');
+    if (!el) return null;
+    el.scrollIntoView({ block: 'center' });
+    const thumb = el.getBoundingClientRect();
+    // Suno's slider element is the whole track (ticks 0-100%): use it as is.
+    if (thumb.width >= 60 && thumb.height < 80) return { left: thumb.left, top: thumb.top, width: thumb.width, height: thumb.height };
+    let track = el.parentElement;
+    for (let i = 0; track && i < 6; i += 1, track = track.parentElement) {
+      const r = track.getBoundingClientRect();
+      if (r.width >= Math.max(60, thumb.width * 4) && r.height < 80) break;
+    }
+    if (!track) return null;
+    const r = track.getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  },
+
   // Entries of an open menu/listbox/popover.
   menuItems(args) {
     const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
@@ -197,7 +237,8 @@ const PROBES = {
     const items = [];
     const nodes = [];
     for (const root of roots) {
-      for (const el of root.querySelectorAll('[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],[role=option],button')) {
+      // Suno's model picker is a grid of rows (role=row) in a dialog (2026-11-21).
+      for (const el of root.querySelectorAll('[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],[role=option],[role=row],button')) {
         if (!visible(el) || nodes.includes(el) || nodes.some(node => node.contains(el))) continue;
         nodes.push(el);
         const lines = (el.innerText || '').split('\n').map(clean).filter(Boolean);
@@ -722,9 +763,33 @@ class SunoAdapter {
     // Callers give percent; the slider may count 0-1 or 0-100.
     const target = Math.round((min + (max - min) * value / 100) * 1000) / 1000;
     if (await this.probe('setRange', { idx: item.idx, value: target })) return target;
+    const keyed = await this.probe('sliderKeys', { idx: item.idx, target });
+    if (keyed !== null && Math.abs(keyed - target) <= Math.max(1, (max - min) / 100)) return keyed;
+    // Custom sliders ignore scripted values and the hidden tab has no keyboard
+    // focus: click the track where the value lies (a real mouse event), then
+    // fine-tune with the arrow keys after focusing the page.
+    const track = await this.probe('sliderTrack', { idx: item.idx });
+    if (track && track.width > 0) {
+      const x = Math.round(track.left + track.width * Math.min(1, Math.max(0, (target - min) / ((max - min) || 1))));
+      const y = Math.round(track.top + track.height / 2);
+      await this.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }).catch(() => null);
+      await this.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }).catch(() => null);
+      await this.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }).catch(() => null);
+      await this.sleep(300);
+    }
+    try { this.webContents.focus(); } catch {}
     if (!await this.probe('focus', { idx: item.idx })) throw new Error('selector_failure: Suno slider "' + item.label + '" is gone');
-    await this.key('Home');
     let current = Number(await this.probe('readValue', { idx: item.idx }));
+    const step = (max - min) <= 10 ? 1 : 1;
+    for (let i = 0; i < 120 && Math.abs(current - target) >= step; i += 1) {
+      await this.key(current < target ? 'ArrowRight' : 'ArrowLeft');
+      const next = Number(await this.probe('readValue', { idx: item.idx }));
+      if (next === current) break;
+      current = next;
+    }
+    if (Math.abs(current - target) <= (max - min) / 50) return current;
+    await this.key('Home');
+    current = Number(await this.probe('readValue', { idx: item.idx }));
     for (let i = 0; i < 400 && current < target - 1e-6; i += 1) {
       await this.key('ArrowRight');
       const next = Number(await this.probe('readValue', { idx: item.idx }));
@@ -774,7 +839,9 @@ class SunoAdapter {
 
   async expandMore() {
     const form = await this.form();
-    const more = (form.buttons || []).filter(item => /^(more options|advanced options|more|show more options|options)$/i.test(item.text) && item.expanded === 'false');
+    // Only the Create panel's own "More Options" header: a bare "More" is the
+    // sidebar's menu, and clicking it covered the lyrics editor (2026-11-21).
+    const more = (form.buttons || []).filter(item => /^(more options|advanced options|show more options)$/i.test(item.text) && item.expanded === 'false');
     for (const item of more) { await this.probe('click', { idx: item.idx }); await this.sleep(this.settleMs); }
     return more.length;
   }
@@ -862,7 +929,14 @@ class SunoAdapter {
     // More Options (v6): Duration (Auto, or Custom 10-360 s), Max Mode, Variety
     // (0-4, 1 = Normal), Personalize (My taste).
     const onOff = async (pattern, name, on) => {
-      const { choice, offered } = findChoice(await this.form(), pattern, on ? 'On' : 'Off');
+      const current = await this.form();
+      let { choice, offered } = findChoice(current, pattern, on ? 'On' : 'Off');
+      if (!choice && /taste/.test(String(pattern))) {
+        // Personalize's Off/On follow its "My taste" button and have no group label.
+        const buttons = current.buttons || [];
+        const at = buttons.findIndex(item => /^my taste$/i.test(item.text || ''));
+        if (at >= 0) choice = buttons.slice(at + 1, at + 3).find(item => normalizeName(item.text) === (on ? 'on' : 'off')) || null;
+      }
       if (!choice) throw new Error('option_unavailable: Suno ' + name + ' is not offered; it shows: ' + (offered.join(', ') || 'no ' + name + ' option'));
       if (!choice.selected) { await this.probe('click', { idx: choice.idx }); await this.sleep(this.settleMs); }
       return on;
