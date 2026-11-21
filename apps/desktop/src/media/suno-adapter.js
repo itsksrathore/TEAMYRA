@@ -92,6 +92,11 @@ const PROBES = {
       }
       return [...ids, ...own, ...wrapping, ...direct, near].filter(Boolean).join(' | ').slice(0, 200);
     };
+    // Tags from an earlier read stay on the page: clear them, or the button
+    // loop below (which skips tagged fields) would skip every button on the
+    // second read (2026-11-21: 'no Simple/Custom switch' right after the
+    // tabs were found).
+    for (const old of document.querySelectorAll('[data-tyr-idx]')) old.removeAttribute('data-tyr-idx');
     let index = 0;
     const tag = el => { const id = String(index++); el.setAttribute('data-tyr-idx', id); return id; };
     const fields = [];
