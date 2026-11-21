@@ -10,6 +10,29 @@ function mediaId(value) {
   return text.match(/(?:^|\/(?:image|video)\/)([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:$|[/?#])/i)?.[1]?.toLowerCase() || '';
 }
 
+// A prompt chip's image UUID: read from its attributes, else from its thumbnail.
+// '' when Flow shows neither (an opaque thumbnail).
+function chipId(item) {
+  return String(item?.id || '').toLowerCase() || mediaId(item?.source);
+}
+
+// The chips not accounted for by the earlier ones (each identified earlier
+// chip must still be there), or null. An unidentified earlier chip cannot be
+// told apart, so it stays among the leftovers.
+function leftoverChips(ids, beforeIds) {
+  const rest = [...ids];
+  for (const id of beforeIds.filter(Boolean)) {
+    const index = rest.indexOf(id);
+    if (index < 0) return null;
+    rest.splice(index, 1);
+  }
+  return rest;
+}
+
+// No chip at all this long after "Add to prompt": the reference was not
+// attached. Fail in seconds instead of waiting out the whole verification.
+const NO_CHIP_FAIL_MS = 20000;
+
 function canonicalSource(value) {
   try { const url = new URL(value); return (url.origin + url.pathname).replace(/=s[0-9]+(?:-[a-z0-9-]+)?$/i, ''); }
   catch { return ''; }
@@ -30,7 +53,7 @@ function uploadKey(projectUrl, file) {
 
 // Omni references are prompt ingredients. Never promise exact first/end frames.
 class FlowReferenceController {
-  constructor(adapter) { this.adapter = adapter; }
+  constructor(adapter) { this.adapter = adapter; this.noChipFailMs = NO_CHIP_FAIL_MS; }
   async waitFor(read, label, timeoutMs = 20000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -59,11 +82,29 @@ class FlowReferenceController {
       target.click(); return true;
     })()`);
   }
+  // A chip's thumbnail is often an opaque /asb URL without the image UUID; look
+  // for the UUID in the chip's stable attributes too (data-* ids, src, srcset).
   async attachments() {
-    return this.adapter.executePageScript(`(() => [...document.querySelectorAll('button[aria-label="Ingredient"]')].map(el => ({
-      source: el.querySelector('img')?.getAttribute('src') || '',
-      busy: el.getAttribute('aria-busy') === 'true'
-    })))()`);
+    return this.adapter.executePageScript(`(() => {
+      const uuid = /(?:^|\\/(?:image|video)\\/)([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:$|[/?#])/i;
+      const names = ['data-media-id', 'data-asset-id', 'data-media-key', 'data-id', 'src', 'srcset', 'href'];
+      const idOf = el => {
+        for (const node of [el, ...el.querySelectorAll('*')]) {
+          for (const name of names) {
+            for (const part of String(node.getAttribute(name) || '').split(/[\\s,]+/)) {
+              const match = part.match(uuid);
+              if (match) return match[1].toLowerCase();
+            }
+          }
+        }
+        return '';
+      };
+      return [...document.querySelectorAll('button[aria-label="Ingredient"]')].map(el => ({
+        source: el.querySelector('img')?.getAttribute('src') || '',
+        id: idOf(el),
+        busy: el.getAttribute('aria-busy') === 'true'
+      }));
+    })()`);
   }
   async clearComposer() {
     const pickerOpen = await this.adapter.executePageScript(`document.querySelector('button[aria-label="Add ingredients to the prompt box"]')?.getAttribute('aria-expanded') === 'true'`);
@@ -298,39 +339,53 @@ class FlowReferenceController {
     if (!identity) uploaded = await this.uploadFile(reference);
     if (!identity && !uploaded) throw new Error('selector_failure: reference image identity is unavailable');
     if (!await this.clickButton('Add to prompt')) throw new Error('selector_failure: Add to prompt is unavailable');
-    const beforeIds = before.map(item => mediaId(item.source));
+    const beforeIds = before.map(chipId);
+    const unknownBefore = beforeIds.filter(id => !id).length;
+    const addedAt = Date.now();
     let seen = null;
+    let added = null;
     // Flow processes a fresh upload before its chip settles; with several Flow
     // tabs uploading at once that can take well over 20 s.
-    const attached = await this.waitFor(async () => {
+    await this.waitFor(async () => {
       const attached = await this.attachments();
-      const ids = attached.map(item => mediaId(item.source));
-      const addedIds = ids.filter(id => !beforeIds.includes(id));
-      seen = { chips: attached.length, expected_chips: before.length + 1, busy: attached.filter(item => item.busy).length,
-        added: addedIds, expected_id: identity || null };
-      return attached.length === before.length + 1 && attached.every(item => !item.busy) &&
-        ids.every(Boolean) && beforeIds.every(id => ids.includes(id)) && addedIds.length === 1 &&
-        (!identity || addedIds[0] === identity) ? attached : null;
+      const ids = attached.map(chipId);
+      const busy = attached.filter(item => item.busy).length;
+      const rest = leftoverChips(ids, beforeIds);
+      seen = { chips: attached.length, expected_chips: before.length + 1, busy,
+        added: rest, expected_id: identity || null };
+      if (attached.length <= before.length && !busy && Date.now() - addedAt > this.noChipFailMs) {
+        throw new Error('reference_attach_failed: Flow did not add the reference image to the prompt within ' +
+          Math.round(this.noChipFailMs / 1000) + ' s');
+      }
+      if (attached.length !== before.length + 1 || busy || !rest || rest.length !== unknownBefore + 1) return null;
+      // One new chip, settled. Flow may show it with an opaque thumbnail (no
+      // UUID): with exactly one chip added after our Add to prompt it is ours.
+      // A chip showing a different image is never accepted as the expected one.
+      if (identity && !rest.includes(identity) && !rest.includes('')) return null;
+      added = identity || (unknownBefore ? null : rest[0] || null);
+      return attached;
     }, 'verified prompt image ingredient', uploaded ? 60000 : 30000).catch(error => {
-      throw new Error(error.message + '; seen=' + JSON.stringify(seen).slice(0, 500));
+      const message = String(error?.message || error);
+      throw new Error((/^reference_attach_failed/.test(message) ? message : 'reference_attach_failed: ' + message) +
+        '; seen=' + JSON.stringify(seen).slice(0, 500));
     });
-    if (!identity) identity = attached.map(item => mediaId(item.source)).find(id => !beforeIds.includes(id));
-    if (!identity) throw new Error('selector_failure: uploaded ingredient lacks a stable image ID');
-    if (uploaded && cacheKey) {
+    identity = added || null;
+    if (uploaded && cacheKey && identity) {
       if (uploadedReferences.size > 500) uploadedReferences.delete(uploadedReferences.keys().next().value);
       uploadedReferences.set(cacheKey, { title: uploaded.uploaded_name, titles: uploaded.uploaded_titles || [uploaded.uploaded_name], identity });
     }
     return { asset_id: reference.asset_id || null, path: reference.path,
       requested_roles: reference.roles || ['ingredient'], effective_role: 'ingredient',
-      provider_asset_id: identity, verified: true, upload_preparation: uploaded?.preparation || null,
+      provider_asset_id: identity, verified: true, identity_verified: Boolean(identity), upload_preparation: uploaded?.preparation || null,
       reused_upload: reused };
   }
+  // Every identified reference is still attached, and nothing else: chips
+  // Flow shows without a UUID count only for references attached unidentified.
   async matches(items = []) {
     const attached = await this.attachments();
-    const actual = attached.map(item => mediaId(item.source)).sort();
-    const expected = items.map(item => item.provider_asset_id).sort();
-    return attached.every(item => !item.busy) && actual.length === expected.length &&
-      actual.every((value, index) => value && value === expected[index]);
+    if (attached.some(item => item.busy) || attached.length !== items.length) return false;
+    const rest = leftoverChips(attached.map(chipId), items.map(item => mediaId(item.provider_asset_id)));
+    return Boolean(rest) && rest.length === items.filter(item => !mediaId(item.provider_asset_id)).length;
   }
   async prepare(references = []) {
     // Flow's picker sometimes adds a second chip (a selection it kept) or never
@@ -343,11 +398,11 @@ class FlowReferenceController {
         for (const reference of references) items.push(await this.attach(reference));
         return { ok: true, mode: 'ingredients', count: items.length, items, attempts: attempt + 1 };
       } catch (error) {
-        if (attempt >= 1 || !/did not become ready/i.test(String(error?.message || error))) throw error;
+        if (attempt >= 1 || !/did not become ready|reference_attach_failed/i.test(String(error?.message || error))) throw error;
         await this.dismissOverlays().catch(() => {});
       }
     }
   }
 }
 
-module.exports = { FlowReferenceController, mediaId, canonicalSource, uploadedReferences, uploadKey };
+module.exports = { FlowReferenceController, mediaId, chipId, canonicalSource, uploadedReferences, uploadKey, NO_CHIP_FAIL_MS };

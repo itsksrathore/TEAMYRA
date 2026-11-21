@@ -3,6 +3,7 @@ const path = require('node:path');
 const { callCore } = require('../core-api');
 const { verifyMediaOutput } = require('./media-output-validator');
 const { GoogleVidsAdapter, samePrompt } = require('./google-vids-adapter');
+const { retryCoreUpdate, isCoreTimeout } = require('./media-job-consumer');
 
 // Google Vids worker for one hidden tab of one Google account. Like a Flow
 // tab it claims jobs from the shared queue (surface "vids"), submits several
@@ -110,7 +111,8 @@ class VidsJobConsumer {
   stop() { this.running = false; clearTimeout(this.timer); this.timer = null; }
 
   update(jobId, state, detail, extra) {
-    return this.core('media.update-state', { job_id: jobId, state, detail, extra }, { timeout: 15000 });
+    return retryCoreUpdate(() => this.core('media.update-state', { job_id: jobId, state, detail, extra }, { timeout: 30000 }),
+      this.updateRetryDelays);
   }
 
   async tick() {
@@ -162,6 +164,7 @@ class VidsJobConsumer {
 
   async admit(job) {
     const jobId = job.job_id;
+    let reachedSubmit = false;
     try {
       if (job.provider_submission?.submitted_at) {
         // Vids keeps unfinished clips only in the tab that made them; after a
@@ -181,6 +184,7 @@ class VidsJobConsumer {
       await this.update(jobId, 'submitting', this.inFlight.size
         ? 'Submitting to Google Vids (' + (this.inFlight.size + 1) + ' running in this tab)' : 'Submitting to Google Vids');
       let knownFailures = new Set();
+      reachedSubmit = true;
       const submission = await this.ui.run(async () => {
         await this.workspace();
         const adapter = await this.adapter();
@@ -209,6 +213,8 @@ class VidsJobConsumer {
       // Name the step a hung page operation was on.
       const step = this.provider.adapter?.step;
       const text = String(error?.message || error);
+      // Core did not answer before anything was sent to Vids: safe to retry.
+      if (!reachedSubmit && isCoreTimeout(error)) return this.fail(jobId, error, 'core_timeout');
       await this.fail(jobId, /timed out/.test(text) && step && !text.includes('step:') ? new Error(text + ' (step: ' + step + ')') : error);
     }
   }

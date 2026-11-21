@@ -46,6 +46,41 @@ class MediaRecoveryTests(unittest.TestCase):
                                  reconcile_required=True)
         self.assertFalse(media_engine.recover_job(self.root, job_id)['recovered'])
 
+    def test_reference_attach_failure_is_a_visible_recoverable_category(self):
+        job_id = self.failed_job('reference_attach_failed: references: reference_attach_failed: Flow did not add '
+                                 'the reference image to the prompt within 20 s', submission_phase='preparing')
+        plan = media_engine.job_status(self.root, job_id)['recovery_plan']
+        self.assertEqual(plan['category'], 'reference_attach_failed')
+        self.assertEqual(plan['action'], 'retry_before_submission')
+        self.assertTrue(plan['can_recover'] and plan['automatic'])
+        self.assertIn('without references', plan['instruction'])
+        self.assertTrue(media_engine.recover_job(self.root, job_id, automatic=True)['recovered'])
+
+    def test_core_timeout_before_submission_is_retried_not_a_generation_failure(self):
+        job = media_engine.create_job(self.root, {'type': 'image', 'prompt': 'poster', 'project_path': str(self.project)})
+        media_engine.update_job_state(self.root, job['job_id'], 'failed',
+                                      'core_timeout: TEAMYRA Core did not answer media.update-state in 30 s',
+                                      extra={'failure': {'category': 'core_timeout'}})
+        plan = media_engine.job_status(self.root, job['job_id'])['recovery_plan']
+        self.assertEqual(plan['category'], 'core_timeout')
+        self.assertEqual((plan['action'], plan['can_recover'], plan['automatic'], plan['submitted']),
+                         ('retry_before_submission', True, True, False))
+        # The same timeout once Generate may have been clicked is never retried blindly.
+        uncertain = self.failed_job('core_timeout: TEAMYRA Core did not answer media.patch in 15 s')
+        self.assertEqual(media_engine.job_status(self.root, uncertain)['recovery_plan']['action'], 'manual_reconciliation')
+
+    def test_claim_index_is_kept_in_memory_and_follows_changes(self):
+        first = media_engine.create_job(self.root, {'type': 'image', 'prompt': 'one', 'project_path': str(self.project)})
+        self.assertEqual(media_engine.claim_next_job(self.root, 'visual', 'google')['job_id'], first['job_id'])
+        index = str(media_engine._index_file(self.root))
+        self.assertIn(index, media_engine._INDEX_MEMO)
+        second = media_engine.create_job(self.root, {'type': 'image', 'prompt': 'two', 'project_path': str(self.project)})
+        with patch.object(media_engine, '_read_json', wraps=media_engine._read_json) as reads:
+            self.assertEqual(media_engine.claim_next_job(self.root, 'visual', 'google')['job_id'], second['job_id'])
+        read_paths = [str(call.args[0]) for call in reads.call_args_list]
+        self.assertNotIn(index, read_paths, 'the unchanged index is not parsed again')
+        self.assertIsNone(media_engine.claim_next_job(self.root, 'visual', 'google'))
+
     def test_submitted_job_preserves_identity_and_download(self):
         submission = {'submitted_at': 123, 'provider_url': 'https://flow.google.com/project/one',
                       'baseline_result_keys': ['old'], 'result_key': 'new', 'acknowledgement_pending': True}

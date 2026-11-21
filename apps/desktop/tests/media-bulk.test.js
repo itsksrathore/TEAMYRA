@@ -896,6 +896,47 @@ async function referenceRetryTests() {
   await assert.rejects(strict.prepare([{ path: 'a.png' }]), /upload_terms_required/, 'other failures are not retried');
 }
 
+// ISSUE 2026-11-21 #2: Core answered media.update-state too late before
+// anything was submitted. The update is retried; if Core still does not answer,
+// the job ends recoverable (core_timeout), never as a generation_failure.
+async function coreTimeoutTests(temp) {
+  const { classifyError: classify } = require('../src/media/media-job-consumer');
+  assert.equal(classify(new Error('TEAMYRA Core did not answer media.update-state in 15 s')).category, 'core_timeout');
+  assert.equal(classify(new Error('references: reference_attach_failed: selector_failure: verified prompt image ingredient did not become ready')).category,
+    'reference_attach_failed', 'an unattached reference has its own category');
+  const run = async late => {
+    const { core: base, records } = fakeCore(temp, [{ job_id: 'slow-1', created_at: 0, request: { type: 'image', prompt: 'poster' } }]);
+    const updates = [];
+    let misses = 0;
+    const core = async (name, args) => {
+      if (name === 'media.update-state') {
+        updates.push(args.state);
+        if (args.state === 'waiting_for_browser' && misses < late) { misses += 1; throw new Error('TEAMYRA Core did not answer media.update-state in 30 s'); }
+      }
+      if (name === 'media.recover') { records.get('slow-1').recovered = true; return {}; }
+      return base(name, args);
+    };
+    const loaded = loadConsumer(core);
+    const submits = [];
+    const consumer = new loaded.MediaJobConsumer({ surface: 'visual', downloadManager: { cancelJob() {} },
+      provider: { ensureLoaded: async () => {}, destroy() {}, view: { webContents: { id: 70, getURL: () => '' } }, adapter: {
+        probe: async () => ({ buttonLabels: [] }), classifyProbe: () => ({ signedIn: true }), capabilities: async () => ({}),
+        submit: async job => { submits.push(job.job_id); throw new Error('stop here'); } } } });
+    consumer.updateRetryDelays = [0, 0, 0];
+    const job = await base('media.claim', {});
+    await consumer.process(job);
+    return { record: records.get('slow-1'), updates, submits };
+  };
+  const recovered = await run(2);
+  assert.equal(recovered.submits.length, 1, 'a late answer is retried and the job goes on');
+  const lost = await run(99);
+  assert.equal(lost.submits.length, 0, 'nothing is submitted while Core does not answer');
+  assert.equal(lost.record.failure.category, 'core_timeout');
+  assert.match(lost.record.detail, /^core_timeout: /);
+  assert.equal(lost.record.recovered, true, 'automatic recovery is asked for');
+  assert.equal(lost.updates.filter(state => state === 'waiting_for_browser').length, 4, 'three retries, then give up');
+}
+
 // Flow Music's WAV export failed and it handed over MP3: the job still gets WAV.
 async function musicFallbackTests(temp) {
   const jobs = [{ job_id: 'song-1', created_at: 0, request: { type: 'instrumental', prompt: 'battle drums', format: 'wav' } }];
@@ -985,6 +1026,7 @@ async function main() {
     await musicSongPageTests();
     await upscaleFailureTests(temp);
     await referenceRetryTests();
+    await coreTimeoutTests(temp);
     await accountTests(temp);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
