@@ -302,6 +302,8 @@ def cmd_pool(args):
         }
         if args.tool:
             payload["tool_names"] = args.tool
+        if args.capability:
+            payload["capability"] = args.capability
         result = call("mcp_pool_tools", payload)
     elif action == "call":
         try:
@@ -626,6 +628,7 @@ def parser():
     pool_tools.add_argument("--refresh", action="store_true")
     pool_tools.add_argument("--detail", choices=["auto", "compact", "full"], default="auto")
     pool_tools.add_argument("--tool", action="append", help="Only this tool, with its full input schema; repeatable")
+    pool_tools.add_argument("--capability", choices=["text_to_speech"], help="Only tools providing this capability, best match first")
     pool_tools.set_defaults(func=cmd_pool)
 
     pool_call = pool_sub.add_parser("call")

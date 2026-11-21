@@ -10,6 +10,27 @@ const FIRST_CALLBACK_PORT = 47681;
 const LAST_CALLBACK_PORT = 47696;
 const PROFILE_ID = /^[a-z0-9][a-z0-9_-]{0,52}$/;
 
+// Text-to-speech is found by name and description, never one hard-coded name:
+// the hosted MCP serves it as creative_generate_speech, the local ElevenLabs
+// MCP package as text_to_speech. Mirrors CAPABILITIES in bridge/mcp_pool.py.
+const SPEECH_NAME = /text_?to_?speech|(?:^|_)tts(?:_|$)|(?:generate|create|synthesi[sz]e|make)_(?:the_)?speech|speech_(?:generat|synthes)|(?:^|_)(?:speak|narrate|voiceover)(?:_|$)/;
+const SPEECH_DESCRIPTION = /text[\s_-]*to[\s_-]*speech|\btts\b|convert\w*\s+(?:\w+\s+){0,2}text\s+(?:in)?to\s+(?:speech|audio|voice|spoken)|(?:generate|create|synthesi[sz]e)\w*\s+(?:\w+\s+){0,2}(?:speech|narration|voice[\s-]?over|spoken audio)/;
+const SPEECH_EXCLUDE = /speech_?to_?(?:text|speech)|transcri|history|dubb|isolat|voice_?chang|(?:^|_)stt(?:_|$)|(?:^|_)(?:list|get|delete|search|clone|design)_|sound_?effect|music/;
+
+function findSpeechTools(tools) {
+  return (Array.isArray(tools) ? tools : []).flatMap((tool, index) => {
+    const name = String(tool?.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!name || SPEECH_EXCLUDE.test(name)) return [];
+    const description = String(tool.description || '').toLowerCase().split(/\s+/).join(' ');
+    let score = (SPEECH_NAME.test(name) ? 3 : 0) + (SPEECH_DESCRIPTION.test(description) ? 2 : 0);
+    if (!score) return [];
+    if (/dialog|stream|timestamp|websocket/.test(name)) score -= 1;
+    return [{ tool, key: [-score, name.length, index] }];
+  }).sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2]).map(item => item.tool);
+}
+
+const NO_SPEECH_TOOL = 'This ElevenLabs account\'s MCP lists no text-to-speech tool. Check that the account\'s plan includes text to speech and that its sign-in granted the text_to_speech permission, then select Switch account and sign in again.';
+
 function serverName(id) {
   if (!PROFILE_ID.test(String(id || ''))) throw new Error('Invalid ElevenLabs account profile');
   return 'elevenlabs-' + id;
@@ -101,7 +122,7 @@ class ElevenLabsMcp {
   setState(id, patch) {
     const before = this.getState(id);
     this.states.set(id, { ...before, ...patch });
-    if (['state', 'phase', 'error', 'toolCount'].some(key => before[key] !== patch[key] && key in patch)) {
+    if (['state', 'phase', 'error', 'toolCount', 'speechTool'].some(key => before[key] !== patch[key] && key in patch)) {
       this.invalidate();
       this.onState(this.getState(id));
     }
@@ -191,7 +212,9 @@ class ElevenLabsMcp {
         await this.validateMetadata(spec);
         const listing = await this.discover(id, spec);
         if (!Array.isArray(listing.tools)) throw new Error('ElevenLabs MCP returned an invalid tool catalog');
-        this.setState(id, { state: 'connected', phase: null, toolCount: listing.tools.length, checkedAt: new Date().toISOString(), error: null });
+        const speechTool = findSpeechTools(listing.tools)[0]?.name || null;
+        this.setState(id, { state: 'connected', phase: null, toolCount: listing.tools.length, speechTool,
+          speechToolError: speechTool ? null : NO_SPEECH_TOOL, checkedAt: new Date().toISOString(), error: null });
         return { ...this.getState(id), tools: listing.tools };
       } catch (error) {
         this.setState(id, { state: 'error', phase: null, error: 'MCP connection failed. Complete browser sign-in or check network access, then retry.' });
@@ -302,4 +325,4 @@ function registerElevenLabsMcp({ electron, root, ensureMcp, endpoint, getWindow,
   return service;
 }
 
-module.exports = { ElevenLabsMcp, registerElevenLabsMcp, serverName, callPoolTool, ELEVENLABS_MCP_URL, CLIENT_METADATA_URL };
+module.exports = { ElevenLabsMcp, registerElevenLabsMcp, serverName, callPoolTool, findSpeechTools, NO_SPEECH_TOOL, ELEVENLABS_MCP_URL, CLIENT_METADATA_URL };

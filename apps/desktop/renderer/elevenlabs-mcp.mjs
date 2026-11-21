@@ -18,6 +18,7 @@ export async function openElevenLabsMcp(profile, onChange = () => {}, { startLog
     <p class="bulk-summary">Connect / Login opens official ElevenLabs authorization in your browser. The browser may reuse its current signed-in account. To connect another account, switch accounts on ElevenLabs in that browser, then select Connect again. Other profiles keep their connections.</p>
     <form data-form>
       <div class="bulk-folder"><label class="bulk-field"><span>Available MCP tool</span><select data-tool required><option value="">Connect to discover tools</option></select></label></div>
+      <p data-speech class="bulk-summary" role="status"></p>
       <p data-description class="bulk-summary"></p>
       <details class="bulk-summary"><summary>Tool input schema</summary><pre data-schema></pre></details>
       <label class="task-prompt"><textarea data-arguments required aria-label="MCP tool arguments as JSON" spellcheck="false" placeholder='{"text": "Namaste"}'>{}</textarea></label>
@@ -79,7 +80,11 @@ export async function openElevenLabsMcp(profile, onChange = () => {}, { startLog
     const result = reauthorize ? await window.teamyra.elevenLabsMcpReauthorize(profile.id) : await window.teamyra.elevenLabsMcpConnect(profile.id);
     tools = result.tools;
     $('[data-tool]').innerHTML = tools.map(tool => `<option value="${escape(tool.name)}">${escape(tool.name)}</option>`).join('');
+    // Start on the account's text-to-speech tool, whatever the provider calls it.
+    if (result.speechTool) $('[data-tool]').value = result.speechTool;
     $('[data-tool]').dispatchEvent(new Event('change'));
+    $('[data-speech]').textContent = result.speechTool
+      ? `Text to speech: ${result.speechTool}` : (result.speechToolError || '');
     $('[data-refresh]').textContent = 'Refresh tools';
     showState(result);
   });

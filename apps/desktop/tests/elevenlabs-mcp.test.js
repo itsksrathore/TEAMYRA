@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ElevenLabsMcp, serverName, callPoolTool, ELEVENLABS_MCP_URL, CLIENT_METADATA_URL, registerElevenLabsMcp } = require('../src/elevenlabs-mcp');
+const { ElevenLabsMcp, serverName, callPoolTool, findSpeechTools, NO_SPEECH_TOOL, ELEVENLABS_MCP_URL, CLIENT_METADATA_URL, registerElevenLabsMcp } = require('../src/elevenlabs-mcp');
 
 function fixture(t, impl) {
   const parent = path.resolve(__dirname, '../../../.teamyra-desktop/elevenlabs-mcp-tests');
@@ -317,4 +317,34 @@ test('a saved login survives a restart and opening it does not start a new sign-
   assert.equal(after.oauth_login_revision, before.oauth_login_revision, 'the saved login store is kept');
   assert.equal(service.getState('account-1').state, 'connected');
   assert.ok(calls.some(c => c.name === 'mcp_pool_register' && c.args.env.MCP_REMOTE_CONFIG_DIR === path.dirname(store)));
+});
+
+test('text-to-speech is found by its current name, not one hard-coded string', () => {
+  const tools = [
+    { name: 'speech_to_text', description: 'Transcribe speech.' },
+    { name: 'creative_list_voices', description: 'List voices for text to speech.' },
+    { name: 'get_speech_history', description: 'Text to speech history.' },
+    { name: 'text_to_dialogue', description: 'Generate speech for a multi-voice dialogue.' },
+    { name: 'creative_generate_speech', description: 'Turn text into lifelike speech.' },
+    { name: 'voice_changer', description: 'Speech to speech.' }
+  ];
+  assert.deepEqual(findSpeechTools(tools).map(t => t.name), ['creative_generate_speech', 'text_to_dialogue']);
+  assert.equal(findSpeechTools([{ name: 'text_to_speech' }])[0].name, 'text_to_speech');
+  assert.equal(findSpeechTools([{ name: 'audio_create', description: 'Converts the given text into spoken audio.' }])[0].name, 'audio_create');
+  assert.deepEqual(findSpeechTools(undefined), []);
+});
+
+test('connect reports the account text-to-speech tool or a clear reason it has none', async t => {
+  const { service } = fixture(t, name => name === 'mcp_pool_tools'
+    ? { tools: [{ name: 'creative_list_voices' }, { name: 'creative_generate_speech', description: 'Text to speech.' }] } : {});
+  const connected = await service.connect('account-1');
+  assert.equal(connected.speechTool, 'creative_generate_speech');
+  assert.equal(connected.speechToolError, null);
+
+  const { service: other } = fixture(t, name => name === 'mcp_pool_tools' ? { tools: [{ name: 'creative_list_voices' }] } : {});
+  const without = await other.connect('account-2');
+  assert.equal(without.state, 'connected');
+  assert.equal(without.speechTool, null);
+  assert.equal(without.speechToolError, NO_SPEECH_TOOL);
+  assert.match(without.speechToolError, /no text-to-speech tool.*text_to_speech permission/);
 });
