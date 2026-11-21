@@ -29,7 +29,10 @@ ITEM_TIMEOUT_SECONDS = 12 * 60
 LIMIT_COOLDOWN_SECONDS = 15 * 60
 SIZES = {"1536x1024", "1024x1536", "1024x1024", "auto"}
 FORMATS = {".png", ".jpg", ".jpeg", ".webp"}
-TERMINAL = {"completed", "failed", "refused", "cancelled"}
+TERMINAL = {"completed", "failed", "refused", "cancelled", "rate_limited"}
+MODEL_UNUSABLE_SECONDS = 24 * 3600
+_MODEL_RE = re.compile(r"model_not_found|model is not supported|not supported when using codex", re.I)
+_RESET_RE = re.compile(r"try again (?:at|after)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?", re.I)
 _BATCH_RE = re.compile(r"^cimg-\d{8}-\d{6}-[0-9a-f]{6}$")
 _LIMIT_RE = re.compile(r"usage limit|rate limit|too many requests|\b429\b|quota", re.I)
 
@@ -172,8 +175,17 @@ def batch_status(root, batch_id):
         "counts": counts, "done": done, "runner_alive": _runner_alive(folder) if not done else False,
         "elapsed_seconds": round((ended if done else time.time()) - batch["created_at"]),
         "items": [{key: item.get(key) for key in ("index", "status", "output", "account", "attempts",
-                                                  "seconds", "width", "height", "error")} for item in batch["items"]],
+                                                  "seconds", "width", "height", "error", "retry_at")}
+                  for item in batch["items"]],
+        "accounts": _safe_account_status(root),
     }
+
+
+def _safe_account_status(root):
+    try:
+        return codex_account_status(root)
+    except Exception:
+        return []
 
 
 def cancel_batch(root, batch_id):
@@ -267,6 +279,74 @@ def _save_output(source, destination):
     return image_size(destination)
 
 
+# --- account state across batches (cache/codex-image-accounts.json) --------------------
+# A usage limit (with the reset time Codex names) or a model the account cannot
+# use is remembered, so the next batch skips that account until then instead of
+# spending a run per image (Ojas Studio, 2026-11-21).
+def _state_file(root):
+    return Path(root) / "cache" / "codex-image-accounts.json"
+
+
+def _account_state(root):
+    data = _read_json(_state_file(root), {}) if root else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_account_state(root, worker, **fields):
+    if not root:
+        return
+    path = _state_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _account_state(root)
+    entry = dict(data.get(worker) or {})
+    entry.update(fields)
+    data[worker] = entry
+    _write_json(path, data)
+
+
+def reset_time(text, now=None):
+    """Epoch seconds of "try again at 1:51 PM" (local time), or None."""
+    match = _RESET_RE.search(str(text or ""))
+    if not match:
+        return None
+    hour, minute, meridiem = int(match.group(1)), int(match.group(2) or 0), (match.group(3) or "").lower()
+    if meridiem.startswith("p") and hour < 12:
+        hour += 12
+    if meridiem.startswith("a") and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    now = time.time() if now is None else now
+    local = time.localtime(now)
+    target = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, hour, minute, 0, 0, 0, -1))
+    if target <= now:
+        target += 24 * 3600
+    return target
+
+
+def account_cooldown(root, worker, now=None):
+    """(until, reason) while this account should take no images, else (0, None)."""
+    now = time.time() if now is None else now
+    entry = _account_state(root).get(worker) or {}
+    until = float(entry.get("cooldown_until") or 0)
+    return (until, entry.get("reason")) if until > now else (0, None)
+
+
+def codex_account_status(root):
+    """Every signed-in Codex account with its image cooldown, for callers that
+    want to skip Codex until a limit resets."""
+    now = time.time()
+    state = _account_state(root)
+    rows = []
+    for worker, _home in codex_accounts(root):
+        until, reason = account_cooldown(root, worker, now)
+        entry = state.get(worker) or {}
+        rows.append({"account": worker, "ready": not until, "cooldown_until": until or None,
+                     "retry_at": _retry_text(until) if until else None, "reason": reason,
+                     "uses_default_model": bool(entry.get("no_model_override"))})
+    return rows
+
+
 def codex_accounts(root, wanted=None):
     """Signed-in Codex accounts (worker id -> CODEX_HOME), main account first."""
     from worker_registry import build_worker_registry
@@ -291,13 +371,18 @@ def _settings(root):
     return codex.get("model"), codex.get("effort")
 
 
-def run_one(item, home, project, timeout=ITEM_TIMEOUT_SECONDS, root=None, runner=subprocess.run):
-    """Generate one image as one `codex exec`. Returns a result dict."""
+def run_one(item, home, project, timeout=ITEM_TIMEOUT_SECONDS, root=None, runner=subprocess.run,
+            use_model=True):
+    """Generate one image as one `codex exec`. Returns a result dict.
+    use_model=False leaves the model to the account's own default (an account
+    whose plan rejects the configured model, e.g. codex2 and gpt-6.1-sol)."""
     launch = codex_launch()
     if not launch:
         return {"status": "failed", "error": "Codex CLI not found"}
     share_codex_sandbox(home)
     model, effort = _settings(root) if root else (None, None)
+    if not use_model:
+        model = None
     refs = ""
     if item["references"]:
         count = len(item["references"])
@@ -350,18 +435,31 @@ def run_one(item, home, project, timeout=ITEM_TIMEOUT_SECONDS, root=None, runner
         return {"status": "completed", "seconds": seconds, "width": size[0] if size else None,
                 "height": size[1] if size else None, "source": str(images[-1]), "generations": len(images),
                 "thread_id": thread_id}
+    if _MODEL_RE.search(detail) or _MODEL_RE.search(reply):
+        return {"status": "model_unsupported", "seconds": seconds, "error": (detail or reply)[:600]}
     if _LIMIT_RE.search(detail) or _LIMIT_RE.search(reply):
-        return {"status": "limited", "seconds": seconds, "error": (detail or reply)[:600]}
+        text = detail or reply
+        return {"status": "limited", "seconds": seconds, "error": text[:600], "retry_at_epoch": reset_time(text)}
     if reply.upper().startswith("REFUSED"):
         return {"status": "refused", "seconds": seconds, "error": reply[:600]}
     return {"status": "failed", "seconds": seconds,
             "error": ("no image was generated; " + (reply or detail or f"exit {code}"))[:600]}
 
 
+def _retry_text(epoch):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch)) if epoch else None
+
+
 def run_batch(root, folder, runner=subprocess.run):
     folder = Path(folder)
     batch = _read_json(folder / "batch.json")
     accounts = codex_accounts(root, batch.get("accounts") or None)
+    # Accounts still cooling down from an earlier batch are left out (all of
+    # them resting: keep them, the batch ends rate_limited with a retry time).
+    now = time.time()
+    resting = [worker for worker, _ in accounts if account_cooldown(root, worker, now)[0]]
+    if resting and len(resting) < len(accounts):
+        accounts = [(worker, home) for worker, home in accounts if worker not in resting]
     if not accounts:
         with _lock(folder):
             batch = _read_json(folder / "batch.json")
@@ -373,7 +471,9 @@ def run_batch(root, folder, runner=subprocess.run):
     per_account = DEFAULT_PER_ACCOUNT
     total = batch.get("max_parallel") or per_account * len(accounts)
     running = {worker: 0 for worker, _ in accounts}
-    limited_until = {worker: 0.0 for worker, _ in accounts}
+    limited_until = {worker: account_cooldown(root, worker)[0] for worker, _ in accounts}
+    known = _account_state(root)
+    default_model = {worker: bool((known.get(worker) or {}).get("no_model_override")) for worker, _ in accounts}
     homes = dict(accounts)
     state = threading.Lock()
     stop = threading.Event()
@@ -422,19 +522,38 @@ def run_batch(root, folder, runner=subprocess.run):
 
     def work(item, worker):
         try:
-            result = run_one(item, homes[worker], batch["project_path"], root=root, runner=runner)
+            result = run_one(item, homes[worker], batch["project_path"], root=root, runner=runner,
+                             use_model=not default_model[worker])
+            if result["status"] == "model_unsupported" and not default_model[worker]:
+                # The account's plan rejects the configured model: use its own default.
+                result = run_one(item, homes[worker], batch["project_path"], root=root, runner=runner,
+                                 use_model=False)
+                if result["status"] != "model_unsupported":
+                    default_model[worker] = True
+                    _save_account_state(root, worker, no_model_override=True)
         except Exception as exc:  # keep the batch going
             result = {"status": "failed", "error": f"runner error: {exc}"[:600]}
         with state:
             running[worker] -= 1
             if result["status"] == "limited":
-                limited_until[worker] = time.time() + LIMIT_COOLDOWN_SECONDS
-        if result["status"] == "limited":
+                limited_until[worker] = result.get("retry_at_epoch") or time.time() + LIMIT_COOLDOWN_SECONDS
+                _save_account_state(root, worker, cooldown_until=limited_until[worker], reason="usage_limit",
+                                    detail=result["error"][:300])
+            elif result["status"] == "model_unsupported":
+                limited_until[worker] = time.time() + MODEL_UNUSABLE_SECONDS
+                _save_account_state(root, worker, cooldown_until=limited_until[worker], reason="model_unsupported",
+                                    detail=result["error"][:300])
+        if result["status"] in ("limited", "model_unsupported"):
             others = any(limited_until[name] <= time.time() for name, _ in accounts)
             if others and item["attempts"] + 1 < 4:
                 update(item["index"], status="queued", account=None, error=result["error"])
                 return
-            result["status"] = "failed"
+            if result["status"] == "limited":
+                result["status"] = "rate_limited"
+                result["retry_at"] = _retry_text(min(limited_until.values()))
+            else:
+                result["status"] = "failed"
+        result.pop("retry_at_epoch", None)
         update(item["index"], **result, ended=time.time())
 
     threads = []
@@ -455,10 +574,17 @@ def run_batch(root, folder, runner=subprocess.run):
         stop.set()
         with _lock(folder):
             current = _read_json(folder / "batch.json")
+            all_limited = bool(accounts) and all(limited_until[worker] > time.time() for worker, _ in accounts)
             for item in current["items"]:
                 if item["status"] == "queued":
-                    item.update(status="cancelled" if current.get("cancel_requested") else "failed",
-                                error=item.get("error") or "not started")
+                    if current.get("cancel_requested"):
+                        item.update(status="cancelled", error=item.get("error") or "not started")
+                    elif all_limited:
+                        # Every account is at its limit: say when to come back.
+                        item.update(status="rate_limited", retry_at=_retry_text(min(limited_until.values())),
+                                    error=item.get("error") or "every Codex account is at its usage limit")
+                    else:
+                        item.update(status="failed", error=item.get("error") or "not started")
             _write_json(folder / "batch.json", current)
         _write_json(folder / "heartbeat.json", {"at": 0, "pid": os.getpid(), "finished": time.time()})
 

@@ -119,6 +119,12 @@ def handle(action, payload):
             result = {**result, "transferred": moved}
         return result
 
+    if action == "codex.models":
+        import server
+        return server.codex_model_state()
+    if action == "codex.set_model":
+        import server
+        return server.set_codex_model(payload.get("model"))
     if action == "antigravity.models":
         import server
         return server.antigravity_model_state(bool(payload.get("refresh")))

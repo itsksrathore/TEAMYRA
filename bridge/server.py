@@ -536,7 +536,7 @@ def codex_cmd(task, cwd, write, final_path, session_id=None, settings=None, extr
     if not launch:
         raise RuntimeError("Codex CLI not found. Install Codex or set TEAMYRA_CODEX / TEAMYRA_CODEX_JS.")
     base = [*launch,
-            "-c", f'model="{c.get("model", "gpt-6.1-sol")}"',
+            "-c", f'model="{c.get("model") or CODEX_DEFAULT_MODEL}"',
             "-c", f'model_reasoning_effort="{c.get("effort", "high")}"']
     for item in extra_config or []:
         base += ["-c", item]
@@ -655,6 +655,53 @@ def set_antigravity_model(model):
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, CONFIG)
     return antigravity_model_state()
+
+
+CODEX_DEFAULT_MODEL = "gpt-6.1-sol"
+
+
+def codex_models():
+    """[{id, label}] Codex offers, from its own models cache (models_cache.json in
+    the main CODEX_HOME, refreshed by the Codex CLI); hidden ones are left out."""
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        data = json.loads((home / "models_cache.json").read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    rows = data.get("models") if isinstance(data, dict) else data
+    models = []
+    for row in rows or []:
+        slug = str((row or {}).get("slug") or (row or {}).get("id") or "")
+        if not slug or (row.get("visibility") not in (None, "list")):
+            continue
+        models.append({"id": slug, "label": row.get("display_name") or slug})
+    return models
+
+
+def codex_model_state():
+    c = config().get("codex", {})
+    return {"current": c.get("model") or CODEX_DEFAULT_MODEL, "effort": c.get("effort"), "models": codex_models()}
+
+
+def set_codex_model(model, effort=None):
+    """Codex's default model (and optionally reasoning effort) for new jobs and images (config.json)."""
+    model = str(model or "").strip()
+    known = [m["id"] for m in codex_models()]
+    if known and model not in known:
+        raise ValueError(f"unknown Codex model {model!r}; available: {', '.join(known)}")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]+", model):
+        raise ValueError("invalid model id")
+    if effort is not None and effort not in ("minimal", "low", "medium", "high", "xhigh"):
+        raise ValueError("effort must be minimal, low, medium, high or xhigh")
+    data = config()
+    section = data.setdefault("codex", {})
+    section["model"] = model
+    if effort is not None:
+        section["effort"] = effort
+    tmp = CONFIG.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, CONFIG)
+    return codex_model_state()
 
 
 def agy_cmd(task, cwd, write, timeout, session_id=None, model=None):
@@ -1547,7 +1594,7 @@ TOOLS = [
          "max_parallel": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Images generating at once (default 2 per signed-in Codex account)."},
          "accounts": {"type": "array", "items": {"type": "string"}, "description": "Limit to these Codex workers, e.g. [\"codex2\"]."}},
          "required": ["project_path", "requests"], "additionalProperties": False}},
-    {"name": "codex_image_status", "description": "Progress of a codex_image_batch: per image status (queued, generating, completed, refused, failed, cancelled), output path, size, seconds and error.",
+    {"name": "codex_image_status", "description": "Progress of a codex_image_batch: per image status (queued, generating, completed, refused, failed, cancelled, rate_limited with retry_at when every account is at its usage limit), output path, size, seconds and error; accounts lists each Codex account with its cooldown (retry_at, reason) so callers can skip Codex until then.",
      "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
     {"name": "codex_image_cancel", "description": "Stop a codex_image_batch: images not started yet are cancelled; running ones finish.",
      "inputSchema": {"type": "object", "properties": {"batch_id": {"type": "string"}}, "required": ["batch_id"], "additionalProperties": False}},
@@ -1953,6 +2000,16 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"}, "worker": {"type": "string"}, "provider": {"type": "string"}},
          "required": ["job_id"], "additionalProperties": False}},
+    {"name": "codex_models", "description": (
+        "Codex's models (from the Codex CLI's own list, e.g. gpt-6.2-sol, gpt-6.2-astra, gpt-6.1-sol) and the "
+        "current default. Use an id with codex_set_model, or as model= in start_task for one job."),
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "codex_set_model", "description": (
+        "Set Codex's default model (and optionally reasoning effort) for new Codex jobs and codex_image_batch."),
+     "inputSchema": {"type": "object", "properties": {
+         "model": {"type": "string"},
+         "effort": {"type": "string", "enum": ["minimal", "low", "medium", "high", "xhigh"]}},
+         "required": ["model"], "additionalProperties": False}},
     {"name": "antigravity_models", "description": (
         "Antigravity's models (from `agy models`: Gemini 4 Carbon/Argon, Gemini 3.8 Flash, Claude 5.5, GPT-OSS, "
         "each in Low/Medium/High) and the current default. Use an id with antigravity_set_model, or as model= "
@@ -2495,6 +2552,10 @@ def tool_call(name, a):
                     "note": "the web-chat job was waiting for its account and never started"}
         return {"ok": True, "job_id": a["job_id"], "cancelled_job_id": terminal_id,
                 "note": "the active terminal worker stops within a few seconds"}
+    if name == "codex_models":
+        return codex_model_state()
+    if name == "codex_set_model":
+        return {"ok": True, **set_codex_model(a["model"], a.get("effort"))}
     if name == "antigravity_models":
         return antigravity_model_state(bool(a.get("refresh")))
     if name == "antigravity_set_model":

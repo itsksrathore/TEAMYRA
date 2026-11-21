@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('teamyra', {
   mcpConnections: () => ipcRenderer.invoke('teamyra:mcp-connections'),
   antigravityModels: (refresh = false) => ipcRenderer.invoke('teamyra:agy-models', refresh === true),
   setAntigravityModel: (model) => ipcRenderer.invoke('teamyra:agy-set-model', String(model || '')),
+  codexModels: () => ipcRenderer.invoke('teamyra:codex-models'),
+  setCodexModel: (model) => ipcRenderer.invoke('teamyra:codex-set-model', String(model || '')),
   connectMcp: (providerId) => ipcRenderer.invoke('teamyra:mcp-connect', providerId),
   jobs: () => ipcRenderer.invoke('teamyra:jobs'),
   transcript: (jobId, offset = 0) => ipcRenderer.invoke('teamyra:transcript', jobId, offset),

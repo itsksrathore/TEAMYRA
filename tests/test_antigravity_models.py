@@ -57,5 +57,27 @@ class AntigravityModelTests(unittest.TestCase):
         self.assertIn("model", task_item["properties"])
 
 
+
+class CodexModelTests(unittest.TestCase):
+    def test_codex_models_come_from_its_cache_and_set_model_saves(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / ".codex"
+            home.mkdir()
+            (home / "models_cache.json").write_text(json.dumps({"models": [
+                {"slug": "gpt-6.2-sol", "display_name": "GPT-6.2-Sol", "visibility": "list"},
+                {"slug": "gpt-6.2-astra", "display_name": "GPT-6.2-Astra", "visibility": "list"},
+                {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide"}]}), encoding="utf-8")
+            config = Path(td) / "config.json"
+            config.write_text(json.dumps({"codex": {"model": "gpt-6.1-sol", "effort": "high"}}), encoding="utf-8")
+            with patch.dict("os.environ", {"CODEX_HOME": str(home)}), patch.object(server, "CONFIG", config):
+                self.assertEqual([m["id"] for m in server.codex_models()], ["gpt-6.2-sol", "gpt-6.2-astra"])
+                state = server.set_codex_model("gpt-6.2-astra")
+                self.assertEqual((state["current"], state["effort"]), ("gpt-6.2-astra", "high"))
+                with self.assertRaisesRegex(ValueError, "unknown Codex model"):
+                    server.set_codex_model("gpt-reserve")
+        tools = {tool["name"] for tool in server.TOOLS}
+        self.assertTrue({"codex_models", "codex_set_model"} <= tools)
+
+
 if __name__ == "__main__":
     unittest.main()

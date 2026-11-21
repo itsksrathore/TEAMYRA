@@ -44,6 +44,9 @@ class FakeCodex:
         with self.lock:
             self.active -= 1
         mode = self.behaviour.get(home.name, "ok")
+        if mode == "model" :
+            # Rejects the configured model, works with the account's default.
+            mode = "model_error" if any(str(part).startswith('model="') for part in command) else "ok"
         thread = f"thread-{uuid.uuid4().hex[:8]}-{home.name}"
         events = [{"type": "thread.started", "thread_id": thread}]
         if mode == "ok":
@@ -53,7 +56,10 @@ class FakeCodex:
             events.append({"type": "item.completed", "item": {"type": "agent_message", "text": "DONE"}})
         elif mode == "refused":
             events.append({"type": "item.completed", "item": {"type": "agent_message", "text": "REFUSED: violence"}})
-        stderr = "ERROR: You've hit your usage limit." if mode == "limited" else ""
+        stderr = ("ERROR: You've hit your usage limit." if mode == "limited" else
+                  "ERROR: You've hit your usage limit. Upgrade or try again at 1:51 PM." if mode == "limited_at" else
+                  "ERROR: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account"
+                  " (model_not_found)" if mode == "model_error" else "")
         return subprocess.CompletedProcess(command, 0, "\n".join(json.dumps(e) for e in events), stderr)
 
 
@@ -127,6 +133,26 @@ class CodexImageTests(unittest.TestCase):
         self.assertEqual(status["items"][0]["status"], "refused")
         self.assertIn("violence", status["items"][0]["error"])
         self.assertEqual(len(fake.calls), 1)
+
+    def test_all_accounts_limited_end_rate_limited_with_retry_time(self):
+        fake = FakeCodex({"codex1": "limited_at", "codex2": "limited_at"})
+        status = self.run_batch(self.batch(3), fake)
+        self.assertTrue(status["done"])
+        self.assertEqual(status["counts"], {"rate_limited": 3})
+        self.assertTrue(all(item["retry_at"] and item["retry_at"].endswith("13:51") for item in status["items"]))
+        state = codex_images._account_state(self.root)
+        self.assertEqual(state["codex1"]["reason"], "usage_limit")
+        until, reason = codex_images.account_cooldown(self.root, "codex2")
+        self.assertTrue(until and reason == "usage_limit", "the next batch skips the account until then")
+
+    def test_account_that_rejects_the_model_uses_its_default(self):
+        (self.root / "bridge").mkdir(parents=True, exist_ok=True)
+        (self.root / "bridge" / "config.json").write_text('{"codex": {"model": "gpt-6.1-sol"}}', encoding="utf-8")
+        fake = FakeCodex({"codex1": "model", "codex2": "model"})
+        status = self.run_batch(self.batch(2), fake)
+        self.assertEqual(status["counts"], {"completed": 2})
+        self.assertTrue(codex_images._account_state(self.root)["codex1"]["no_model_override"] or
+                        codex_images._account_state(self.root)["codex2"]["no_model_override"])
 
     def test_cancel_stops_queued_images(self):
         batch = self.batch(3)

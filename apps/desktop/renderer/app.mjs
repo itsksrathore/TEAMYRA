@@ -20,9 +20,16 @@ let googleMediaBoundsObserver = null;
 let activeChatgptProfileId = 'web';
 let jobsRefreshPromise = null;
 let agentsRefreshPromise = null;
-// Antigravity's models (agy models) and its default, for the card's picker.
-let agyModelState = null;
-let agyModelLoading = null;
+// Default-model pickers on the Antigravity and Codex cards: their models and
+// current default, per provider.
+const MODEL_PICKERS = {
+  antigravity: { load: () => window.teamyra.antigravityModels(false), save: model => window.teamyra.setAntigravityModel(model),
+    title: 'Default model for every new Antigravity job' },
+  codex: { load: () => window.teamyra.codexModels(), save: model => window.teamyra.setCodexModel(model),
+    title: 'Default model for every new Codex job and Codex image' }
+};
+const modelPickerState = {};
+const modelPickerLoading = {};
 let jobsRenderSignature = '';
 let jobsPollTimer = null;
 
@@ -544,7 +551,7 @@ function agentCardHtml(provider) {
         <i class="agent-state ${connected ? 'ready' : ''}"></i>
       </div>
       <div class="profile-list">${rows}</div>
-      ${provider.id === 'antigravity' && provider.installed ? agyModelPickerHtml() : ''}
+      ${MODEL_PICKERS[provider.id] && provider.installed ? modelPickerHtml(provider.id) : ''}
       <div class="agent-card-foot">
         ${mcpButtonHtml(provider)}
         ${provider.managedProfilesVerified && provider.installed
@@ -555,33 +562,34 @@ function agentCardHtml(provider) {
   `;
 }
 
-function agyModelPickerHtml() {
-  const state = agyModelState;
+function modelPickerHtml(providerId) {
+  const state = modelPickerState[providerId];
   if (!state) {
-    loadAgyModels();
+    loadModelPicker(providerId);
     return '<div class="agy-model-row"><span>Model</span><span class="agy-model-note">loading models…</span></div>';
   }
-  const models = state.models?.length ? state.models : [{ id: state.current, label: state.current }];
+  const models = state.models?.length ? [...state.models] : [];
+  if (!models.some(model => model.id === state.current)) models.unshift({ id: state.current, label: state.current });
   const options = models.map(model => `<option value="${escapeHtml(model.id)}" ${model.id === state.current ? 'selected' : ''}>${escapeHtml(model.label || model.id)}</option>`).join('');
-  return `<div class="agy-model-row" title="Default model for every new Antigravity job">
+  return `<div class="agy-model-row" title="${escapeHtml(MODEL_PICKERS[providerId].title)}">
       <span>Model</span>
-      <select data-agy-model>${options}</select>
+      <select data-model-picker="${escapeHtml(providerId)}">${options}</select>
     </div>`;
 }
 
-function loadAgyModels(refresh = false) {
-  if (agyModelLoading) return agyModelLoading;
-  agyModelLoading = window.teamyra.antigravityModels(refresh)
-    .then(state => { if (state && state.current) agyModelState = state; })
+function loadModelPicker(providerId) {
+  if (modelPickerLoading[providerId]) return modelPickerLoading[providerId];
+  modelPickerLoading[providerId] = MODEL_PICKERS[providerId].load()
+    .then(state => { if (state && state.current) modelPickerState[providerId] = state; })
     .catch(() => {})
-    .finally(() => { agyModelLoading = null; refreshAgents().catch(() => {}); });
-  return agyModelLoading;
+    .finally(() => { delete modelPickerLoading[providerId]; refreshAgents().catch(() => {}); });
+  return modelPickerLoading[providerId];
 }
 
 async function refreshAgents(force = false) {
   if (agentsRefreshPromise) return agentsRefreshPromise;
   // Do not rebuild the cards while the model list is open: it would close it.
-  if (document.activeElement?.matches?.('[data-agy-model]')) return;
+  if (document.activeElement?.matches?.('[data-model-picker]')) return;
   agentsRefreshPromise = (async () => {
   const [providers, mcpConnections] = await Promise.all([
     window.teamyra.providers(force),
@@ -617,14 +625,15 @@ async function refreshAgents(force = false) {
     if (list && listTops.get(card.dataset.providerCard)) list.scrollTop = listTops.get(card.dataset.providerCard);
   });
 
-  $('#agentGrid').querySelectorAll('[data-agy-model]').forEach(select => {
+  $('#agentGrid').querySelectorAll('[data-model-picker]').forEach(select => {
     select.addEventListener('change', async () => {
+      const providerId = select.dataset.modelPicker;
       const model = select.value;
       select.disabled = true;
       try {
-        agyModelState = await window.teamyra.setAntigravityModel(model);
+        modelPickerState[providerId] = await MODEL_PICKERS[providerId].save(model);
       } catch (error) {
-        alert('Could not set the Antigravity model: ' + String(error?.message || error));
+        alert('Could not set the model: ' + String(error?.message || error));
       } finally {
         select.disabled = false;
         select.blur();
