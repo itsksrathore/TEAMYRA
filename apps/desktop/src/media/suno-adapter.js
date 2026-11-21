@@ -379,16 +379,26 @@ const PROBES = {
       if (inf) { duration += Number(inf[1]); const next = lines[i + 1]; if (next && !next.startsWith('#')) segments.push(next.trim()); }
     }
     if (!segments.length) return { ok: false, step: 'manifest', error: 'no segments' };
-    const parts = [];
+    // Segments are fetched 8 at a time (one after another took most of the
+    // preview time) and joined in playlist order.
+    const uris = [map, ...segments].filter(Boolean);
+    const parts = new Array(uris.length);
     let bytes = 0;
-    for (const uri of [map, ...segments].filter(Boolean)) {
-      const part = await fetch(new URL(uri, manifestUrl).href, { credentials: 'include' });
-      if (!part.ok) return { ok: false, status: part.status, step: 'segment', segment: uri.split('?')[0] };
-      const buffer = new Uint8Array(await part.arrayBuffer());
-      bytes += buffer.length;
-      if (bytes > 300 * 1024 * 1024) return { ok: false, step: 'segment', error: 'stream too large' };
-      parts.push(buffer);
-    }
+    let failure = null;
+    let next = 0;
+    const worker = async () => {
+      while (!failure && next < uris.length) {
+        const index = next++;
+        const part = await fetch(new URL(uris[index], manifestUrl).href, { credentials: 'include' }).catch(error => ({ ok: false, status: 0, error }));
+        if (!part.ok) { failure = { ok: false, status: part.status, step: 'segment', segment: uris[index].split('?')[0] }; return; }
+        const buffer = new Uint8Array(await part.arrayBuffer());
+        bytes += buffer.length;
+        if (bytes > 300 * 1024 * 1024) { failure = { ok: false, step: 'segment', error: 'stream too large' }; return; }
+        parts[index] = buffer;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, uris.length) }, worker));
+    if (failure) return failure;
     const all = new Uint8Array(bytes);
     let offset = 0;
     for (const part of parts) { all.set(part, offset); offset += part.length; }
