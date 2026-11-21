@@ -151,8 +151,8 @@ class CodexImageTests(unittest.TestCase):
         fake = FakeCodex({"codex1": "model", "codex2": "model"})
         status = self.run_batch(self.batch(2), fake)
         self.assertEqual(status["counts"], {"completed": 2})
-        self.assertTrue(codex_images._account_state(self.root)["codex1"]["no_model_override"] or
-                        codex_images._account_state(self.root)["codex2"]["no_model_override"])
+        state = codex_images._account_state(self.root)
+        self.assertTrue(any((state.get(name) or {}).get("no_model_override") for name in ("codex1", "codex2")))
 
     def test_cancel_stops_queued_images(self):
         batch = self.batch(3)
