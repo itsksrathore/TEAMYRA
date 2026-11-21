@@ -1808,13 +1808,15 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "mcp_pool_list", "description": "List configured shared external MCP servers and live pooled-process status. Runtime config lives under ignored profiles/.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "mcp_pool_tools", "description": "Start/reuse one pooled MCP server and list its tools. Large servers (e.g. ElevenLabs) return a compact list of names, short descriptions and required arguments; then pass tool_names to get the full input schemas of the tools you will call.",
+    {"name": "mcp_pool_tools", "description": "Start/reuse one pooled MCP server and list its tools. Large servers (e.g. ElevenLabs) return a compact list of names, short descriptions and required arguments; then pass tool_names to get the full input schemas of the tools you will call. For speech/voice-over use capability=\"text_to_speech\": it finds the server's current text-to-speech tool (ElevenLabs hosted MCP: creative_generate_speech) or says clearly that the account has none.",
      "inputSchema": {"type": "object", "properties": {
          "server": {"type": "string"}, "refresh": {"type": "boolean", "default": False},
          "detail": {"type": "string", "enum": ["auto", "compact", "full"], "default": "auto",
                     "description": "auto: full definitions unless the listing is too large for an MCP client, then compact. full can be megabytes."},
          "tool_names": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50,
-                        "description": "Only these tools, with full input schemas."}},
+                        "description": "Only these tools, with full input schemas."},
+         "capability": {"type": "string", "enum": ["text_to_speech"],
+                        "description": "Only the tools that provide this capability, found by name and description (tool names change between providers and versions), best match first, with full input schemas. Use it to find e.g. ElevenLabs text-to-speech instead of guessing a tool name."}},
          "required": ["server"], "additionalProperties": False}},
     {"name": "mcp_pool_call", "description": "Call one tool on a configured pooled external MCP server. The long-lived process is reused across TEAMYRA clients.",
      "inputSchema": {"type": "object", "properties": {
@@ -2326,6 +2328,7 @@ def tool_call(name, a):
             a.get("refresh", False),
             a.get("detail", "auto"),
             a.get("tool_names"),
+            a.get("capability"),
         )
     if name == "mcp_pool_call":
         return mcp_pool.call_tool(

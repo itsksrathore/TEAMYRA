@@ -77,6 +77,88 @@ for raw in sys.stdin:
 '''
 
 
+# Pages its tools/list like the hosted ElevenLabs MCP, whose text-to-speech tool
+# is not called text_to_speech.
+PAGED_SERVER = r'''
+import json, sys
+
+PAGES = {
+    None: ({"tools": [
+        {"name": "creative_list_voices", "description": "List voices.", "inputSchema": {"type": "object"}},
+        {"name": "speech_to_text", "description": "Transcribe speech to text.", "inputSchema": {"type": "object"}},
+    ], "nextCursor": "p2"}),
+    "p2": ({"tools": [
+        {"name": "creative_generate_speech",
+         "description": "Convert text into lifelike speech with a chosen voice.",
+         "inputSchema": {"type": "object", "required": ["text"],
+                         "properties": {"text": {"type": "string"}, "voice_id": {"type": "string"}}}},
+        {"name": "speech_history_list", "description": "Generated speech history.", "inputSchema": {"type": "object"}},
+    ]}),
+}
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    msg = json.loads(raw)
+    method, req_id = msg.get("method"), msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": req_id, "result": PAGES[params.get("cursor")]})
+    elif method == "tools/call":
+        send({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(
+            {"name": params.get("name"), "arguments": params.get("arguments")}, sort_keys=True)}]}})
+    elif req_id is not None:
+        send({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "unknown method"}})
+'''
+
+
+class CapabilityMatchingTests(unittest.TestCase):
+    def test_text_to_speech_is_found_by_current_name_or_description(self):
+        tools = [
+            {"name": "speech_to_text", "description": "Convert speech to text."},
+            {"name": "get_speech_history", "description": "Text to speech history."},
+            {"name": "text_to_dialogue", "description": "Generate speech for a multi-voice dialogue."},
+            {"name": "creative_generate_speech", "description": "Turn text into speech."},
+            {"name": "voice_changer", "description": "Speech to speech."},
+            {"name": "creative_make_audio", "description": "Converts the given text into spoken audio (TTS)."},
+            {"name": "music_compose", "description": "Generate music."},
+        ]
+        names = [tool["name"] for tool in mcp_pool.find_tools(tools, "text_to_speech")]
+        self.assertEqual(names[0], "creative_generate_speech")
+        self.assertIn("creative_make_audio", names)
+        self.assertIn("text_to_dialogue", names)
+        for wrong in ("speech_to_text", "get_speech_history", "voice_changer", "music_compose"):
+            self.assertNotIn(wrong, names)
+        self.assertEqual(mcp_pool.find_tools([{"name": "text_to_speech"}], "text_to_speech")[0]["name"], "text_to_speech")
+        self.assertEqual(mcp_pool.find_tools([{"name": "elevenlabs.tts"}], "text_to_speech")[0]["name"], "elevenlabs.tts")
+
+    def test_old_names_map_to_the_capability_and_unrelated_names_do_not(self):
+        for name in ("text_to_speech", "TextToSpeech", "tts", "generate_speech", "elevenlabs_text_to_speech"):
+            self.assertEqual(mcp_pool.capability_for_name(name), "text_to_speech", name)
+        for name in ("speech_to_text", "list_voices", "echo", "speech_history"):
+            self.assertIsNone(mcp_pool.capability_for_name(name), name)
+
+    def test_capability_listing_returns_full_schemas_or_a_clear_note(self):
+        tools = [{"name": "creative_generate_speech", "description": "TTS.", "inputSchema": {"type": "object"}},
+                 {"name": "echo", "description": "Echo."}]
+        found = mcp_pool.shape_tools(tools, "auto", capability="text_to_speech")
+        self.assertEqual(found["detail"], "full")
+        self.assertEqual([tool["name"] for tool in found["tools"]], ["creative_generate_speech"])
+        self.assertIn("inputSchema", found["tools"][0])
+        none = mcp_pool.shape_tools([{"name": "echo"}], "auto", capability="text_to_speech")
+        self.assertEqual(none["tools"], [])
+        self.assertIn("lists no text-to-speech tool", none["note"])
+        with self.assertRaisesRegex(ValueError, "capability must be one of"):
+            mcp_pool.shape_tools(tools, "auto", capability="teleport")
+
+
 class MCPPoolTests(unittest.TestCase):
     def tearDown(self):
         # Tests that patch server.ROOT do not own the process-wide default manager.
@@ -211,6 +293,54 @@ class MCPPoolTests(unittest.TestCase):
             finally:
                 mcp_pool.shutdown(root)
 
+    def make_paged(self, root):
+        path = Path(root) / "paged_mcp.py"
+        path.write_text(PAGED_SERVER, encoding="utf-8")
+        mcp_pool.register(root, "paged", [sys.executable, str(path)], cwd=root, timeout_seconds=10)
+
+    def test_listing_follows_pagination_so_later_tools_are_found(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.make_paged(root)
+            try:
+                listed = mcp_pool.list_tools(root, "paged")
+                self.assertEqual(listed["total"], 4)
+                self.assertIn("creative_generate_speech", {tool["name"] for tool in listed["tools"]})
+                refreshed = mcp_pool.list_tools(root, "paged", refresh=True, capability="text_to_speech")
+                self.assertEqual([tool["name"] for tool in refreshed["tools"]], ["creative_generate_speech"])
+                self.assertEqual(refreshed["tools"][0]["inputSchema"]["required"], ["text"])
+            finally:
+                mcp_pool.shutdown(root)
+
+    def test_outdated_text_to_speech_name_calls_the_current_tool(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.make_paged(root)
+            try:
+                result = mcp_pool.call_tool(root, "paged", "text_to_speech", {"text": "Namaste", "voice_id": "v1"})
+                self.assertEqual(json.loads(self.text_result(result)),
+                                 {"name": "creative_generate_speech", "arguments": {"text": "Namaste", "voice_id": "v1"}})
+                self.assertEqual(result["result"]["_teamyra"],
+                                 {"requested_tool": "text_to_speech", "called_tool": "creative_generate_speech"})
+                # Arguments that do not fit the current tool are refused before any call.
+                with self.assertRaisesRegex(ValueError, "creative_generate_speech, which also requires text. Nothing was called"):
+                    mcp_pool.call_tool(root, "paged", "text_to_speech", {"prompt": "Namaste"})
+                with self.assertRaisesRegex(ValueError, "no tool named speech_to_txt. Similar tools: speech_to_text"):
+                    mcp_pool.call_tool(root, "paged", "speech_to_txt", {})
+            finally:
+                mcp_pool.shutdown(root)
+
+    def test_account_without_text_to_speech_gets_a_clear_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = self.make_fake(root)
+            mcp_pool.register(root, "fake", [sys.executable, str(fake)], cwd=root, timeout_seconds=10)
+            try:
+                with self.assertRaisesRegex(ValueError, r"lists no text-to-speech tool \(2 tools listed\).*text_to_speech permission"):
+                    mcp_pool.call_tool(root, "fake", "text_to_speech", {"text": "hi"})
+            finally:
+                mcp_pool.shutdown(root)
+
     def test_remove_stops_process_and_deletes_runtime_config(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -283,11 +413,11 @@ class MCPPoolTests(unittest.TestCase):
 
         with patch.object(server.mcp_pool, "list_tools", return_value={"tools": []}) as tools:
             server.tool_call("mcp_pool_tools", {"server": "fake", "refresh": True})
-            tools.assert_called_once_with(server.ROOT, "fake", True, "auto", None)
+            tools.assert_called_once_with(server.ROOT, "fake", True, "auto", None, None)
 
         with patch.object(server.mcp_pool, "list_tools", return_value={"tools": []}) as tools:
             server.tool_call("mcp_pool_tools", {"server": "fake", "tool_names": ["echo"]})
-            tools.assert_called_once_with(server.ROOT, "fake", False, "auto", ["echo"])
+            tools.assert_called_once_with(server.ROOT, "fake", False, "auto", ["echo"], None)
 
         with patch.object(server.mcp_pool, "call_tool", return_value={"result": {}}) as call:
             server.tool_call("mcp_pool_call", {

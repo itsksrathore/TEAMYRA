@@ -9,6 +9,7 @@ ignored by Git). Commands are argv arrays and are never executed through a shell
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import queue
@@ -30,6 +31,32 @@ TOOL_DETAILS = ("auto", "compact", "full")
 # multi-megabyte tool listing (ElevenLabs serves ~1.4 MB of schemas).
 FULL_LISTING_LIMIT = 64 * 1024
 SUMMARY_DESCRIPTION_CHARS = 240
+# tools/list is paginated (nextCursor). Bound the walk so a server that keeps
+# returning cursors cannot hang discovery.
+MAX_TOOL_PAGES = 50
+
+# Capabilities found by tool name and description, so a provider renaming a
+# tool does not make the feature vanish. The hosted ElevenLabs MCP serves
+# text-to-speech as creative_generate_speech; the local ElevenLabs MCP package
+# (and older agent instructions) call it text_to_speech.
+CAPABILITIES = {
+    "text_to_speech": {
+        "label": "text-to-speech",
+        "name": re.compile(
+            r"text_?to_?speech|(?:^|_)tts(?:_|$)"
+            r"|(?:generate|create|synthesi[sz]e|make)_(?:the_)?speech"
+            r"|speech_(?:generat|synthes)|(?:^|_)(?:speak|narrate|voiceover)(?:_|$)"),
+        "description": re.compile(
+            r"text[\s_-]*to[\s_-]*speech|\btts\b"
+            r"|convert\w*\s+(?:\w+\s+){0,2}text\s+(?:in)?to\s+(?:speech|audio|voice|spoken)"
+            r"|(?:generate|create|synthesi[sz]e)\w*\s+(?:\w+\s+){0,2}(?:speech|narration|voice[\s-]?over|spoken audio)"),
+        # Tools whose name says they do something else with speech.
+        "exclude": re.compile(
+            r"speech_?to_?(?:text|speech)|transcri|history|dubb|isolat|voice_?chang|(?:^|_)stt(?:_|$)"
+            r"|(?:^|_)(?:list|get|delete|search|clone|design)_|sound_?effect|music"),
+        "aliases": ("text_to_speech", "tts", "generate_speech", "create_speech", "speech", "speak"),
+    },
+}
 
 
 def _config_path(root):
@@ -165,7 +192,59 @@ def _tool_summary(tool):
     return item
 
 
-def shape_tools(tools, detail="full", tool_names=None):
+def _normal_name(name):
+    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+
+
+def find_tools(tools, capability):
+    """Tools that provide ``capability``, best match first.
+
+    Name matches rank above description-only matches; a tool whose name says
+    it does something else (speech-to-text, history, dubbing...) never matches.
+    """
+    rule = CAPABILITIES.get(capability)
+    if rule is None:
+        raise ValueError(f"capability must be one of {', '.join(sorted(CAPABILITIES))}")
+    scored = []
+    for index, tool in enumerate(tools or []):
+        if not isinstance(tool, dict) or not tool.get("name"):
+            continue
+        name = _normal_name(tool.get("name"))
+        if rule["exclude"].search(name):
+            continue
+        description = " ".join(str(tool.get("description") or "").lower().split())
+        score = (3 if rule["name"].search(name) else 0) + (2 if rule["description"].search(description) else 0)
+        if not score:
+            continue
+        # Multi-voice dialogue and streaming variants are fallbacks, not the default.
+        if re.search(r"dialog|stream|timestamp|websocket", name):
+            score -= 1
+        scored.append((-score, len(name), index, tool))
+    scored.sort(key=lambda item: item[:3])
+    return [item[3] for item in scored]
+
+
+def capability_for_name(tool_name):
+    """The capability an outdated or guessed tool name clearly refers to."""
+    name = _normal_name(tool_name)
+    for capability, rule in CAPABILITIES.items():
+        if name in rule["aliases"] or (rule["name"].search(name) and not rule["exclude"].search(name)):
+            return capability
+    return None
+
+
+def missing_capability_message(capability, tools, server=None):
+    label = CAPABILITIES[capability]["label"]
+    where = f"pooled MCP server {server}" if server else "this MCP server"
+    return (
+        f"{where} lists no {label} tool ({len(tools or [])} tools listed). The connected account or its "
+        f"authorization does not provide {label}: check that the account's plan includes it and that the "
+        f"sign-in granted the {capability} permission, then reconnect the account (Switch account) and "
+        "list its tools again."
+    )
+
+
+def shape_tools(tools, detail="full", tool_names=None, capability=None):
     """Return a tool listing sized for the caller.
 
     "full" keeps every definition, "compact" keeps name, short description,
@@ -176,6 +255,14 @@ def shape_tools(tools, detail="full", tool_names=None):
         raise ValueError(f"detail must be one of {', '.join(TOOL_DETAILS)}")
     out = {"total": len(tools)}
     selected = list(tools)
+    if capability:
+        selected = find_tools(tools, capability)
+        out["capability"] = capability
+        if not selected:
+            out["note"] = missing_capability_message(capability, tools)
+        # A capability lookup is a short list: return its full schemas.
+        if detail == "auto":
+            detail = "full"
     if tool_names:
         wanted = list(dict.fromkeys(str(name) for name in tool_names))
         by_name = {tool.get("name"): tool for tool in tools}
@@ -195,6 +282,26 @@ def shape_tools(tools, detail="full", tool_names=None):
     out["tools"] = selected if detail == "full" else [_tool_summary(tool) for tool in selected]
     out["count"] = len(selected)
     return out
+
+
+def _list_all_tools(request, name, **kwargs):
+    """Every tool of a server, following tools/list pagination (nextCursor).
+
+    Reading only the first page hid every tool on later pages, so a tool the
+    account has (text-to-speech among ~160 ElevenLabs tools) looked missing.
+    """
+    tools, cursor, seen = [], None, set()
+    for _ in range(MAX_TOOL_PAGES):
+        result = request("tools/list", {"cursor": cursor} if cursor else {}, **kwargs)
+        page = result.get("tools") if isinstance(result, dict) else None
+        if not isinstance(page, list):
+            raise RuntimeError(f"pooled MCP server {name} returned an invalid tools/list result")
+        tools.extend(page)
+        cursor = result.get("nextCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen or len(tools) >= MAX_TOOL_CACHE:
+            break
+        seen.add(cursor)
+    return tools[:MAX_TOOL_CACHE]
 
 
 class PooledMCPClient:
@@ -279,12 +386,12 @@ class PooledMCPClient:
                 self.stop()
                 raise RuntimeError(f"pooled MCP server {self.name} returned an invalid initialize result")
             self.notify("notifications/initialized", {})
-            listing = self.request("tools/list", {}, timeout=timeout, ensure_started=False)
-            tools = listing.get("tools") if isinstance(listing, dict) else None
-            if not isinstance(tools, list):
+            try:
+                tools = _list_all_tools(self.request, self.name, timeout=timeout, ensure_started=False)
+            except RuntimeError:
                 self.stop()
-                raise RuntimeError(f"pooled MCP server {self.name} returned an invalid tools/list result")
-            self.tools = tools[:MAX_TOOL_CACHE]
+                raise
+            self.tools = tools
             self.initialized_at = time.time()
             return self
 
@@ -396,11 +503,7 @@ class PooledMCPClient:
                 self._pending.pop(request_id, None)
 
     def refresh_tools(self):
-        result = self.request("tools/list", {})
-        tools = result.get("tools") if isinstance(result, dict) else None
-        if not isinstance(tools, list):
-            raise RuntimeError(f"pooled MCP server {self.name} returned invalid tools/list")
-        self.tools = tools[:MAX_TOOL_CACHE]
+        self.tools = _list_all_tools(self.request, self.name)
         return self.tools
 
     def call_tool(self, tool_name, arguments=None, timeout=None):
@@ -412,13 +515,45 @@ class PooledMCPClient:
         if tool_name not in known:
             self.refresh_tools()
             known = {str(item.get("name")) for item in self.tools if isinstance(item, dict)}
+        requested = None
         if tool_name not in known:
-            raise ValueError(f"pooled MCP server {self.name} has no tool named {tool_name}")
-        return self.request(
+            requested, tool_name = tool_name, self._resolve_renamed(tool_name, arguments or {})
+        result = self.request(
             "tools/call",
             {"name": tool_name, "arguments": arguments or {}},
             timeout=timeout,
         )
+        if requested and isinstance(result, dict):
+            result = {**result, "_teamyra": {"requested_tool": requested, "called_tool": tool_name}}
+        return result
+
+    def _resolve_renamed(self, tool_name, arguments):
+        """Map an outdated capability name (e.g. text_to_speech) to the server's tool.
+
+        Only a name that clearly asks for one capability is mapped, and only when
+        the arguments cover the replacement's required inputs, so a guessed
+        mapping never starts a generation with mismatched arguments.
+        """
+        capability = capability_for_name(tool_name)
+        if capability is None:
+            known = sorted(str(item.get("name")) for item in self.tools if isinstance(item, dict))
+            close = difflib.get_close_matches(tool_name, known, n=5, cutoff=0.5)
+            hint = f" Similar tools: {', '.join(close)}." if close else ""
+            raise ValueError(f"pooled MCP server {self.name} has no tool named {tool_name}.{hint}")
+        matches = find_tools(self.tools, capability)
+        if not matches:
+            raise ValueError(f"no tool named {tool_name}: " + missing_capability_message(capability, self.tools, self.name))
+        tool = matches[0]
+        schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
+        missing = [key for key in (schema.get("required") or []) if key not in arguments]
+        if missing:
+            raise ValueError(
+                f"pooled MCP server {self.name} has no tool named {tool_name}; its "
+                f"{CAPABILITIES[capability]['label']} tool is {tool.get('name')}, which also requires "
+                f"{', '.join(missing)}. Nothing was called. Get its schema with mcp_pool_tools "
+                f"tool_names=[\"{tool.get('name')}\"] and call it by that name."
+            )
+        return str(tool.get("name"))
 
     def stop(self):
         with self._lifecycle_lock:
@@ -543,7 +678,7 @@ class MCPPoolManager:
                 })
         return {"servers": rows, "count": len(rows)}
 
-    def tools(self, name, refresh=False, detail="full", tool_names=None):
+    def tools(self, name, refresh=False, detail="full", tool_names=None, capability=None):
         if detail not in TOOL_DETAILS:
             raise ValueError(f"detail must be one of {', '.join(TOOL_DETAILS)}")
         client = self.get(name)
@@ -552,7 +687,7 @@ class MCPPoolManager:
         return {
             "server": name,
             "pid": client.process.pid if client.alive() else None,
-            **shape_tools(tools, detail, tool_names),
+            **shape_tools(tools, detail, tool_names, capability),
         }
 
     def call(self, name, tool_name, arguments=None, timeout=None):
@@ -591,8 +726,8 @@ def list_servers(root):
     return manager(root).status()
 
 
-def list_tools(root, name, refresh=False, detail="full", tool_names=None):
-    return manager(root).tools(name, refresh=refresh, detail=detail, tool_names=tool_names)
+def list_tools(root, name, refresh=False, detail="full", tool_names=None, capability=None):
+    return manager(root).tools(name, refresh=refresh, detail=detail, tool_names=tool_names, capability=capability)
 
 
 def call_tool(root, name, tool_name, arguments=None, timeout=None):
