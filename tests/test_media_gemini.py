@@ -38,7 +38,12 @@ class MediaGeminiTests(unittest.TestCase):
         self.assertEqual(request["surface"], "gemini")
         self.assertEqual((request["gemini_model"], request["gemini_mode"], request["gemini_tool"]), ("Auto", "chat", "none"))
         self.assertEqual(request["format"], "md")
+        self.assertEqual(request["gemini_thinking"], "high", "Thinking level is High by default")
         self.assertEqual(request["generation_settings"]["engine"], "google-gemini")
+        medium = media_engine.load_job(self.td, media_engine.create_job(self.td, self.gemini(gemini_thinking="Medium"))["job_id"])
+        self.assertEqual(medium["request"]["gemini_thinking"], "medium")
+        with self.assertRaisesRegex(ValueError, "gemini_thinking"):
+            media_engine.create_job(self.td, self.gemini(gemini_thinking="extreme"))
         self.assertTrue((self.project / "Generated Assets" / "Documents").is_dir())
 
     def test_tool_follows_type_and_aliases(self):

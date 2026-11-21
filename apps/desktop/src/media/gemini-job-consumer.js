@@ -147,6 +147,7 @@ class GeminiJobConsumer {
         await this.update(jobId, 'submitting', 'Preparing the Gemini chat');
         const files = (job.resolved_references || []).map(item => item.path).filter(Boolean);
         const model = await adapter.chooseModel(request.gemini_model || 'Auto');
+        await adapter.chooseThinking(request.gemini_thinking || 'high');
         const mode = await adapter.chooseMode(request.gemini_mode || 'chat');
         const tool = await adapter.chooseTool(request.gemini_tool || 'none');
         await adapter.attach(files);

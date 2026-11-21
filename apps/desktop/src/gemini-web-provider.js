@@ -40,6 +40,14 @@ const GEMINI_HOSTS = {
 // account (gemini_model in its Google Media profile file) names one.
 // TEAMYRA_GEMINI_MODELS (comma separated names) overrides the default.
 const GEMINI_DEFAULT_MODELS = ['4 Carbon', '4 Neon', 'Auto'];
+// The model menu's "Thinking level" (Low / Medium / High, signed in). The
+// owner wants High (2026-11-21); an account's gemini_thinking or
+// TEAMYRA_GEMINI_THINKING can name another level.
+const GEMINI_DEFAULT_THINKING = 'High';
+function thinkingLevel(account = {}) {
+  const value = String(account.gemini_thinking || process.env.TEAMYRA_GEMINI_THINKING || GEMINI_DEFAULT_THINKING).trim();
+  return /^(low|medium|high)$/i.test(value) ? value[0].toUpperCase() + value.slice(1).toLowerCase() : GEMINI_DEFAULT_THINKING;
+}
 function defaultModelOrder() {
   const env = String(process.env.TEAMYRA_GEMINI_MODELS || process.env.TEAMYRA_GEMINI_MODEL || '').trim();
   return env ? env.split(',').map(item => item.trim()).filter(Boolean) : [...GEMINI_DEFAULT_MODELS];
@@ -142,7 +150,7 @@ class GeminiSessionManager {
 // (its label and its description: "Code & complex work | 4 Carbon").
 // Disabled items (signed out, or a model at its limit) are skipped. Returns
 // { mode, model, modelName, choices }; 'missing' makes the adapter retry.
-const geminiSettingsJs = preferred => `(async () => {
+const geminiSettingsJs = (preferred, thinking = GEMINI_DEFAULT_THINKING) => `(async () => {
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const shown = node => { if (!node) return false; const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const norm = value => String(value || '').toLowerCase().replace(/[-_]+/g, ' ').replace(/^\\s*gemini\\s+/, '').replace(/\\s+/g, ' ').trim();
@@ -164,7 +172,11 @@ const geminiSettingsJs = preferred => `(async () => {
   const trigger = () => document.querySelector('button[aria-label^="Open mode picker"], bard-mode-switcher button');
   const opener = trigger();
   if (!opener) { state.model = 'missing'; return state; }
-  const menu = () => [...document.querySelectorAll('gem-menu[role=menu], [role=menu]')].find(shown);
+  const anyMenu = () => [...document.querySelectorAll('gem-menu[role=menu], [role=menu]')].find(shown);
+  // The mode picker's menu has model radio items (another open menu, such as
+  // Upload & tools, must not be read as the model list).
+  const menu = () => [...document.querySelectorAll('gem-menu[role=menu], [role=menu]')]
+    .find(node => shown(node) && node.querySelector('[role=menuitemradio]'));
   const close = async () => {
     const open = menu();
     if (!open) return;
@@ -172,7 +184,17 @@ const geminiSettingsJs = preferred => `(async () => {
     await sleep(300);
     if (menu()) { trigger()?.click(); await sleep(300); }
   };
-  if (!menu()) { opener.click(); await sleep(600); }
+  // Start from a closed menu: a menu or submenu left open (Upload & tools,
+  // Thinking level) would be read as the model list.
+  for (let i = 0; i < 5 && anyMenu(); i += 1) {
+    anyMenu().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    await sleep(300);
+  }
+  if (!menu()) {
+    trigger()?.click();
+    for (let i = 0; i < 12 && !menu(); i += 1) await sleep(200);
+  }
   const items = menu() ? [...menu().querySelectorAll('[role=menuitemradio], [role=menuitem]')]
     .filter(item => !/sign in|get more access|upgrade/i.test(item.innerText || '')) : [];
   const label = item => ((item.querySelector('.label') || {}).innerText || '').trim();
@@ -193,7 +215,31 @@ const geminiSettingsJs = preferred => `(async () => {
     pick = items.find(item => exact(item, key) && usable(item)) || items.find(item => loose(item, key) && usable(item));
     if (pick) { wanted = candidate; break; }
   }
+  // "Thinking level" submenu: Low / Medium / High. 'none' when the page has
+  // no such item (signed out); 'missing' when the wanted level did not stick.
+  const setThinking = async () => {
+    const wantedLevel = ${JSON.stringify(thinking)};
+    const findEntry = () => [...document.querySelectorAll('gem-menu[role=menu] [role=menuitem], [role=menu] [role=menuitem]')]
+      .find(item => shown(item) && /thinking level/i.test(item.innerText || ''));
+    if (!findEntry()) {
+      trigger()?.click();
+      for (let i = 0; i < 12 && !findEntry(); i += 1) await sleep(200);
+    }
+    const entry = findEntry();
+    if (!entry) { state.thinking = 'none'; return; }
+    entry.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    entry.click();
+    await sleep(700);
+    const levels = [...document.querySelectorAll('[role=menuitemradio]')].filter(shown)
+      .filter(item => /^(low|medium|high)\\b/i.test((item.innerText || '').trim()));
+    const level = levels.find(item => (item.innerText || '').trim().toLowerCase().startsWith(wantedLevel.toLowerCase()));
+    if (!level) { state.thinking = 'missing'; return; }
+    if (level.getAttribute('aria-checked') !== 'true') { level.click(); await sleep(500); }
+    state.thinking = level.isConnected && level.getAttribute('aria-checked') !== 'true' ? 'missing' : wantedLevel.toLowerCase();
+    state.thinkingChoices = levels.map(item => (item.innerText || '').trim().split('\\n')[0]).join(', ');
+  };
   if (!pick) {
+    if (items.length) await setThinking();
     await close();
     state.model = items.length ? 'kept' : 'missing';
     state.modelName = (((trigger() || {}).getAttribute?.('aria-label') || '').match(/currently (.+)$/i) || [])[1] || '';
@@ -202,6 +248,7 @@ const geminiSettingsJs = preferred => `(async () => {
   state.modelName = wanted;
   if (pick.getAttribute('aria-checked') !== 'true') { pick.click(); await sleep(600); }
   const checked = pick.isConnected ? pick.getAttribute('aria-checked') === 'true' : false;
+  await setThinking();
   await close();
   const current = norm((((trigger() || {}).getAttribute?.('aria-label') || '').match(/currently (.+)$/i) || [])[1] || (trigger() || {}).innerText || '');
   state.model = checked || current === norm(wanted) || current === norm(name(pick)) || current.includes(norm(wanted)) ? 'on' : 'missing';
@@ -299,6 +346,12 @@ class GeminiAutomationAdapter extends ChatSiteAdapter {
     return modelPreference({ jobModel, accountModel: typeof account.gemini_model === 'string' ? account.gemini_model : '' });
   }
 
+  // The thinking level to pick: the account's gemini_thinking, else High.
+  thinkingLevel() {
+    const options = this.pageOptions || {};
+    return thinkingLevel(readMediaProfile(options.runtimeRoot, options.profileId));
+  }
+
   // Gemini shows its message box when signed out too: sign-in is read from
   // the page itself, not from a missing box.
   async probe() {
@@ -385,7 +438,7 @@ const GEMINI_SITE = {
     replyId: "((node.querySelector('message-content') || {}).id || '').replace('message-content-id-', '')",
     loginJs: GEMINI_LOGIN_JS,
     challengeJs: `(${COMMON_CHALLENGE_JS} || Boolean(${challengeScript(GEMINI_PROMPT)}))`,
-    settingsJs: adapter => geminiSettingsJs(adapter.preferredModels())
+    settingsJs: adapter => geminiSettingsJs(adapter.preferredModels(), adapter.thinkingLevel())
   },
   adapter: (webContents, options) => new GeminiAutomationAdapter(webContents, options, GEMINI_SITE.page),
   promptRules: [
@@ -427,6 +480,8 @@ module.exports = {
   GEMINI_SITE,
   GEMINI_HOSTS,
   GEMINI_DEFAULT_MODELS,
+  GEMINI_DEFAULT_THINKING,
+  thinkingLevel,
   geminiPartition,
   geminiProfileIds,
   geminiSettingsJs,

@@ -1542,6 +1542,8 @@ MEDIA_REQUEST_PROPERTIES = {
                      "description": "engine=gemini: an entry of Gemini's mode picker, matched case/space-insensitively by its name or description (Auto, 4 Hydrogen / Everyday help, 4 Neon / Deeper analysis, 4 Carbon / Code & complex work; signed-in accounts may offer more). A name the account does not offer fails the job with option_unavailable and the list it offers."},
     "gemini_mode": {"type": "string", "enum": ["chat", "task"], "default": "chat",
                     "description": "engine=gemini: Chat or Task (the toggle under Gemini's prompt box)."},
+    "gemini_thinking": {"type": "string", "enum": ["low", "medium", "high"], "default": "high",
+                        "description": "engine=gemini: the mode picker's Thinking level (Low, Medium, High); High by default."},
     "gemini_tool": {"type": "string", "default": "none",
                     "description": "engine=gemini: a tool from Gemini's Upload & tools menu: image (type=image), video (type=video), deep_research, canvas, none (plain answer; type=text), or another tool's name as the menu lists it (answer saved as text). Omitted with type image/video it follows the type."},
     "vids_mode": {"type": "string", "enum": ["create", "animate", "extend", "edit"], "default": "create",

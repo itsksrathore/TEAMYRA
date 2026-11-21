@@ -239,6 +239,7 @@ function scriptedAdapter(answer, extra = {}) {
     log,
     step: 'idle',
     ready: async () => ({}),
+    chooseThinking: async level => { log.push(['thinking', level]); return level; },
     chooseModel: async model => { log.push(['model', model]); if (/argon/i.test(model)) throw new Error('option_unavailable: Gemini model "' + model + '" is not offered in this account; it offers: Auto'); return { model, description: 'x' }; },
     chooseMode: async mode => { log.push(['mode', mode]); return mode; },
     chooseTool: async tool => { log.push(['tool', tool]); return tool === 'none' ? null : { tool, confirmed: true }; },

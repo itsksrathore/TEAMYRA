@@ -518,6 +518,35 @@ class GoogleGeminiAdapter {
     return { model: choice.label, description: choice.sublabel, offered: describeOptions(items) };
   }
 
+  // The mode picker's "Thinking level" submenu (Low / Medium / High, signed
+  // in). High by default (owner, 2026-11-21). Returns the level set, or null
+  // when the page has no such submenu (it is not an error then).
+  async chooseThinking(level) {
+    this.step = 'thinking';
+    const want = String(level || 'high').toLowerCase();
+    const levelOf = item => ((item.label || item.text || '').trim().split(' ')[0] || '').toLowerCase();
+    let items = await this.menu('model');
+    const entry = items.find(item => /thinking level/i.test(item.text || item.label || ''));
+    if (!entry) { await this.closeMenus(); return null; }
+    await this.probe('menuItems', { click: entry.index });
+    await this.sleep(this.settleMs);
+    items = (await this.probe('menuItems')) || [];
+    const levels = items.filter(item => ['low', 'medium', 'high'].includes(levelOf(item)));
+    const choice = levels.find(item => levelOf(item) === want);
+    if (!choice || choice.disabled) {
+      await this.closeMenus();
+      throw new Error('option_unavailable: Gemini thinking level "' + level + '" is not offered in this account; it offers: ' +
+        (levels.map(item => item.label || item.text).join(', ') || 'none'));
+    }
+    if (!choice.checked) {
+      await this.probe('menuItems', { click: choice.index });
+      await this.sleep(this.settleMs);
+    }
+    await this.closeMenus();
+    if ((await this.probe('menuItems').then(list => list && list.length).catch(() => 0))) await this.closeMenus();
+    return want;
+  }
+
   async chooseMode(mode) {
     this.step = 'mode';
     const want = String(mode || 'chat').toLowerCase();

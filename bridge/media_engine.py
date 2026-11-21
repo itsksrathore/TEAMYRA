@@ -598,7 +598,7 @@ def normalize_generate_request(root, request):
         return _normalize_gemini_request(root, request, media_type, project, prompt)
     if engine not in {"flow", "google-flow", "google_flow"}:
         raise ValueError("engine must be flow (Google Flow), vids (Google Vids) or gemini (Google Gemini)")
-    for key in ("gemini_model", "gemini_mode", "gemini_tool"):
+    for key in ("gemini_model", "gemini_mode", "gemini_tool", "gemini_thinking"):
         if request.get(key):
             raise ValueError(f"{key} is only for engine=gemini")
 
@@ -835,6 +835,10 @@ def _normalize_gemini_request(root, request, media_type, project, prompt):
     model = re.sub(r"\s+", " ", str(request.get("gemini_model") or GEMINI_DEFAULT_MODEL)).strip()[:60]
     if not normalize_gemini_name(model):
         raise ValueError("gemini_model must name an entry of Gemini's mode picker (e.g. Auto, 4 Hydrogen, 4 Neon, 4 Carbon)")
+    # "Thinking level" in Gemini's mode picker; High unless asked otherwise.
+    thinking = str(request.get("gemini_thinking") or "high").strip().lower()
+    if thinking not in ("low", "medium", "high"):
+        raise ValueError("gemini_thinking must be low, medium or high")
     refs = _normalize_references(request.get("references"))
     if len(refs) > GEMINI_MAX_REFERENCES:
         raise ValueError(f"Gemini takes at most {GEMINI_MAX_REFERENCES} uploaded files")
@@ -845,6 +849,7 @@ def _normalize_gemini_request(root, request, media_type, project, prompt):
     if aspect and output == "text":
         raise ValueError("aspect_ratio applies only to Gemini images and videos")
     settings = {"engine": "google-gemini", "gemini_model": model, "gemini_mode": mode, "gemini_tool": tool,
+                "gemini_thinking": thinking,
                 "download_quality": "source", "wait_for_upscale": False}
     result = {
         "type": media_type,
@@ -854,6 +859,7 @@ def _normalize_gemini_request(root, request, media_type, project, prompt):
         "surface": "gemini",
         "engine": "gemini",
         "gemini_model": model,
+        "gemini_thinking": thinking,
         "gemini_mode": mode,
         "gemini_tool": tool,
         "aspect_ratio": aspect,

@@ -404,3 +404,14 @@ async function main() {
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Owner, 2026-11-21: Gemini's Thinking level is High unless an account says otherwise.
+{
+  const { thinkingLevel, GEMINI_DEFAULT_THINKING } = require('../src/gemini-web-provider');
+  const assert = require('node:assert/strict');
+  assert.equal(GEMINI_DEFAULT_THINKING, 'High');
+  assert.equal(thinkingLevel({}), 'High');
+  assert.equal(thinkingLevel({ gemini_thinking: 'medium' }), 'Medium');
+  assert.equal(thinkingLevel({ gemini_thinking: 'extreme' }), 'High', 'unknown levels fall back to High');
+  console.log('gemini thinking level default tests passed');
+}
