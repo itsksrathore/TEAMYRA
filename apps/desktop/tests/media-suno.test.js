@@ -190,6 +190,9 @@ class FakeSunoPage {
       }
       case 'focus': this.focused = args.idx.slice(2); return { x: 1, y: 1 };
       case 'setRange': return false;
+      // Key events sent to the slider step it to the target (the live page's way).
+      case 'sliderKeys': { const key = args.idx.slice(2); this.sliders[key] = args.target; return args.target; }
+      case 'sliderTrack': return null;
       case 'click': {
         if (args.idx === 'b-custom') this.mode = 'custom';
         else if (args.idx === 'b-simple') this.mode = 'simple';
