@@ -1600,6 +1600,12 @@ async function dispatchDesktopControl(action, payload = {}) {
       }
       return sunoEngine.debugEval(payload.profile_id || 'suno', String(payload.script || 'null'), payload.url ? String(payload.url) : '');
     }
+    if (sunoCmd === 'debug_fill') {
+      if (process.env.TEAMYRA_DEV_DEBUG !== '1' && !fs.existsSync(path.join(ROOT, '.teamyra-desktop', 'dev-debug'))) {
+        throw new Error('suno.debug_fill needs TEAMYRA_DEV_DEBUG=1');
+      }
+      return sunoEngine.debugFill(payload.profile_id || 'suno', payload.request || {});
+    }
     throw new Error('Unknown Suno control action: ' + action);
   }
   if (action === 'vids.debug') {

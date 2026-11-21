@@ -767,7 +767,7 @@ class SunoAdapter {
     }
     if (!tab.selected) {
       await this.probe('click', { idx: tab.idx });
-      await this.sleep(this.settleMs);
+      await this.sleep(Math.max(this.settleMs, 1200));
     }
     return tab.text.toLowerCase();
   }
@@ -781,7 +781,9 @@ class SunoAdapter {
 
   async chooseModel(model) {
     this.step = 'model';
-    const form = await this.form();
+    // After switching Simple/Advanced the panel redraws: wait for the model button.
+    const form = await this.wait(async () => { const read = await this.form(); return modelButton(read) ? read : null; },
+      'model button', 8000, 300).catch(() => this.form());
     const button = modelButton(form);
     if (!model) return { model: button ? button.text : null, offered: null, default: true };
     if (button && normalizeName(button.text) === normalizeName(model)) return { model: button.text, offered: null };

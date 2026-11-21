@@ -219,6 +219,28 @@ class SunoEngine {
     return view.view.webContents.executeJavaScript(script, true);
   }
 
+  // Developer only (gated by the caller): load the adapter code fresh and
+  // fill the Create page from a normalized request WITHOUT clicking Create,
+  // to check every option on the live page without spending credits.
+  async debugFill(profileId, request) {
+    const runtime = this.ensure(profileId);
+    if (runtime.consumer.busy) throw new Error('the Suno worker is busy with a job');
+    delete require.cache[require.resolve('./suno-adapter')];
+    const { SunoAdapter: FreshAdapter } = require('./suno-adapter');
+    const view = runtime.worker;
+    view.ensureView();
+    const adapter = new FreshAdapter(view.view.webContents);
+    await view.load(SUNO_HOME);
+    await adapter.ready({ path: '/create' });
+    const started = Date.now();
+    try {
+      const applied = await adapter.fill(request || {});
+      return { ok: true, applied, seconds: Math.round((Date.now() - started) / 100) / 10, form: await adapter.form() };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error), step: adapter.step, form: await adapter.form().catch(() => null) };
+    }
+  }
+
   async profileStatus(profileId) {
     const runtime = this.ensure(profileId);
     if (!runtime.status.checkedAt) await runtime.refreshStatus().catch(() => {});
