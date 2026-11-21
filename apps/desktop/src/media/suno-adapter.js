@@ -806,6 +806,14 @@ class SunoAdapter {
     await this.probe('click', { idx: button.idx });
     await this.sleep(this.settleMs);
     let items = (await this.probe('menuItems')) || [];
+    // The model dialog draws its rows a moment after it opens: wait until the
+    // list stops growing (2026-11-21: only "Create Custom Model" was read).
+    for (let i = 0; i < 12; i += 1) {
+      await this.sleep(300);
+      const again = (await this.probe('menuItems')) || [];
+      if (again.length === items.length && items.length > 1) break;
+      items = again;
+    }
     if (!items.length) {
       const at = await this.probe('focus', { idx: button.idx });
       if (at) {
