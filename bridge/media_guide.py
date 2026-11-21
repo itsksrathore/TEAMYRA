@@ -13,6 +13,7 @@ INSTRUCTIONS = """TEAMYRA media and image generation: use the fast paths.
 - Google Flow videos, images and sound effects: media_generate for one, media_batch for two or more (up to 50, run across every enabled Google account, several Flow tabs each). Poll media_status({batch_id}) every 20-30 s.
 - Google accounts: media_accounts lists them and enables/disables them; pass accounts=[ids or names] to media_generate/media_batch to run a job only in the accounts you choose.
 - Google Vids videos (Omni, same Google accounts, no Flow credits, native 1080p): media_generate/media_batch with engine="vids" (vids_mode create/animate/extend/edit, up to 3 reference images, 3-10 s, 16:9 or 9:16).
+- Google Gemini (gemini.google.com, same signed-in Google accounts): media_generate/media_batch with engine="gemini" (gemini_model e.g. Auto/4 Neon, gemini_mode chat/task, gemini_tool image/video/deep_research/canvas/none, uploaded references); images/videos are saved as media assets, answers as .md documents (type=text).
 - Codex/gpt-image stills (character sheets, look frames, photoreal or illustrated images): codex_image_batch with every image of the job in one call (prompt, output file, reference files, size); poll codex_image_status. Do not start a Codex worker job (start_task/run_ai_worker) to draw images: it makes them one at a time, 2-5 min each.
 - Codex image accounts at their usage limit: chatgpt_image_batch (same requests, ChatGPT web accounts in TEAMYRA Desktop, a few minutes per image); poll chatgpt_image_status.
 - Images that build on earlier images: generate the base images first, then a second batch that lists them as references.
@@ -27,6 +28,7 @@ GUIDE = """# Generating media and images through TEAMYRA
 | Still images with Codex (gpt-image): character sheets, turnarounds, look frames, photoreal or illustrated stills | `codex_image_batch` (1-50) | About 1-2 min per image, two at once per Codex account, full quality. |
 | Still images when the Codex accounts are at their usage limit | `chatgpt_image_batch` (1-50) | ChatGPT web accounts in TEAMYRA Desktop draw them; a few minutes per image, spread over the ready accounts. |
 | Video from Google Vids (Omni): text + up to 3 images, animate an image, extend or edit a video | `media_generate` / `media_batch` with `engine: "vids"` | Same Google accounts, no Flow credits, native 1080p, 3-10 s clips, several at once in each Vids tab. |
+| Image, video, Deep Research report, Canvas or plain answer from Google Gemini | `media_generate` / `media_batch` with `engine: "gemini"` | Same signed-in Google accounts; one Gemini chat per job; text answers saved as Markdown assets (`type: "text"`). |
 | Music | `media_generate` with type music | One song at a time. |
 
 Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_ai_parallel`) whose task tells Codex to use its image tool: that runs one long agent session that makes images one by one (2-5 min each) and blocks the account for other work.
@@ -51,6 +53,15 @@ Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_
 - A Vids refusal ("goes against our terms") ends the job `policy_refusal` about a minute after submission: reword the prompt and queue it again.
 - Vids keeps an unfinished clip only in its open tab: if TEAMYRA restarts mid-generation the job ends `vids_tab_lost`; queue it again (no credits are lost).
 - Use Flow for features Vids lacks (Flow projects, sound effects, images, music); use Vids when Flow credits are short or native 1080p matters.
+
+## Google Gemini (`engine: "gemini"`)
+- Same tools and accounts: `media_generate` / `media_batch` with `"engine": "gemini"`. Only Google Media accounts already signed in run Gemini (their own sessions); an account that is not signed in is skipped. Each job is a new Gemini chat in a hidden Gemini tab of one account.
+- `gemini_tool`: `image` (`type: "image"`, the generated picture is downloaded and verified), `video` (`type: "video"`, Veo clip), `deep_research`, `canvas` or `none` (default; `type: "text"`, the whole answer is saved as a `.md` file in Generated Assets/Documents). Any other tool the Upload & tools menu lists may be named; its answer is saved as text. With `type` image/video and no `gemini_tool`, the tool follows the type.
+- `gemini_model`: a mode-picker entry by name or description, case/space-insensitive (`Auto` default, `4 Hydrogen`/`Everyday help`, `4 Neon`/`Deeper analysis`, `4 Carbon`/`Code & complex work`; signed-in accounts may offer more). `gemini_mode`: `chat` (default) or `task`.
+- `references`: up to 10 project files or asset ids (images, PDF, text/Office/code files) uploaded with the prompt.
+- An option the account does not offer fails the job with `option_unavailable` and lists what it offers: queue it again with one of those. Nothing was sent.
+- Usage limits: when Gemini says an account reached its limit, TEAMYRA rests that account's Gemini (for that tool) and the job goes back to the queue (`rate_limited`) for another account. `media_capabilities` and `media_guide` capacity show the resting accounts.
+- Deep Research runs for many minutes (TEAMYRA starts the research plan itself); poll every minute or two. A job submitted before a TEAMYRA restart resumes from its saved Gemini chat URL in the same account.
 
 ## Codex images (`codex_image_batch`)
 - One call per wave: `{"project_path": ..., "requests": [{"prompt": ..., "output": "folder/name.png", "references": ["refs/a.png"], "size": "1536x1024"}]}`.
@@ -106,6 +117,12 @@ def capacity(root):
         vids_tabs = 2
     result["vids_tabs_per_account"] = vids_tabs
     result["vids_tabs"] = vids_tabs * max(1, len(working))
+    result["gemini_tabs_per_account"] = gemini_tab_count()
+    try:
+        import media_engine
+        result["gemini_cooldowns"] = media_engine.engine_cooldowns(root, "gemini")
+    except Exception:
+        result["gemini_cooldowns"] = []
     try:
         import codex_images
         accounts = codex_images.codex_accounts(root)
@@ -150,6 +167,34 @@ def _flow_accounts(root, saved):
         item["challenged"] = state.get("challenged") is True
         item["music_signed_in"] = state.get("music_signed_in") is True
     return accounts
+
+
+def gemini_tab_count():
+    try:
+        value = int(os.environ.get("TEAMYRA_GEMINI_TABS") or 1)
+    except ValueError:
+        value = 1
+    return max(1, min(3, value))
+
+
+GEMINI_CAPABILITIES = {
+    "engine": "gemini",
+    "site": "https://gemini.google.com/app",
+    "accounts": "Only the Google Media accounts already signed in (their own sessions); not-signed-in accounts are skipped",
+    "gemini_model": "A mode-picker entry by name or description, case/space-insensitive; default Auto. Signed out it lists Auto, 4 Hydrogen (Everyday help), 4 Neon (Deeper analysis), 4 Carbon (Code & complex work); signed-in accounts may offer more. Missing: option_unavailable",
+    "gemini_mode": ["chat", "task"],
+    "gemini_tool": {"none": "text", "image": "image", "video": "video", "deep_research": "text", "canvas": "text",
+                    "other": "Any other Upload & tools entry by name; answer saved as text"},
+    "references": "Up to 10 project files or asset ids (images, PDF, text/Office/code), uploaded with the prompt",
+    "outputs": {"image": "Generated Assets/Images (downloaded at full size, verified)",
+                "video": "Generated Assets/Videos (verified MP4)",
+                "text": "Generated Assets/Documents/*.md (the whole answer as Markdown, with links)"},
+    "usage_limits": "A Gemini limit message rests that account's Gemini (for that tool) and the job moves to another account",
+    "failure_categories": {"selector_failure": "recoverable", "reference_attach_failed": "recoverable",
+                           "rate_limited": "moves to another account", "generation_failure": "inspect (recoverable when it timed out)",
+                           "option_unavailable": "not recoverable: choose an offered model/mode/tool",
+                           "policy_refusal": "not recoverable: reword", "login_required": "sign the account in"},
+}
 
 
 def _flow_tabs():

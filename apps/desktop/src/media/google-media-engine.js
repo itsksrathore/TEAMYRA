@@ -9,6 +9,15 @@ const { GoogleFlowMusicProvider } = require('./google-flow-music-provider');
 const { MediaJobConsumer } = require('./media-job-consumer');
 const { GoogleVidsProvider } = require('./google-vids-provider');
 const { VidsJobConsumer, WorkspaceStore } = require('./vids-job-consumer');
+const { GoogleGeminiProvider } = require('./google-gemini-provider');
+const { GeminiJobConsumer } = require('./gemini-job-consumer');
+
+// Google Gemini tabs per account (TEAMYRA_GEMINI_TABS, 1-3). Each runs one
+// Gemini chat at a time in the account's own signed-in session.
+function geminiTabCount(value = globalThis.process?.env?.TEAMYRA_GEMINI_TABS) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number >= 1 ? Math.min(3, number) : 1;
+}
 
 // Google Vids tabs per account (TEAMYRA_VIDS_TABS, 1-4). Each tab runs several
 // clips at once; Vids uses no Flow credits.
@@ -152,6 +161,19 @@ class GoogleMediaProfileRuntime {
         mayClaim: () => this.vidsWorking()
       }) });
     }
+    // Google Gemini: the same signed-in session again (no sign-in of its own).
+    const geminiTabs = geminiTabCount();
+    this.geminiTabs = [];
+    for (let lane = 0; lane < geminiTabs; lane += 1) {
+      const provider = new GoogleGeminiProvider({ window, sessionManager: this.sessionManager });
+      this.geminiTabs.push({ provider, consumer: new GeminiJobConsumer({
+        workerName: 'google-media-' + this.profileId + '-gemini-tab' + (lane + 1),
+        provider, profileId: this.profileId, lane, lanes: geminiTabs, ready, downloadManager: this.downloadManager,
+        onActivity: () => this.touch(),
+        isMain: accountHooks.isMain,
+        mayClaim: () => this.geminiWorking()
+      }) });
+    }
     this.musicConsumer = new MediaJobConsumer({
       surface: 'music',
       workerName: 'google-media-' + this.profileId + '-music',
@@ -203,6 +225,16 @@ class GoogleMediaProfileRuntime {
     return this.vidsTabs.map(tab => tab.consumer);
   }
 
+  geminiConsumers() {
+    return (this.geminiTabs || []).map(tab => tab.consumer);
+  }
+
+  // Gemini runs only in an account that is signed in (its existing session),
+  // enabled and not challenged; others take no Gemini work.
+  geminiWorking() {
+    return this.vidsWorking();
+  }
+
   // Vids needs the account signed in and enabled; Flow's credit pause does not apply.
   vidsWorking() {
     return this.visualConsumerStarted && this.lastStatus.connected === true &&
@@ -212,10 +244,10 @@ class GoogleMediaProfileRuntime {
   setConsumerState(kind, enabled) {
     if (kind === 'visual') {
       if (enabled && !this.visualConsumerStarted) {
-        for (const consumer of [...this.visualConsumers(), ...this.vidsConsumers()]) consumer.start();
+        for (const consumer of [...this.visualConsumers(), ...this.vidsConsumers(), ...this.geminiConsumers()]) consumer.start();
         this.visualConsumerStarted = true;
       } else if (!enabled && this.visualConsumerStarted) {
-        for (const consumer of [...this.visualConsumers(), ...this.vidsConsumers()]) consumer.stop();
+        for (const consumer of [...this.visualConsumers(), ...this.vidsConsumers(), ...this.geminiConsumers()]) consumer.stop();
         this.visualConsumerStarted = false;
       }
       return;
@@ -253,7 +285,9 @@ class GoogleMediaProfileRuntime {
       for (const lane of this.extraLanes) if (!lane.consumer.busy) lane.provider.destroy();
       // An idle Vids tab is closed; a busy one keeps its unfinished clips.
       for (const tab of this.vidsTabs) if (!tab.consumer.busy) tab.provider.destroy();
-      if (this.visualConsumers().some(consumer => consumer.busy) || this.vidsConsumers().some(consumer => consumer.busy) || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
+      for (const tab of this.geminiTabs) if (!tab.consumer.busy) tab.provider.destroy();
+      if (this.visualConsumers().some(consumer => consumer.busy) || this.vidsConsumers().some(consumer => consumer.busy) ||
+        this.geminiConsumers().some(consumer => consumer.busy) || this.musicConsumer.busy || this.wakingCount > 0 || this.refreshPromise || Date.now() < this.activityUntil) {
         this.scheduleUnload(BROWSER_IDLE_MS);
         return;
       }
@@ -335,7 +369,8 @@ class GoogleMediaProfileRuntime {
   }
 
   snapshot() {
-    const visualBusy = this.visualConsumers().some(consumer => consumer.busy) || this.vidsConsumers().some(consumer => consumer.busy);
+    const visualBusy = this.visualConsumers().some(consumer => consumer.busy) || this.vidsConsumers().some(consumer => consumer.busy) ||
+      this.geminiConsumers().some(consumer => consumer.busy);
     return {
       ...this.lastStatus,
       visible: this.visual.visible || this.music.visible,
@@ -344,6 +379,7 @@ class GoogleMediaProfileRuntime {
       music_busy: this.musicConsumer.busy,
       visual_pipeline: this.pipelineSnapshot(),
       vids_tabs: this.vidsConsumers().map(consumer => consumer.status()),
+      gemini_tabs: this.geminiConsumers().map(consumer => consumer.status()),
       working: this.working(),
       parked_until: this.parkedUntil > Date.now() ? this.parkedUntil / 1000 : null,
       park_reason: this.parkedUntil > Date.now() || !this.lastStatus.connected ? this.parkReason : '',
@@ -627,6 +663,7 @@ class GoogleMediaProfileRuntime {
     this.visual.destroy();
     for (const lane of this.extraLanes) lane.provider.destroy();
     for (const tab of this.vidsTabs) tab.provider.destroy({ force: true });
+    for (const tab of this.geminiTabs) tab.provider.destroy({ force: true });
     this.music.destroy();
     this.started = false;
   }
@@ -807,6 +844,8 @@ class GoogleMediaEngine {
   wakeAll(surface = 'visual') {
     // Vids runs beside Flow in the same accounts: waking checks sign-in the same way.
     if (surface === 'vids') return { ...this.wakeAll('visual'), wake_surface: 'vids', vids_tabs_per_account: vidsTabCount() };
+    // Gemini too: only accounts verified signed in take its jobs.
+    if (surface === 'gemini') return { ...this.wakeAll('visual'), wake_surface: 'gemini', gemini_tabs_per_account: geminiTabCount() };
     if (surface === 'music') {
       this.enabledCache = null;
       const id = this.musicProfileId();
@@ -883,4 +922,4 @@ class GoogleMediaEngine {
   }
 }
 
-module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount, vidsTabCount, mediaProfiles };
+module.exports = { GoogleMediaEngine, GoogleMediaProfileRuntime, GOOGLE_LOGIN_URL, observedStatus, flowLaneCount, vidsTabCount, geminiTabCount, mediaProfiles };

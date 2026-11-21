@@ -236,6 +236,12 @@ def handle(action, payload):
     if action == "media.batch":
         return media_engine.create_batch(ROOT, payload.get("requests") or [],
                                          max_parallel=payload.get("max_parallel"))
+    if action == "media.gemini-limit":
+        return media_engine.gemini_limit_handoff(ROOT, payload["job_id"], payload.get("profile_id"),
+                                                 seconds=payload.get("seconds") or 3600, reason=payload.get("reason"),
+                                                 scope=payload.get("scope") or "all")
+    if action == "media.engine-cooldowns":
+        return {"cooldowns": media_engine.engine_cooldowns(ROOT, payload.get("engine"))}
     if action == "media.cancel":
         return media_engine.cancel_job(ROOT, payload["job_id"])
     if action == "media.cancel-batch":
