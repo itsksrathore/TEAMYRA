@@ -196,6 +196,24 @@ class SunoEngine {
     return { visible: false };
   }
 
+  // Sign-in checked again now, with the page (not only cookies).
+  async refresh(profileId = BUILTIN_PROFILE) {
+    const runtime = this.ensure(profileId);
+    await runtime.refreshStatus({ page: true });
+    return runtime.snapshot();
+  }
+
+  // Developer only (gated by the caller): a script in the account's worker
+  // page, after loading a Suno URL if given. Not used while a job runs there.
+  async debugEval(profileId, script, url = '') {
+    const runtime = this.ensure(profileId);
+    if (runtime.consumer.busy) throw new Error('the Suno worker is busy with a job');
+    const view = runtime.worker;
+    if (url) await view.load(url);
+    else view.ensureView();
+    return view.view.webContents.executeJavaScript(script, true);
+  }
+
   async profileStatus(profileId) {
     const runtime = this.ensure(profileId);
     if (!runtime.status.checkedAt) await runtime.refreshStatus().catch(() => {});

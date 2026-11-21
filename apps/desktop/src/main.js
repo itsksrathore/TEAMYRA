@@ -1590,6 +1590,16 @@ async function dispatchDesktopControl(action, payload = {}) {
     if (sunoCmd === 'clips') return sunoEngine.clips(payload.profile_id || 'suno', payload.limit);
     if (sunoCmd === 'open') return sunoEngine.open(payload.profile_id || 'suno');
     if (sunoCmd === 'close') return sunoEngine.close();
+    // Check sign-in again now (page and cookies), not the last cached answer.
+    if (sunoCmd === 'refresh') return sunoEngine.refresh(payload.profile_id || 'suno');
+    // Developer only (TEAMYRA_DEV_DEBUG=1 or .teamyra-desktop/dev-debug): run a
+    // script in the account's Suno worker page, optionally after loading a Suno URL.
+    if (sunoCmd === 'debug_eval') {
+      if (process.env.TEAMYRA_DEV_DEBUG !== '1' && !fs.existsSync(path.join(ROOT, '.teamyra-desktop', 'dev-debug'))) {
+        throw new Error('suno.debug_eval needs TEAMYRA_DEV_DEBUG=1');
+      }
+      return sunoEngine.debugEval(payload.profile_id || 'suno', String(payload.script || 'null'), payload.url ? String(payload.url) : '');
+    }
     throw new Error('Unknown Suno control action: ' + action);
   }
   if (action === 'vids.debug') {
