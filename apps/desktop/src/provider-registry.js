@@ -108,6 +108,18 @@ const PROVIDERS = [
     color: 'violet'
   },
   {
+    // Gemini runs in the Google Media accounts (one worker per account, in
+    // that account's browser profile): no accounts or sign-in of its own.
+    id: 'gemini-web',
+    name: 'Gemini',
+    kind: 'web',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'web' },
+    managed: { verified: false, env: null, googleMediaAccounts: true },
+    color: 'blue'
+  },
+  {
     id: 'google-media',
     name: 'Google Media',
     kind: 'media',
@@ -314,6 +326,38 @@ async function detectProviders() {
           effort: '',
           permissionMode: ''
         }, ...managedProfiles(provider)]
+      };
+    }
+    if (provider.managed?.googleMediaAccounts) {
+      // One row per Google Media account, named after it; read only (the
+      // accounts are added, renamed and signed in under Google Media).
+      const media = PROVIDERS.find(item => item.id === 'google-media');
+      const accounts = managedProfiles(media);
+      const label = name => provider.name + ' · ' + name;
+      return {
+        id: provider.id,
+        name: provider.name,
+        color: provider.color,
+        installed: true,
+        binary: 'Embedded Chromium · Google Media accounts',
+        signedIn: false,
+        status: 'Uses the Google Media accounts',
+        managedProfilesVerified: false,
+        managedProfileEnv: null,
+        profiles: [
+          { id: 'web', mediaProfileId: 'google', name: label(builtinMediaMeta().name), file: builtinMediaMetaFile() },
+          ...accounts.map(account => ({
+            id: account.id, mediaProfileId: account.id, name: label(account.name), file: path.join(account.path, 'teamyra-profile.json')
+          }))
+        ].map(({ file, ...profile }) => {
+          // Optional Gemini settings in the Google Media file (see docs/GEMINI_WEB_AGENT.md).
+          const meta = readJsonFile(file) || {};
+          return {
+            ...profile, kind: 'web', path: '', signedIn: false, editable: false,
+            enabled: meta.gemini_enabled !== false, priority: 310,
+            model: typeof meta.gemini_model === 'string' ? meta.gemini_model : '', effort: '', permissionMode: ''
+          };
+        })
       };
     }
     if (provider.kind === 'web') {

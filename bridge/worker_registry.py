@@ -86,6 +86,61 @@ def seed_opencode_profiles(root):
     return created
 
 
+def _read_json_dict(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def add_google_account_workers(workers, profiles, provider, site):
+    """Web-chat workers that run in the Google Media accounts (Gemini).
+
+    The built-in Google account (profiles/google-media/builtin-google.json) is
+    the site's built-in worker (profile "web"); every account folder
+    profiles/google-media/<id> is worker <prefix><id>, profile <id>. Nothing is
+    created or written: accounts, names and the optional Gemini settings
+    (gemini_enabled, gemini_priority, gemini_model) are read from the Google
+    Media files. Whether an account is signed in is the desktop's report
+    (ROOT/<folder>/status.json), as for every web-chat site."""
+    media = profiles / "google-media"
+    builtin = workers.get(site["builtin"])
+    meta = _read_json_dict(media / "builtin-google.json")
+    if builtin is not None:
+        builtin["enabled"] = meta.get("gemini_enabled", True) is not False
+        model = meta.get("gemini_model")
+        if isinstance(model, str) and model.strip():
+            builtin["settings"] = {"model": model.strip()}
+    if not media.exists():
+        return
+    for path in sorted((p for p in media.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
+        worker_id = site["prefix"] + safe_worker_part(path.name)
+        if worker_id in workers:
+            continue
+        data = _read_json_dict(path / "teamyra-profile.json")
+        name = str(data.get("name") or path.name).strip() or path.name
+        try:
+            priority = max(0, min(int(data.get("gemini_priority", site["priority"])), 10000))
+        except (TypeError, ValueError):
+            priority = site["priority"]
+        info = {
+            "id": worker_id,
+            "provider": provider,
+            "label": f"{site['name']} ({name})",
+            "profile_id": path.name,
+            "home": None,
+            "native": False,
+            "execution": "desktop-web",
+            "enabled": data.get("gemini_enabled", True) is not False,
+            "priority": priority,
+        }
+        model = data.get("gemini_model")
+        if isinstance(model, str) and model.strip():
+            info["settings"] = {"model": model.strip()}
+        workers[worker_id] = info
+
+
 def build_worker_registry(root, home=None):
     root = Path(root)
     home = Path(home) if home else Path.home()
@@ -220,7 +275,11 @@ def build_worker_registry(root, home=None):
                 "settings": {"model": model},
             }
 
-    for provider, prefix in ((provider, site["prefix"]) for provider, site in WEB_SITES.items()):
+    for provider, site in WEB_SITES.items():
+        if site.get("accounts_from") == "google-media":
+            add_google_account_workers(workers, profiles, provider, site)
+            continue
+        prefix = site["prefix"]
         web_profiles = profiles / provider
         if not web_profiles.exists():
             continue

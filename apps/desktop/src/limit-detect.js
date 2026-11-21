@@ -93,7 +93,8 @@ function limitScript() {
       if (patterns.some(pattern => pattern.test(text))) return text;
     }
     const skip = 'pre, code, .markdown, [class*=markdown], .prose, [class*=prose], [data-message-author-role="user"], ' +
-      '[data-testid="user-message"], [class*=user-message], [class*=message-user], [contenteditable], textarea, input';
+      '[data-testid="user-message"], [class*=user-message], [class*=message-user], [contenteditable], textarea, input, ' +
+      'user-query, message-content';
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const hint = /limit|quota|unusual|suspicious|blocked|restricted|上限|限制|限额|用完|用尽|耗尽|异常|可疑/i;
     let visited = 0;

@@ -11,7 +11,11 @@ for (const text of [
   'Rate limit exceeded',
   '您今日的对话次数已用完',
   '已达到今日使用上限',
-  '请求过于频繁，请稍后再试'
+  '请求过于频繁，请稍后再试',
+  // Gemini (2026-11-21 wording).
+  "You've reached your limit for 4 Carbon. Your limit resets at 5:00 PM.",
+  'You’ve reached your daily limit for Deep Research',
+  "You've reached your limit. Responses will use other models until it resets on Nov 22, 3:00 PM."
 ]) assert.ok(limitNotice(text), text);
 for (const text of ['Here is the plan.', 'The build passed.', 'x'.repeat(500) + " You've hit your limit"]) {
   assert.equal(limitNotice(text), '', text);

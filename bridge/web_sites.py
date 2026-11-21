@@ -3,7 +3,8 @@
 One table for the core: each site's provider id, its readiness folder
 (ROOT/<folder>/status.json, also blocked for workspace tools), its display
 name, the built-in worker for its default account, and the worker-id prefix
-for further accounts under profiles/<provider>/. The desktop has the matching
+for further accounts under profiles/<provider>/ (with "accounts_from", the
+accounts of another provider: Gemini runs in the Google Media accounts). The desktop has the matching
 site descriptions (apps/desktop/src/*-web-provider.js).
 """
 
@@ -20,6 +21,12 @@ WEB_SITES = {
                  "label": "Qwen", "prefix": "qwen-", "priority": 290},
     "glm-web": {"folder": "glm", "name": "GLM", "builtin": "glm-normal",
                 "label": "GLM (Z.ai)", "prefix": "glm-", "priority": 300},
+    # Gemini has no accounts of its own: each Google Media account (signed in
+    # under Google Media, profiles/google-media/<id>) is one Gemini worker,
+    # in that account's browser profile. See docs/GEMINI_WEB_AGENT.md.
+    "gemini-web": {"folder": "gemini", "name": "Gemini", "builtin": "gemini-normal",
+                   "label": "Gemini", "prefix": "gemini-", "priority": 310,
+                   "accounts_from": "google-media"},
 }
 
 WEB_PROVIDERS = tuple(WEB_SITES)

@@ -110,6 +110,7 @@ const { DeepSeekWebProvider } = require('./deepseek-web-provider');
 const { QwenWebProvider } = require('./qwen-web-provider');
 const { GrokWebProvider } = require('./grok-web-provider');
 const { GlmWebProvider } = require('./glm-web-provider');
+const { GeminiWebProvider, geminiProfileIds, readMediaProfile } = require('./gemini-web-provider');
 const { GoogleMediaEngine } = require('./media/google-media-engine');
 const {
   ensureTeamyraMcp,
@@ -313,7 +314,16 @@ const WEB_CHAT_SITES = {
   'deepseek-web': { prefix: 'deepseek:', name: 'DeepSeek', Provider: DeepSeekWebProvider, builtin: 'deepseek-normal', workerPrefix: 'deepseek-' },
   'qwen-web': { prefix: 'qwen:', name: 'Qwen', Provider: QwenWebProvider, builtin: 'qwen-normal', workerPrefix: 'qwen-' },
   'grok-web': { prefix: 'grok:', name: 'Grok', Provider: GrokWebProvider, builtin: 'grok-normal', workerPrefix: 'grok-' },
-  'glm-web': { prefix: 'glm:', name: 'GLM', Provider: GlmWebProvider, builtin: 'glm-normal', workerPrefix: 'glm-' }
+  'glm-web': { prefix: 'glm:', name: 'GLM', Provider: GlmWebProvider, builtin: 'glm-normal', workerPrefix: 'glm-' },
+  // Gemini runs in the Google Media accounts (their browser profiles), so its
+  // accounts are those of profiles/google-media, read only; 'web' is the
+  // built-in Google account. See docs/GEMINI_WEB_AGENT.md.
+  'gemini-web': { prefix: 'gemini:', name: 'Gemini', Provider: GeminiWebProvider, builtin: 'gemini-normal', workerPrefix: 'gemini-',
+    profileIds: () => geminiProfileIds(PROFILES_ROOT),
+    accountMeta: profileId => {
+      const meta = readMediaProfile(ROOT, profileId);
+      return Number.isInteger(meta.gemini_lanes) ? { lanes: meta.gemini_lanes } : {};
+    } }
 };
 const WEB_CHAT_PREFIX = Object.fromEntries(Object.entries(WEB_CHAT_SITES).map(([id, site]) => [id, site.prefix]));
 
@@ -331,12 +341,14 @@ const MAX_WEB_LANES = 8;
 // hidden tabs per account sharing one renderer process.
 // Fewer chats at once per account also keeps sites from flagging "unusual
 // activity" (ChatGPT); the scheduler rotates jobs over the accounts.
-const SITE_DEFAULT_LANES = { 'glm-web': 2, 'qwen-web': 2, 'chatgpt-web': 3, 'muse-web': 3, 'deepseek-web': 3 };
+const SITE_DEFAULT_LANES = { 'glm-web': 2, 'qwen-web': 2, 'gemini-web': 2, 'chatgpt-web': 3, 'muse-web': 3, 'deepseek-web': 3 };
 
 function webLaneCount(providerId, profileId) {
   let lanes = Number(process.env.TEAMYRA_WEB_LANES) || SITE_DEFAULT_LANES[providerId] || DEFAULT_WEB_LANES;
   try {
-    const meta = JSON.parse(fs.readFileSync(path.join(PROFILES_ROOT, providerId, profileId, 'teamyra-profile.json'), 'utf8'));
+    const site = WEB_CHAT_SITES[providerId];
+    const meta = site?.accountMeta ? site.accountMeta(profileId)
+      : JSON.parse(fs.readFileSync(path.join(PROFILES_ROOT, providerId, profileId, 'teamyra-profile.json'), 'utf8'));
     if (Number.isInteger(meta.lanes)) lanes = meta.lanes;
   } catch {}
   return Math.max(1, Math.min(MAX_WEB_LANES, Math.round(lanes)));
@@ -353,12 +365,15 @@ function parseWebChatKey(key) {
 function chatgptProfileIds() {
   const ids = [];
   for (const [providerId, prefix] of Object.entries(WEB_CHAT_PREFIX)) {
-    const profiles = ['web'];
-    try {
-      for (const entry of fs.readdirSync(path.join(PROFILES_ROOT, providerId), { withFileTypes: true })) {
-        if (entry.isDirectory()) profiles.push(entry.name);
-      }
-    } catch {}
+    const site = WEB_CHAT_SITES[providerId];
+    const profiles = site.profileIds ? site.profileIds() : ['web'];
+    if (!site.profileIds) {
+      try {
+        for (const entry of fs.readdirSync(path.join(PROFILES_ROOT, providerId), { withFileTypes: true })) {
+          if (entry.isDirectory()) profiles.push(entry.name);
+        }
+      } catch {}
+    }
     for (const profileId of profiles) {
       ids.push(prefix + profileId);
       for (let lane = 2; lane <= webLaneCount(providerId, profileId); lane += 1) ids.push(prefix + profileId + '#' + lane);

@@ -533,7 +533,12 @@ class ChatGPTWebProvider {
     this.automation = this.site.adapter(this.view.webContents, {
       isVisible: () => this.visible === true,
       timeoutMs: this.pageCallTimeoutMs,
-      onTimeout: error => { this.notePageTimeout(error); if (generation === this.pageGeneration) this.markPageUnresponsive(); }
+      onTimeout: error => { this.notePageTimeout(error); if (generation === this.pageGeneration) this.markPageUnresponsive(); },
+      // For sites that pick a model per job or account (Gemini): the
+      // running job's model= and the account this tab belongs to.
+      jobModel: () => this.jobModel || '',
+      profileId: this.activeProfileId,
+      runtimeRoot: this.runtimeRoot
     });
 
     this.view.webContents.setWindowOpenHandler(({ url }) => {
@@ -1933,6 +1938,9 @@ class ChatGPTWebProvider {
       const task = fs.readFileSync(path.join(jobDir, 'task.txt'), 'utf8');
       let startMeta = {};
       try { startMeta = JSON.parse(fs.readFileSync(path.join(jobDir, 'meta.json'), 'utf8')); } catch {}
+      // The job's model (start_task model=, or the account's setting), for a
+      // site whose page offers a model choice (Gemini's mode picker).
+      this.jobModel = typeof startMeta.model === 'string' ? startMeta.model.trim() : '';
       // A job interrupted by a desktop restart continues where it stopped,
       // in the same conversation and within its original time budget.
       const resume = startMeta.resume_requested === true ? this.loadJobState(jobDir) : null;
@@ -2297,6 +2305,7 @@ class ChatGPTWebProvider {
       jobProcesses.stopJob(jobDir).catch(() => {});
       this.awaitingUser = false;
       this.activeJobDir = null;
+      this.jobModel = '';
       this.busy = false;
       // Release ownership before any renderer cleanup, even if it hangs.
       this.setInteractionLocked(false).catch(() => {});

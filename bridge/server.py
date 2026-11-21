@@ -1546,12 +1546,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "codex", "claude", "antigravity", "opencode"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "gemini-web", "codex", "claude", "antigravity", "opencode"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
     {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "codex", "claude", "antigravity", "opencode", "google-media"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "gemini-web", "codex", "claude", "antigravity", "opencode", "google-media"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},
@@ -2020,7 +2020,7 @@ TOOLS = [
         "Move a job (running, waiting or ended) to another account or model now. TEAMYRA stops it and starts a "
         "continuation with the original task, every step done so far and the folder state, so you do not resend "
         "anything. worker = an exact worker id (any provider); provider = a site such as deepseek-web, muse-web, "
-        "chatgpt-web, qwen-web, glm-web (its best ready account); neither = the best ready web-chat agent. "
+        "chatgpt-web, qwen-web, glm-web, gemini-web (its best ready account); neither = the best ready web-chat agent. "
         "job_wait/job_result on the original job id follow the move."),
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"}, "worker": {"type": "string"}, "provider": {"type": "string"}},

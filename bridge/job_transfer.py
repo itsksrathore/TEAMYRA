@@ -72,7 +72,7 @@ DEFAULTS = {
     "enabled": True,
     "max_transfers": 3,
     "wait_minutes": 30,
-    "providers": ["chatgpt-web", "muse-web", "deepseek-web", "glm-web", "qwen-web", "grok-web"],
+    "providers": ["chatgpt-web", "muse-web", "deepseek-web", "glm-web", "qwen-web", "grok-web", "gemini-web"],
     "pack_chars": 14000,
     "pause_minutes": 5,
 }
