@@ -1447,7 +1447,7 @@ def desktop_control(action, payload=None, timeout_seconds=20):
         except Exception: pass
 
 def media_wake_surface(provider_surface):
-    return {"google-flow-music": "music", "google-vids": "vids"}.get(provider_surface, "visual")
+    return {"google-flow-music": "music", "google-vids": "vids", "google-gemini": "gemini"}.get(provider_surface, "visual")
 
 
 def wake_media_surface(surface):
@@ -1501,10 +1501,11 @@ MODEL_PROP = {"type": "string", "description": (
     "own model names. Omit to use the worker's default.")}
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
-MEDIA_TYPE_ENUM = ["image", "video", "music", "background_music", "instrumental", "song", "sound_effect"]
-MEDIA_FORMAT_ENUM = ["png", "jpg", "jpeg", "webp", "mp4", "webm", "wav", "mp3", "m4a"]
+MEDIA_TYPE_ENUM = ["image", "video", "music", "background_music", "instrumental", "song", "sound_effect", "text"]
+MEDIA_FORMAT_ENUM = ["png", "jpg", "jpeg", "webp", "mp4", "webm", "wav", "mp3", "m4a", "md", "txt"]
 MEDIA_REQUEST_PROPERTIES = {
-    "type": {"type": "string", "enum": MEDIA_TYPE_ENUM},
+    "type": {"type": "string", "enum": MEDIA_TYPE_ENUM,
+             "description": "text: engine=gemini only, the answer saved as a Markdown document (gemini_tool none, deep_research, canvas)."},
     "prompt": {"type": "string"},
     "project_path": {"type": "string"},
     "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": 1800},
@@ -1535,8 +1536,14 @@ MEDIA_REQUEST_PROPERTIES = {
                      "description": "Bulk throughput: how many Flow generations this job may share with other queued jobs at once. The desktop worker submits jobs back to back, waits on all of them together and adapts downward if Flow reports it is busy. Default 10."},
     "accounts": {"type": "array", "items": {"type": "string"},
                  "description": "Google Media accounts this job may run in (ids or unique names from media_accounts). Omitted: every enabled account (single jobs: the main account). Each must be enabled."},
-    "engine": {"type": "string", "enum": ["flow", "vids"], "default": "flow",
-               "description": "flow: Google Flow (default). vids: Google Vids (Omni, same Google accounts, no Flow credits): type=video, 3-10 s clips, 16:9 or 9:16, 720p or native 1080p, up to 3 reference images, vids_mode create/animate/extend/edit."},
+    "engine": {"type": "string", "enum": ["flow", "vids", "gemini"], "default": "flow",
+               "description": "flow: Google Flow (default). vids: Google Vids (Omni, same Google accounts, no Flow credits): type=video, 3-10 s clips, 16:9 or 9:16, 720p or native 1080p, up to 3 reference images, vids_mode create/animate/extend/edit. gemini: Google Gemini (gemini.google.com) in the same signed-in Google accounts: gemini_tool image/video saves the generated media; none/deep_research/canvas (type=text) saves the answer as a .md document; references are uploaded files (images, PDF, text)."},
+    "gemini_model": {"type": "string", "default": "Auto",
+                     "description": "engine=gemini: an entry of Gemini's mode picker, matched case/space-insensitively by its name or description (Auto, 4 Hydrogen / Everyday help, 4 Neon / Deeper analysis, 4 Carbon / Code & complex work; signed-in accounts may offer more). A name the account does not offer fails the job with option_unavailable and the list it offers."},
+    "gemini_mode": {"type": "string", "enum": ["chat", "task"], "default": "chat",
+                    "description": "engine=gemini: Chat or Task (the toggle under Gemini's prompt box)."},
+    "gemini_tool": {"type": "string", "default": "none",
+                    "description": "engine=gemini: a tool from Gemini's Upload & tools menu: image (type=image), video (type=video), deep_research, canvas, none (plain answer; type=text), or another tool's name as the menu lists it (answer saved as text). Omitted with type image/video it follows the type."},
     "vids_mode": {"type": "string", "enum": ["create", "animate", "extend", "edit"], "default": "create",
                   "description": "engine=vids only. create: text + up to 3 reference images. animate: one image in references. extend: continue source_video (the result holds the original plus the new part). edit: change source_video, optionally with up to 3 reference images."},
     "source_video": {"type": "string", "description": "engine=vids, vids_mode extend/edit: a video file in the project or a TEAMYRA video asset id."},
@@ -1569,10 +1576,10 @@ TOOLS = [
          "confirm": {"type": "boolean", "default": False},
          "file_path": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
-    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings. For two or more generations use media_batch (one call, run in parallel); for Codex/gpt-image stills use codex_image_batch. See media_guide.",
+    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings. For two or more generations use media_batch (one call, run in parallel); for Codex/gpt-image stills use codex_image_batch. engine=vids uses Google Vids; engine=gemini uses Google Gemini (gemini_model, gemini_mode, gemini_tool image/video/deep_research/canvas/none; text answers saved as .md assets). See media_guide.",
      "inputSchema": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
                      "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
-    {"name": "media_batch", "description": "Bulk-generate up to 50 images/videos/sound effects in parallel. Jobs share one batch_id; the desktop worker submits them back to back so Flow generates many at once (e.g. 10-30 videos in minutes rather than one by one), then downloads and verifies each result. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames. Poll media_status with batch_id. For the fastest turnaround set download_quality='source' (720p video / original image, no upscale wait); default video downloads are 1080p upscales.",
+    {"name": "media_batch", "description": "Bulk-generate up to 50 images/videos/sound effects in parallel. Jobs share one batch_id; the desktop worker submits them back to back so Flow generates many at once (e.g. 10-30 videos in minutes rather than one by one), then downloads and verifies each result. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames. Poll media_status with batch_id. For the fastest turnaround set download_quality='source' (720p video / original image, no upscale wait); default video downloads are 1080p upscales. Requests may use engine=vids or engine=gemini (Gemini jobs spread over the signed-in Google accounts; an account at its Gemini usage limit rests and its jobs move to another).",
      "inputSchema": {"type": "object", "properties": {
          "requests": {"type": "array", "minItems": 1, "maxItems": 50,
                       "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
@@ -2178,6 +2185,7 @@ def tool_call(name, a):
                 "omni_references": {"mode": "ingredients", "references": "Exact TEAMYRA asset IDs or project-local images attach directly in the prompt box and are verified before Generate",
                                     "exact_first_frame": False, "exact_last_frame": False,
                                     "first_frame_alias": "Accepted as an image ingredient, without an exact opening-frame guarantee", "last_frame": "Rejected before generation"},
+                "gemini": media_guide.GEMINI_CAPABILITIES,
                 "runtime": "Desktop-dependent requests cold-start the app hidden; active jobs retain the browser, idle views unload after a grace period"}
     if name == "media_status":
         media_support.sweep_tickets(ROOT, media_helper_state)

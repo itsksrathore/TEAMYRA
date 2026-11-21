@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 MEDIA_TYPES = {
-    "image", "video", "music", "background_music", "instrumental", "song", "sound_effect"
+    "image", "video", "music", "background_music", "instrumental", "song", "sound_effect", "text"
 }
 VISUAL_TYPES = {"image", "video", "sound_effect"}
 MUSIC_TYPES = {"music", "background_music", "instrumental", "song"}
@@ -40,6 +40,8 @@ ASSET_PREFIX = {
     "instrumental": "MUS",
     "song": "MUS",
     "sound_effect": "SFX",
+    # A Gemini answer (plain chat, Deep Research report, Canvas) saved as Markdown.
+    "text": "DOC",
 }
 ASSET_FOLDER = {
     "image": "Images",
@@ -49,6 +51,7 @@ ASSET_FOLDER = {
     "instrumental": "Music",
     "song": "Music",
     "sound_effect": "Sound Effects",
+    "text": "Documents",
 }
 DEFAULT_EXTENSION = {
     "image": ".png",
@@ -58,6 +61,7 @@ DEFAULT_EXTENSION = {
     "instrumental": ".wav",
     "song": ".wav",
     "sound_effect": ".wav",
+    "text": ".md",
 }
 SAFE_FORMATS = {
     "image": {"png", "jpg", "jpeg", "webp"},
@@ -67,6 +71,7 @@ SAFE_FORMATS = {
     "instrumental": {"wav", "mp3", "m4a"},
     "song": {"wav", "mp3", "m4a"},
     "sound_effect": {"wav", "mp3", "m4a"},
+    "text": {"md", "txt"},
 }
 RUNTIME_IN_PROGRESS = {
     "preparing", "waiting_for_browser", "submitting", "generating", "processing",
@@ -96,7 +101,7 @@ def recovery_plan(job):
     text = str(job.get("error") or job.get("detail") or "").lower()
     category = failure.get("category") or next((name for name in (
         "human_verification", "login_required", "credits_exhausted", "policy_refusal",
-        "rate_limited", "reference_attach_failed", "core_timeout", "selector_failure", "output_mismatch", "result_match_failed", "provider_no_result", "download_failure", "browser_probe_failed",
+        "option_unavailable", "rate_limited", "reference_attach_failed", "core_timeout", "selector_failure", "output_mismatch", "result_match_failed", "provider_no_result", "download_failure", "browser_probe_failed",
     ) if name in text), "generation_failure")
     submission = job.get("provider_submission") or {}
     submitted = bool(submission.get("submitted_at"))
@@ -125,6 +130,16 @@ def recovery_plan(job):
     elif category == "vids_tab_lost":
         plan.update(action="requeue", can_recover=False, automatic=False,
                     instruction="Google Vids lost this unfinished clip when TEAMYRA restarted. Queue the same request again with media_generate or media_batch (engine=vids).")
+    elif state == "rate_limited" and category == "rate_limited" and (job.get("request") or {}).get("surface") == "gemini":
+        until = (job.get("failure") or {}).get("cooldown_until")
+        plan.update(action="wait", can_recover=False, automatic=True, cooldown_until=until,
+                    instruction="A Google account reached its Gemini usage limit before this job produced anything. "
+                                "TEAMYRA rests that account and another signed-in account takes the job (or this one "
+                                "once it has rested). Poll the same job; do not resubmit.")
+    elif category == "option_unavailable":
+        plan.update(action="revise_request", can_recover=False, automatic=False,
+                    instruction="Gemini does not offer the requested model, mode or tool in this account (the error lists what "
+                                "it offers). Nothing was sent. Queue the request again with an option from that list.")
     elif category == "provider_no_result":
         plan.update(action="revise_request", can_recover=submitted, automatic=False,
                     instruction="Flow accepted the generation but no result appeared and a full project search found none; this is usually a silent moderation refusal. Reword the prompt and queue a new job. teamyra.media_recover only waits for the same submission again.")
@@ -204,7 +219,7 @@ def recover_job(root, job_id, *, automatic=False, helper_ticket=None):
                 "retry_after": job["retry_after"], "recovery": recovery, "recovery_plan": plan}
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-_ASSET_ID_RE = re.compile(r"^TYR-(IMG|VID|MUS|SFX)-(\d{6,})$")
+_ASSET_ID_RE = re.compile(r"^TYR-(IMG|VID|MUS|SFX|DOC)-(\d{6,})$")
 _JOB_ID_RE = re.compile(r"^media-[A-Za-z0-9._-]{8,96}$")
 _BATCH_ID_RE = re.compile(r"^batch-[A-Za-z0-9._-]{8,96}$")
 
@@ -290,7 +305,8 @@ def _summarize(job):
         "claimed_lane": job.get("claimed_lane"), "claimed_at": job.get("claimed_at"),
         "possible_submission": _possible_submission(job),
         "request": {"surface": request.get("surface"), "max_parallel": request.get("max_parallel"),
-                    "project_path": request.get("project_path"), "accounts": request.get("accounts")},
+                    "project_path": request.get("project_path"), "accounts": request.get("accounts"),
+                    "gemini_tool": request.get("gemini_tool")},
         "provider_submission": {key: submission.get(key) for key in (
             "submitted_at", "provider_url", "profile_id", "lane", "result_key") if submission.get(key) is not None},
         "resolved_references": [{"asset_id": item.get("asset_id"), "path": item.get("path")}
@@ -447,7 +463,7 @@ def ensure_project_folders(root, project_path):
     project = _validate_project(root, project_path)
     base = project / "Generated Assets"
     folders = {}
-    for name in ("Images", "Videos", "Music", "Sound Effects", "References", "Frames", "Characters", "Metadata"):
+    for name in ("Images", "Videos", "Music", "Sound Effects", "Documents", "References", "Frames", "Characters", "Metadata"):
         item = base / name
         item.mkdir(parents=True, exist_ok=True)
         folders[name] = str(item)
@@ -475,6 +491,8 @@ def route_for_type(media_type):
         return "music"
     if media_type in VISUAL_TYPES:
         return "visual"
+    if media_type == "text":
+        raise ValueError("type=text is a Gemini answer: use engine=gemini")
     raise ValueError(f"unsupported media type: {media_type}")
 
 
@@ -576,8 +594,13 @@ def normalize_generate_request(root, request):
     engine = str(request.get("engine") or "flow").strip().lower()
     if engine in {"vids", "google-vids", "google_vids"}:
         return _normalize_vids_request(root, request, media_type, project, prompt)
+    if engine in {"gemini", "google-gemini", "google_gemini"}:
+        return _normalize_gemini_request(root, request, media_type, project, prompt)
     if engine not in {"flow", "google-flow", "google_flow"}:
-        raise ValueError("engine must be flow (Google Flow) or vids (Google Vids)")
+        raise ValueError("engine must be flow (Google Flow), vids (Google Vids) or gemini (Google Gemini)")
+    for key in ("gemini_model", "gemini_mode", "gemini_tool"):
+        if request.get(key):
+            raise ValueError(f"{key} is only for engine=gemini")
 
     default_model = "Lyria 3.5" if media_type in MUSIC_TYPES else (
         "Gemini Omni Flash" if media_type in {"video", "sound_effect"} else "auto"
@@ -759,6 +782,177 @@ def _normalize_vids_request(root, request, media_type, project, prompt):
     return result
 
 
+GEMINI_MODES = {"chat", "task"}
+# Known tools of Gemini's "Upload & tools" menu and the asset each makes. Any
+# other tool the menu lists is accepted by name and saves the answer as text.
+GEMINI_TOOL_OUTPUT = {"none": "text", "image": "image", "video": "video", "deep_research": "text", "canvas": "text"}
+GEMINI_TOOL_ALIASES = {
+    "": "none", "chat": "none", "text": "none", "answer": "none",
+    "images": "image", "create_image": "image", "create_images": "image", "image_generation": "image", "nano_banana": "image",
+    "videos": "video", "create_video": "video", "create_videos": "video", "video_generation": "video", "veo": "video",
+    "deepresearch": "deep_research", "research": "deep_research",
+}
+GEMINI_MAX_REFERENCES = 10
+GEMINI_REFERENCE_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".pdf", ".txt", ".md", ".markdown", ".csv", ".tsv",
+    ".json", ".html", ".htm", ".xml", ".yaml", ".yml", ".rtf", ".doc", ".docx", ".pptx", ".xlsx", ".xls",
+    ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cs", ".go", ".rs", ".rb", ".php", ".sql", ".sh",
+    ".mp4", ".mov", ".webm",
+}
+GEMINI_DEFAULT_MODEL = "Auto"
+
+
+def normalize_gemini_name(value):
+    """Case/space/punctuation-insensitive form of a Gemini menu label."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _gemini_tool(value):
+    raw = str(value or "").strip().lower()
+    key = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    key = GEMINI_TOOL_ALIASES.get(key, key)
+    if not key:
+        return "none"
+    if not re.fullmatch(r"[a-z0-9_]{1,40}", key):
+        raise ValueError("gemini_tool must be image, video, deep_research, canvas, none or another tool name from "
+                         "Gemini's Upload & tools menu")
+    return key
+
+
+def _normalize_gemini_request(root, request, media_type, project, prompt):
+    """A Google Gemini job: a chat (or Task) turn with an optional model, tool
+    and uploaded files. Images and videos are saved as media; every other
+    answer (plain, Deep Research, Canvas) as a Markdown document."""
+    tool = _gemini_tool(request.get("gemini_tool"))
+    if request.get("gemini_tool") in (None, "") and media_type in {"image", "video"}:
+        tool = media_type
+    output = GEMINI_TOOL_OUTPUT.get(tool, "text")
+    if media_type != output:
+        raise ValueError(f"engine=gemini with gemini_tool={tool} makes type={output}; got type={media_type}")
+    mode = str(request.get("gemini_mode") or "chat").strip().lower()
+    if mode not in GEMINI_MODES:
+        raise ValueError("gemini_mode must be chat or task")
+    model = re.sub(r"\s+", " ", str(request.get("gemini_model") or GEMINI_DEFAULT_MODEL)).strip()[:60]
+    if not normalize_gemini_name(model):
+        raise ValueError("gemini_model must name an entry of Gemini's mode picker (e.g. Auto, 4 Hydrogen, 4 Neon, 4 Carbon)")
+    refs = _normalize_references(request.get("references"))
+    if len(refs) > GEMINI_MAX_REFERENCES:
+        raise ValueError(f"Gemini takes at most {GEMINI_MAX_REFERENCES} uploaded files")
+    for key in ("vids_mode", "source_video", "first_frame", "last_frame", "lyrics"):
+        if request.get(key):
+            raise ValueError(f"{key} is not supported with engine=gemini")
+    aspect = str(request.get("aspect_ratio") or "").strip()[:32] or None
+    if aspect and output == "text":
+        raise ValueError("aspect_ratio applies only to Gemini images and videos")
+    settings = {"engine": "google-gemini", "gemini_model": model, "gemini_mode": mode, "gemini_tool": tool,
+                "download_quality": "source", "wait_for_upscale": False}
+    result = {
+        "type": media_type,
+        "prompt": prompt,
+        "provider_prompt": prompt,
+        "project_path": str(project),
+        "surface": "gemini",
+        "engine": "gemini",
+        "gemini_model": model,
+        "gemini_mode": mode,
+        "gemini_tool": tool,
+        "aspect_ratio": aspect,
+        "duration": None,
+        "format": _normalize_format(media_type, request.get("format")),
+        "references": refs,
+        "output_count": 1,
+        "instrumental": False,
+        "vocals": False,
+        "lyrics": None,
+        "model_preference": model,
+        "reference_mode": "ingredients",
+        "generation_settings": settings,
+    }
+    if request.get("max_parallel") is not None:
+        result["max_parallel"] = max(1, min(int(request.get("max_parallel")), MAX_PARALLEL))
+    if request.get("accounts"):
+        result["accounts"] = resolve_google_accounts(root, request.get("accounts"))
+    ensure_project_folders(root, project)
+    return result
+
+
+def _cooldowns_file(root):
+    return _media_root(root) / "engine-cooldowns.json"
+
+
+def engine_cooldowns(root, engine=None, now=None):
+    """Live per-account engine cooldowns: [{engine, scope, profile_id, until, reason}]."""
+    now = time.time() if now is None else now
+    data = _read_json(_cooldowns_file(root), {})
+    rows = data.get("cooldowns") if isinstance(data, dict) else None
+    rows = [item for item in rows or [] if isinstance(item, dict) and float(item.get("until") or 0) > now]
+    return [item for item in rows if engine is None or item.get("engine") == engine]
+
+
+def _cooling_scopes(root, engine, profile, now=None):
+    return {item.get("scope") or "all" for item in engine_cooldowns(root, engine, now)
+            if _profile_id(item.get("profile_id")) == profile}
+
+
+def set_engine_cooldown(root, engine, profile_id, seconds, reason=None, scope="all"):
+    """Rest one account's engine (or one tool of it) after a usage limit."""
+    engine = str(engine or "").strip().lower()
+    if engine not in {"gemini"}:
+        raise ValueError("engine cooldowns exist for gemini only")
+    scope = _gemini_tool(scope) if scope not in (None, "", "all") else "all"
+    seconds = max(60.0, min(float(seconds or 3600), 7 * 24 * 3600))
+    profile = _profile_id(profile_id)
+    now = time.time()
+    rows = [item for item in engine_cooldowns(root, None, now)
+            if not (item.get("engine") == engine and _profile_id(item.get("profile_id")) == profile
+                    and (item.get("scope") or "all") == scope)]
+    entry = {"engine": engine, "scope": scope, "profile_id": profile, "until": now + seconds,
+             "reason": str(reason or "usage limit")[:400], "since": now}
+    rows.append(entry)
+    _atomic_write(_cooldowns_file(root), {"version": 1, "cooldowns": rows})
+    return entry
+
+
+def clear_engine_cooldown(root, engine, profile_id=None):
+    rows = [item for item in engine_cooldowns(root) if not (
+        item.get("engine") == engine and (profile_id is None or _profile_id(item.get("profile_id")) == _profile_id(profile_id)))]
+    _atomic_write(_cooldowns_file(root), {"version": 1, "cooldowns": rows})
+    return {"cooldowns": rows}
+
+
+def gemini_limit_handoff(root, job_id, profile_id, *, seconds=3600, reason=None, scope="all"):
+    """The account hit a Gemini usage limit on this job: rest that account
+    (for this tool, or all of Gemini) and give the job back to the queue so
+    another account takes it. Gemini made nothing, so a new send is safe."""
+    with _state_lock(root):
+        entry = set_engine_cooldown(root, "gemini", profile_id, seconds, reason, scope)
+        job = load_job(root, job_id)
+        if job.get("state") in TERMINAL_STATES:
+            return {"job": public_job(job), "cooldown": entry}
+        previous = dict(job.get("provider_submission") or {})
+        job["state"] = "rate_limited"
+        job["detail"] = ("Gemini usage limit in account " + entry["profile_id"] + ": " + entry["reason"] +
+                         "; the job moves to another account (or waits until this one rests)")[:1000]
+        job["error"] = job["detail"]
+        job["failure"] = {"category": "rate_limited", "at": time.time(), "profile_id": entry["profile_id"],
+                          "cooldown_until": entry["until"], "scope": entry["scope"]}
+        job.setdefault("limited_accounts", [])
+        if entry["profile_id"] not in job["limited_accounts"]:
+            job["limited_accounts"].append(entry["profile_id"])
+        if previous:
+            job["previous_submission"] = previous
+        job["provider_submission"] = {}
+        job["reconcile_required"] = False
+        # Nothing was made: the next account starts from scratch (no reconciliation).
+        job["submission_phase"] = "preparing"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["retry_after"] = time.time() + 2
+        job.setdefault("history", []).append(_event("rate_limited", job["detail"]))
+        _save_job(root, job)
+        return {"job": public_job(job), "cooldown": entry}
+
+
 def _load_assets(root):
     data = _read_json(_assets_file(root), None)
     if not isinstance(data, dict):
@@ -911,7 +1105,12 @@ def _event(state, detail=None):
 def _prepare_job(root, request, *, operation=None, source_asset=None):
     normalized = normalize_generate_request(root, request)
     refs = resolve_request_references(root, normalized)
-    parent_ids = [item["asset_id"] for item in refs if item.get("asset_id")]
+    if normalized.get("surface") == "gemini":
+        for item in refs:
+            if Path(item["path"]).suffix.lower() not in GEMINI_REFERENCE_SUFFIXES:
+                raise ValueError("Gemini cannot upload " + Path(item["path"]).name +
+                                 ": use images, PDFs, text/Office/code files or short videos")
+    parent_ids =[item["asset_id"] for item in refs if item.get("asset_id")]
     if normalized.get("source_video"):
         source = _resolve_reference(root, Path(normalized["project_path"]).resolve(), normalized["source_video"])
         if Path(source["path"]).suffix.lower() not in {".mp4", ".mov", ".webm", ".m4v"}:
@@ -948,7 +1147,8 @@ def create_job(root, request, *, operation=None, source_asset=None, batch_id=Non
         "resolved_references": refs,
         "parent_asset_ids": parent_ids,
         "provider": None,
-        "provider_surface": {"music": "google-flow-music", "vids": "google-vids"}.get(normalized["surface"], "google-flow"),
+        "provider_surface": {"music": "google-flow-music", "vids": "google-vids", "gemini": "google-gemini"}.get(
+            normalized["surface"], "google-flow"),
         "provider_submission": {},
         "planned_output": None,
         "asset_id": None,
@@ -1492,8 +1692,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
     if main is None:
         main = profile == DEFAULT_PROFILE
     surface = str(surface or "").strip().lower()
-    if surface not in {"visual", "music", "vids"}:
-        raise ValueError("surface must be visual, music or vids")
+    if surface not in {"visual", "music", "vids", "gemini"}:
+        raise ValueError("surface must be visual, music, vids or gemini")
     try:
         lane = max(0, int(lane or 0))
         lanes = max(1, int(lanes or 1))
@@ -1507,6 +1707,7 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
         active = {}
         now = time.time()
         jobs = []
+        cooling = None
         for job in _job_summaries(root):
             orphaned = (job.get("state") == "preparing" and not job.get("possible_submission")
                         and now - float(job.get("claimed_at") or 0) > ORPHANED_CLAIM_SECONDS)
@@ -1541,6 +1742,22 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
             # The caller chose the accounts this job may run in.
             wanted = (job.get("request") or {}).get("accounts")
             if not submitted and wanted and profile not in wanted:
+                continue
+            if surface == "gemini" and not submitted:
+                # An account resting after a Gemini usage limit takes no new
+                # Gemini work (of that tool); other accounts take it instead.
+                tool = (job.get("request") or {}).get("gemini_tool") or "none"
+                if cooling is None:
+                    cooling = _cooling_scopes(root, "gemini", profile, now)
+                if "all" in cooling or tool in cooling:
+                    continue
+                # Gemini chats belong to no project: any tab of any account may
+                # take a single job too, so one resting account never strands it.
+                if job.get("batch_id"):
+                    limit = (job.get("request") or {}).get("max_parallel")
+                    if limit and active.get((job["batch_id"], profile), 0) >= int(limit):
+                        continue
+                candidates.append(job)
                 continue
             if submitted:
                 # Only the submitting account can see, match and download it.

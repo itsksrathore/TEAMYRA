@@ -326,6 +326,77 @@ assets, maintenance issues) is shared with Flow.
   1080p with audio; a 6-job batch ran 4 create jobs across 3 accounts, two at
   once in two tabs of one account.
 
+## Google Gemini (2026-11-21)
+
+Google Gemini (https://gemini.google.com/app) is a third Google Media engine
+beside Flow and Vids. Agents choose it per job with `engine: "gemini"` on
+`media_generate` / `media_batch`; accounts, batches, polling, assets, recovery
+and maintenance issues are shared with the other engines.
+
+- **Accounts:** Gemini runs only in Google Media accounts that are already
+  signed in, in their own sessions (the same partition and cookies as their
+  Flow and Vids tabs). There is no separate profile, partition or sign-in flow;
+  an account that is not signed in, disabled or challenged takes no Gemini
+  work. Each account runs `TEAMYRA_GEMINI_TABS` hidden Gemini tabs (default 1,
+  at most 3); a tab runs one chat (job) at a time. Gemini chats belong to no
+  project, so single jobs as well as batch jobs may run in any working account.
+- **Options (matched by name from the page's own menus):**
+  - `gemini_model` (default `Auto`): an entry of the mode picker
+    ("Open mode picker, currently Auto"), matched case/space-insensitively by
+    its label or its description. Signed out it lists Auto ("Adapts to your
+    needs"), 4 Hydrogen ("Everyday help"), 4 Neon ("Deeper analysis") and
+    4 Carbon ("Code & complex work"); signed-in accounts may list more.
+  - `gemini_mode`: `chat` (default) or `task`, the toggle under the prompt box.
+  - `gemini_tool`: from the "Upload & tools" (+) menu (signed in): `image`
+    (`type: "image"`), `video` (`type: "video"`), `deep_research`, `canvas`,
+    `none` (default; plain answer) or any other tool's name as the menu lists
+    it. Text-producing tools use `type: "text"`. With type image/video and no
+    tool, the tool follows the type.
+  - `references`: up to 10 project files or asset ids (images, PDF,
+    text/Office/code files, short videos), uploaded through the + menu's hidden
+    file inputs; only files inside `project_path` (same checks as other
+    engines).
+  - An option the account does not offer fails the job before anything is
+    sent, as `option_unavailable`, listing what the page offers.
+- **Outputs:** images and videos are taken from the page's download control
+  when it offers one (through the account's download manager), else from the
+  element's URL fetched in the account's session (or inside the page for
+  `blob:` URLs); the bytes are sniffed (PNG/JPEG/WebP/GIF or MP4/WebM),
+  size-checked, converted to the requested image format when needed, verified
+  with FFmpeg and registered as `TYR-IMG-*` / `TYR-VID-*` assets
+  (`provider: google-gemini`). Plain answers, Deep Research reports and Canvas
+  documents are converted from the page to Markdown (headings, lists, code,
+  tables, links) and saved as `Generated Assets/Documents/NNN_<slug>.md`
+  (`type: "text"`, `TYR-DOC-*` assets; `format: "txt"` saves plain text).
+  Asset metadata keeps the model, mode, tool, account, chat URL and the links
+  of the answer (Docs export links separately).
+- **Deep Research:** Gemini first shows a research plan; TEAMYRA presses
+  "Start research" once and waits up to 90 minutes for the report panel.
+- **Usage limits:** Gemini's limit wording ("You've reached your limit...",
+  "Try again in N hours", "limit resets tomorrow"), in a notice or as a short
+  answer without media, rests that account's Gemini for that tool (or all of
+  Gemini for plain chats) in `media/engine-cooldowns.json` (for the stated time,
+  else 4 hours) and puts the job back in the queue as `rate_limited` with its
+  submission cleared; other accounts take it, or this one after its rest.
+  `media_guide` capacity and `media_capabilities` show the resting accounts.
+- **Failure categories:** `selector_failure`, `reference_attach_failed`
+  (recoverable, nothing sent), `rate_limited` (moves to another account),
+  `option_unavailable` and `policy_refusal` (revise the request),
+  `provider_no_result` (Gemini answered without the asked media),
+  `download_failure`, `login_required`, and `generation_failure` (a timed-out
+  answer is recoverable: the job keeps its chat URL, and `media_recover` or a
+  restart reopens the same chat in the same account instead of sending again).
+- **Automation notes (learned from the signed-out page, 2026-11-21):** prompt
+  `div.ql-editor[contenteditable][aria-label="Enter a prompt for Gemini"]`;
+  mode picker `button[data-test-id=bard-mode-menu-button]` opening
+  `gem-menu[role=menu]` of `gem-menu-item[role=menuitemradio]` (`.label`,
+  `.sublabel`, `aria-checked`); Chat/Task `gem-segmented-button` buttons;
+  `Send message` / `Stop response` buttons; answers in `model-response`
+  (`message-content .markdown`, complete when `message-actions` appear and the
+  Stop button is gone); the chat moves to `/app/<id>`. The signed-in tools menu,
+  generated media markup, download control, Deep Research panel and limit
+  wording still need a live signed-in check.
+
 ## One TEAMYRA per PC
 
 `%USERPROFILE%\.teamyra\runtime.json` names the canonical checkout
