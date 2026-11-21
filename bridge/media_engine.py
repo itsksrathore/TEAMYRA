@@ -1559,6 +1559,35 @@ def claimed_result_keys(root, provider_url=None):
     return {"claimed": claimed}
 
 
+def suno_requeue_uncreated(root, job_id, *, reason=None, delay=5.0):
+    """A Suno job whose Create never reached Suno (the account's Library lists
+    no song for it two minutes after the click; checked by the desktop worker)
+    goes back to the queue with its submission cleared, so it runs again
+    instead of waiting 15 minutes for clips that do not exist. Suno only."""
+    with _state_lock(root):
+        job = load_job(root, job_id)
+        if job.get("provider_surface") != "suno" and (job.get("request") or {}).get("engine") != "suno":
+            raise ValueError("only Suno jobs can be requeued this way")
+        if job.get("state") not in {"generating", "submitting", "preparing", "waiting_for_browser"}:
+            raise ValueError(f"media job cannot be requeued from state {job.get('state')}")
+        recovery = dict(job.get("recovery") or {})
+        count = int(recovery.get("suno_uncreated_requeues") or 0) + 1
+        if count > 2:
+            raise ValueError("this Suno job was already requeued twice without Suno creating it")
+        recovery["suno_uncreated_requeues"] = count
+        job["recovery"] = recovery
+        job["provider_submission"] = None
+        job["submission_phase"] = "preparing"
+        job["reconcile_required"] = False
+        job["state"] = "queued"
+        job["claimed_by"] = None
+        job["claimed_at"] = None
+        job["retry_after"] = time.time() + max(0.0, min(float(delay or 0), 600.0))
+        job.setdefault("history", []).append(_event("queued", reason or "Suno did not create this song; queued again"))
+        _save_job(root, job)
+        return job
+
+
 def release_job(root, job_id, *, delay=15.0, reason=None):
     """Return a claimed job to the queue before its paid submission.
 

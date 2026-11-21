@@ -60,6 +60,20 @@ class MediaSunoTests(unittest.TestCase):
         self.assertFalse(request["instrumental"])
         self.assertTrue((self.project / "Generated Assets" / "Music" / "Previews").is_dir())
 
+    def test_requeue_a_song_suno_never_created(self):
+        job = media_engine.create_job(self.td, self.suno())
+        claimed = self.claim()
+        self.assertEqual(claimed["job_id"], job["job_id"])
+        media_engine.update_job_state(self.td, job["job_id"], "generating")
+        full = media_engine.load_job(self.td, job["job_id"])
+        full["provider_submission"] = {"submitted_at": 1.0, "clip_ids": ["not-a-clip"]}
+        media_engine._save_job(self.td, full)
+        again = media_engine.suno_requeue_uncreated(self.td, job["job_id"], reason="no clips")
+        self.assertEqual((again["state"], again["provider_submission"]), ("queued", None))
+        flow = media_engine.create_job(self.td, {"type": "image", "prompt": "fox", "project_path": str(self.project)})
+        with self.assertRaisesRegex(ValueError, "only Suno"):
+            media_engine.suno_requeue_uncreated(self.td, flow["job_id"])
+
     def test_v6_more_options(self):
         job = media_engine.create_job(self.td, self.suno(suno_duration="2:30", suno_max_mode=True, suno_variety="off",
                                                           suno_personalize=False, suno_mode="advanced"))

@@ -228,6 +228,9 @@ def handle(action, payload):
                                              profile_id=payload.get("profile_id"))
     if action == "media.status-many":
         return media_engine.status_many(ROOT, payload.get("job_ids") or [])
+    if action == "media.suno-requeue":
+        return media_engine.suno_requeue_uncreated(ROOT, payload["job_id"], reason=payload.get("reason"),
+                                                   delay=payload.get("delay", 5))
     if action == "media.release":
         return media_engine.release_job(ROOT, payload["job_id"], delay=payload.get("delay", 15),
                                         reason=payload.get("reason"))

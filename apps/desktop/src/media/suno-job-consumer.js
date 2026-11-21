@@ -233,6 +233,16 @@ class SunoJobConsumer {
         await this.provider.load(SUNO_LIBRARY).catch(() => null);
         await sleep(2500);
         const found = adapter.clipsCreatedSince(since, job.request?.suno_title || '').slice(0, 2);
+        // Two minutes after submitting, the Library lists nothing for this job
+        // and the followed ids carry no clip data: Suno never got the Create
+        // (2026-11-21: a restart at the moment of the click). Nothing was made,
+        // so the job goes back to the queue instead of waiting 15 minutes.
+        if (!found.length && Date.now() - since > 120000 && ids.every(id => !adapter.clips.get(id)?.status)) {
+          const released = await this.core('media.suno-requeue', { job_id: jobId, delay: 5,
+            reason: 'Suno did not create this song (no clips in the Library two minutes after Create); trying again' },
+            { timeout: 20000 }).then(() => true).catch(() => false);
+          if (released) return null;
+        }
         if (found.length && found.some(id => !ids.includes(id))) {
           ids = found;
           await this.core('media.patch', { job_id: jobId, patch: { provider_submission: { ...(job.provider_submission || {}), clip_ids: ids, clips_found_via: 'library' } } }).catch(() => {});
