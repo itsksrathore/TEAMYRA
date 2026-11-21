@@ -894,6 +894,13 @@ class SunoAdapter {
     applied.model = model.model;
     applied.models_offered = model.offered;
     this.step = 'fields';
+    // The Lyrics and Styles sections fold away (their headers are role=button
+    // with aria-expanded); a folded section has no editor (2026-11-21: a job
+    // after a restart found no Lyrics field). Open them first.
+    for (const name of ['Lyrics', 'Styles']) {
+      const header = ((await this.form()).buttons || []).find(item => normalizeName(item.text) === normalizeName(name) && item.expanded === 'false');
+      if (header) { await this.probe('click', { idx: header.idx }); await this.sleep(Math.max(this.settleMs, 600)); }
+    }
     const given = key => request[key] !== null && request[key] !== undefined;
     const needsMore = request.suno_exclude_styles || request.suno_vocal_gender || given('suno_weirdness') || given('suno_style_influence') ||
       given('suno_duration') || given('suno_max_mode') || given('suno_variety') || given('suno_personalize') ||
