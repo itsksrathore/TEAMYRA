@@ -268,10 +268,22 @@ async function adapterTests() {
   await adapter.clickCreate();
   adapter.ingest('https://suno.com/a/api/generate/v2/', { clips: [clipJson(CLIP_A, { status: 'submitted' }), clipJson(CLIP_B, { status: 'submitted' })] });
   const created = await adapter.newClips(known, { timeoutMs: 1000, everyMs: 5 });
-  assert.deepEqual(created, { ids: [CLIP_A, CLIP_B], via: 'network' });
+  // The generate reply's ids are only a last resort (Suno v6 lists the
+  // finished clips under other ids); the wait then follows the Library.
+  assert.deepEqual(created, { ids: [CLIP_B, CLIP_A], via: 'page' }, 'the new song rows, not the generate reply ids');
   assert.equal(adapter.clips.get(CLIP_A).status, 'submitted');
   adapter.ingest('https://suno.com/a/api/feed/v3', { clips: [clipJson(CLIP_A)] });
   assert.equal(adapter.clips.get(CLIP_A).status, 'complete');
+  // The Library lists the finished clips (here under the same ids) with their
+  // creation time and title: those are taken first.
+  const feedOnly = new SunoAdapter(new FakeSunoPage(), { settleMs: 1 });
+  await feedOnly.clickCreate();
+  const now = new Date().toISOString();
+  feedOnly.ingest('https://suno.com/a/api/generate/v2/', { clips: [clipJson(OLD_CLIP, { created_at: now, title: 'Song X' })] });
+  feedOnly.ingest('https://studio-api.prod.suno.com/api/feed/v3', { clips: [clipJson(CLIP_A, { created_at: now, title: 'Song X' }), clipJson(CLIP_B, { created_at: now, title: 'Song X' })] });
+  const listed = await feedOnly.newClips([], { timeoutMs: 1000, everyMs: 5, title: 'Song X' });
+  assert.equal(listed.via, 'feed');
+  assert.deepEqual([...listed.ids].sort(), [CLIP_A, CLIP_B].sort(), 'the Library clips, not the generate reply id');
   const rowsOnly = new SunoAdapter(page, { settleMs: 1 });
   page.rows = [OLD_CLIP];
   const before = await rowsOnly.clipIds();

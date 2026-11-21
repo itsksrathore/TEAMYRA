@@ -214,7 +214,7 @@ class SunoJobConsumer {
     const started = Date.now();
     let lastCheck = 0;
     let lastFallback = Date.now();
-    let relinked = false;
+    let lastLibrary = Date.now() - 20000;
     while (Date.now() - started < this.generationTimeoutMs) {
       if (Date.now() - lastCheck > 15000) {
         lastCheck = Date.now();
@@ -224,15 +224,16 @@ class SunoJobConsumer {
         }
       }
       let summaries = ids.map(id => adapter.clips.get(id) || null);
-      // A followed id that never shows clip data is not a clip (an id from the
-      // generate reply): find the job's real clips in the Library instead.
-      if (!relinked && summaries.some(item => !item) && Date.now() - started > 45000) {
-        relinked = true;
+      // The Library is the truth: every 30 s, if it lists this job's clips
+      // (title, created after the submission) under other ids, follow those
+      // (2026-11-21: the generate reply's ids were not the finished clips).
+      if (Date.now() - lastLibrary > 30000 && summaries.some(item => !isDone(item) && !isFailed(item))) {
+        lastLibrary = Date.now();
         const since = Number(job.provider_submission?.submitted_at) || started;
         await this.provider.load(SUNO_LIBRARY).catch(() => null);
         await sleep(2500);
         const found = adapter.clipsCreatedSince(since, job.request?.suno_title || '').slice(0, 2);
-        if (found.length) {
+        if (found.length && found.some(id => !ids.includes(id))) {
           ids = found;
           await this.core('media.patch', { job_id: jobId, patch: { provider_submission: { ...(job.provider_submission || {}), clip_ids: ids, clips_found_via: 'library' } } }).catch(() => {});
           await this.update(jobId, 'generating', 'Suno is making ' + ids.length + ' clip(s): ' + ids.join(', ')).catch(() => {});

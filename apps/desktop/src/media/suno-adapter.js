@@ -606,6 +606,7 @@ class SunoAdapter {
     this.pending = 0;
     this.clips = new Map();       // clip id -> latest summary seen in the page's API responses
     this.createdIds = [];         // ids from the page's own generate response, newest last
+    this.fromFeed = new Set();    // clip ids a feed/library request reported (not the generate reply)
     this.capturing = false;
     this.requests = new Map();
   }
@@ -674,9 +675,11 @@ class SunoAdapter {
 
   ingest(url, data) {
     const clips = extractClips(data);
+    const generateReply = /\/generate/i.test(url);
     for (const clip of clips) {
       const summary = clipSummary(clip);
       if (!summary) continue;
+      if (!generateReply) this.fromFeed.add(summary.clip_id);
       const known = this.clips.get(summary.clip_id) || {};
       if (this.clips.size > 2000) this.clips.delete(this.clips.keys().next().value);
       this.clips.set(summary.clip_id, { ...known, ...Object.fromEntries(Object.entries(summary).filter(([, value]) => value !== null && !(Array.isArray(value) && !value.length))) , seen_at: Date.now() });
@@ -1022,9 +1025,12 @@ class SunoAdapter {
 
   // Clips the page's own requests reported as created after our Create click
   // (with the request's title when given), newest first.
+  // Only clips a feed/library request listed: the ids in the generate reply
+  // are not the finished clips' ids (2026-11-21: Suno v6 lists other ids).
   clipsCreatedSince(since, title = '') {
     const want = normalizeName(title);
     return [...this.clips.entries()]
+      .filter(([id]) => this.fromFeed.has(id))
       .map(([id, clip]) => ({ id, clip, at: Date.parse(clip.created_at || '') || 0 }))
       .filter(item => item.at >= since - 15000 && (!want || normalizeName(item.clip.title || '') === want))
       .sort((a, b) => b.at - a.at)
@@ -1052,14 +1058,14 @@ class SunoAdapter {
       // followed for 15 minutes while both real clips were done).
       const fresh = this.clipsCreatedSince(since, title).filter(id => !known.has(id));
       if (fresh.length >= 2) return { ids: fresh.slice(0, 2), via: 'feed' };
-      const created = this.createdIds.filter(id => !known.has(id) && this.clips.has(id));
-      if (created.length >= 2) return { ids: created.slice(-2), via: 'network' };
-      const ids = (await this.clipIds().catch(() => [])).filter(id => !known.has(id));
-      if (ids.length >= 2) return { ids: ids.slice(0, 2), via: 'page' };
-      if (fresh.length === 1 && Date.now() > since + 30000) {
-        const extra = [...created, ...ids].find(id => id !== fresh[0]);
-        return { ids: extra ? [fresh[0], extra] : fresh, via: 'feed' };
-      }
+      // New song rows on the page are finished clips too; with a title, only
+      // rows whose known title matches (another app may create songs in the
+      // same account at the same time).
+      const want = normalizeName(title);
+      const rows = (await this.clipIds().catch(() => [])).filter(id => !known.has(id) &&
+        (!want || !this.clips.has(id) || normalizeName(this.clips.get(id).title || '') === want));
+      if (rows.length >= 2) return { ids: rows.slice(0, 2), via: 'page' };
+      if (fresh.length === 1 && Date.now() > since + 45000) return { ids: fresh, via: 'feed' };
       const state = await this.state().catch(() => null);
       const limit = detectLimit(state?.notices, action);
       if (limit) return { ids: [], limit };
@@ -1069,8 +1075,10 @@ class SunoAdapter {
     // Only ids that are clips (seen with clip data): a generate reply also
     // carries ids that are not clips.
     const fresh = this.clipsCreatedSince(since, title).filter(id => !known.has(id));
-    const ids = [...new Set([...fresh, ...this.createdIds.filter(id => !known.has(id) && this.clips.has(id))])];
-    return { ids: ids.slice(0, 2), via: 'timeout' };
+    // Nothing listed yet: the generate reply's ids as a last resort; the wait
+    // that follows re-reads the Library and switches to the listed clips.
+    const ids = fresh.length ? fresh : this.createdIds.filter(id => !known.has(id));
+    return { ids: ids.slice(0, 2), via: fresh.length ? 'feed' : 'timeout' };
   }
 
   async embedded(ids) {
