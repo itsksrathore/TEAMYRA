@@ -34,15 +34,21 @@ const PROBES = {
     const clickable = [...document.querySelectorAll('a,button,[role=button]')].filter(visible);
     const signInControl = clickable.some(el => /^(log in|sign in|sign up|join suno.*)$/i.test(text(el)));
     const signInPage = /^\/(sign-in|sign-up|login)/.test(location.pathname) || /welcome to suno/i.test(document.title);
-    const creditsMatch = (document.body?.innerText || '').match(/(\d[\d,]*)\s+credits?\b/i);
+    const creditsMatch = (document.body?.innerText || '').match(/(\d[\d,.]*\s*[kK]?)\s+credits?\b/i);
+    // Suno signs in with Clerk: a signed-in page holds its __session cookie
+    // and shows no Log in / Sign up control (2026-11-21: the old check wanted
+    // a "<n> credits" text the page no longer shows and kept saying signed out).
+    const sessionCookie = /(?:^|;\s*)__session(?:_[^=]*)?=[^;]{20,}/.test(document.cookie)
+      && !/(?:^|;\s*)__client_uat=0(?:;|$)/.test(document.cookie);
     const notices = [...document.querySelectorAll('[role=alert],[role=status],[role=alertdialog],[role=dialog],[data-sonner-toast],.Toastify__toast,[class*=toast i]')]
       .filter(visible).map(text).filter(Boolean).join('\n').slice(0, 3000);
     const create = clickable.find(el => el.tagName !== 'A' && /^create\b/i.test(text(el)) && text(el).length < 24 && !el.closest('nav,aside'));
     return {
       url: location.href,
       path: location.pathname,
-      signedOut: signInPage || (signInControl && !creditsMatch),
-      credits: creditsMatch ? Number(creditsMatch[1].replace(/,/g, '')) : null,
+      signedOut: signInPage || (signInControl && !creditsMatch && !sessionCookie),
+      signedIn: !signInPage && !signInControl && sessionCookie,
+      credits: creditsMatch ? (value => /k$/i.test(value) ? Math.round(parseFloat(value) * 1000) : Number(value.replace(/[,\s]/g, '')))(creditsMatch[1].trim()) : null,
       createButton: create ? { text: text(create), disabled: create.disabled === true || create.getAttribute('aria-disabled') === 'true' } : null,
       notices,
       title: document.title
@@ -653,6 +659,7 @@ class SunoAdapter {
   async signedIn() {
     const state = await this.state().catch(() => null);
     if (state?.signedOut) return { signedIn: false, credits: null };
+    if (state?.signedIn) return { signedIn: true, credits: state.credits ?? null };
     const session = await this.probe('session').catch(() => ({ ok: false }));
     if (session.ok) return { signedIn: session.signedIn === true || (state?.credits ?? null) !== null, credits: state?.credits ?? null, models: session.models };
     return { signedIn: state ? !state.signedOut && state.credits !== null : null, credits: state?.credits ?? null };

@@ -50,12 +50,17 @@ class SunoAccountRuntime {
   // Stripe, consent); any other cookie may be a sign-in, which the page decides.
   async refreshStatus({ page = false } = {}) {
     let anonymous = false;
+    let clerkSession = false;
     try {
       const cookies = await this.session.cookies.get({ domain: 'suno.com' });
       anonymous = cookies.every(cookie => ANONYMOUS_COOKIE.test(cookie.name));
+      // Suno's sign-in (Clerk): a __session token, and __client_uat not 0.
+      clerkSession = cookies.some(cookie => /^__session(?:_|$)/.test(cookie.name) && String(cookie.value || '').length >= 20)
+        && !cookies.some(cookie => cookie.name === '__client_uat' && String(cookie.value) === '0');
     } catch {}
     if (!page) {
       if (anonymous) { this.setSignedIn(false, 'not signed in'); return this.status; }
+      if (clerkSession && this.status.signedIn !== true) { this.setSignedIn(true, '', this.status.credits); return this.status; }
       if (this.status.pageCheckedAt && Date.now() - this.status.pageCheckedAt < 10 * 60 * 1000) return this.status;
     }
     if (this.consumer.busy) return this.status;
