@@ -798,13 +798,15 @@ class SunoAdapter {
   // that creates anything. Returns what was set.
   async fill(request) {
     const applied = {};
-    applied.mode = await this.chooseMode(request.suno_mode || 'simple');
+    applied.mode = await this.chooseMode(request.suno_mode || 'custom');
     const model = await this.chooseModel(request.suno_model);
     applied.model = model.model;
     applied.models_offered = model.offered;
     this.step = 'fields';
-    const needsMore = request.suno_exclude_styles || request.suno_vocal_gender || request.suno_weirdness !== null && request.suno_weirdness !== undefined ||
-      request.suno_style_influence !== null && request.suno_style_influence !== undefined || Object.keys(request.suno_options || {}).length;
+    const given = key => request[key] !== null && request[key] !== undefined;
+    const needsMore = request.suno_exclude_styles || request.suno_vocal_gender || given('suno_weirdness') || given('suno_style_influence') ||
+      given('suno_duration') || given('suno_max_mode') || given('suno_variety') || given('suno_personalize') ||
+      Object.keys(request.suno_options || {}).length;
     if (needsMore) await this.expandMore();
     let form = await this.form();
     const need = (role, label) => {
@@ -815,7 +817,9 @@ class SunoAdapter {
     // Instrumental first: it can hide the lyrics box.
     const instrumental = findSwitch(form, /instrumental/i);
     if (instrumental) { await this.setSwitch(instrumental, request.instrumental === true); applied.instrumental = request.instrumental === true; }
-    else if (request.instrumental) throw new Error('option_unavailable: the Suno Create page shows no Instrumental switch; it shows: ' + (labelsOf(form).join(', ') || 'nothing'));
+    // v6's Advanced page has no Instrumental switch: empty lyrics make an
+    // instrumental ("Leave this empty for an instrumental").
+    else if (request.instrumental) applied.instrumental = 'empty lyrics';
     form = await this.form();
     if (request.suno_mode === 'custom') {
       if (request.lyrics) { await this.setText(need('lyrics', 'Lyrics'), request.lyrics); applied.lyrics = true; }
@@ -839,7 +843,33 @@ class SunoAdapter {
         ((form.sliders || []).map(item => String(item.label).split(' | ')[0]).join(', ') || 'none'));
       applied[key.replace('suno_', '')] = await this.setSlider(slider, request[key]);
     }
-    for (const [name, value] of Object.entries(request.suno_options || {})) applied[name] = await this.setOption(form, name, value);
+    // More Options (v6): Duration (Auto, or Custom 10-360 s), Max Mode, Variety
+    // (0-4, 1 = Normal), Personalize (My taste).
+    const onOff = async (pattern, name, on) => {
+      const { choice, offered } = findChoice(await this.form(), pattern, on ? 'On' : 'Off');
+      if (!choice) throw new Error('option_unavailable: Suno ' + name + ' is not offered; it shows: ' + (offered.join(', ') || 'no ' + name + ' option'));
+      if (!choice.selected) { await this.probe('click', { idx: choice.idx }); await this.sleep(this.settleMs); }
+      return on;
+    };
+    const exact = async (pattern, name, value) => {
+      const slider = findSlider(await this.form(), pattern);
+      if (!slider) throw new Error('option_unavailable: the Suno Create page has no ' + name + ' slider');
+      const min = Number.isFinite(slider.min) ? slider.min : 0;
+      const max = Number.isFinite(slider.max) ? slider.max : 100;
+      if (value < min || value > max) throw new Error('option_unavailable: Suno ' + name + ' takes ' + min + '-' + max + ', not ' + value);
+      return this.setSlider(slider, max > min ? (value - min) * 100 / (max - min) : 0);
+    };
+    if (given('suno_duration')) {
+      const auto = request.suno_duration === 'auto';
+      const { choice, offered } = findChoice(await this.form(), /duration/i, auto ? 'Auto' : 'Custom');
+      if (!choice) throw new Error('option_unavailable: Suno Duration is not offered; it shows: ' + (offered.join(', ') || 'no Duration option'));
+      if (!choice.selected) { await this.probe('click', { idx: choice.idx }); await this.sleep(this.settleMs); }
+      applied.duration = auto ? 'auto' : await exact(/duration/i, 'Duration', Number(request.suno_duration));
+    }
+    if (given('suno_max_mode')) applied.max_mode = await onOff(/max mode/i, 'Max Mode', request.suno_max_mode === true);
+    if (given('suno_variety')) applied.variety = await exact(/variety/i, 'Variety', Number(request.suno_variety));
+    if (given('suno_personalize')) applied.personalize = await onOff(/personali[sz]e|my taste/i, 'Personalize', request.suno_personalize === true);
+    for (const [name, value] of Object.entries(request.suno_options || {})) applied[name] = await this.setOption(await this.form(), name, value);
     this.step = 'filled';
     return applied;
   }

@@ -49,13 +49,29 @@ class MediaSunoTests(unittest.TestCase):
         self.assertEqual(job["provider_surface"], "suno")
         request = media_engine.load_job(self.td, job["job_id"])["request"]
         self.assertEqual((request["surface"], request["engine"], request["suno_action"]), ("suno", "suno", "generate"))
-        self.assertEqual(request["suno_mode"], "simple")
-        self.assertIsNone(request["lyrics"])
+        self.assertEqual(request["suno_mode"], "custom", "Advanced mode by default (owner, 2026-11-21)")
+        self.assertEqual(request["lyrics"], request["prompt"], "without lyrics the prompt is the lyrics")
+        simple = media_engine.load_job(self.td, media_engine.create_job(self.td, self.suno(suno_mode="simple"))["job_id"])["request"]
+        self.assertEqual(simple["suno_mode"], "simple")
+        self.assertIsNone(simple["lyrics"])
         self.assertIsNone(request["suno_model"], "the page's current model is kept unless one is named")
         self.assertEqual(request["output_count"], 2, "Suno makes two clips per request")
         self.assertEqual(request["format"], "m4a")
         self.assertFalse(request["instrumental"])
         self.assertTrue((self.project / "Generated Assets" / "Music" / "Previews").is_dir())
+
+    def test_v6_more_options(self):
+        job = media_engine.create_job(self.td, self.suno(suno_duration="2:30", suno_max_mode=True, suno_variety="off",
+                                                          suno_personalize=False, suno_mode="advanced"))
+        request = media_engine.load_job(self.td, job["job_id"])["request"]
+        self.assertEqual((request["suno_mode"], request["suno_duration"], request["suno_max_mode"], request["suno_variety"],
+                          request["suno_personalize"]), ("custom", 150, True, 0, False))
+        auto = media_engine.load_job(self.td, media_engine.create_job(self.td, self.suno(suno_duration="auto"))["job_id"])["request"]
+        self.assertEqual(auto["suno_duration"], "auto")
+        inst = media_engine.load_job(self.td, media_engine.create_job(self.td, self.suno(type="instrumental"))["job_id"])["request"]
+        self.assertTrue(inst["instrumental"])
+        self.assertFalse(inst["lyrics"])
+        self.assertTrue(inst["suno_style"], "an instrumental without a style uses the prompt as its style")
 
     def test_custom_request_and_options(self):
         request = media_engine.normalize_generate_request(self.td, self.suno(
@@ -77,7 +93,10 @@ class MediaSunoTests(unittest.TestCase):
     def test_validation_errors(self):
         cases = [
             (self.suno(type="video"), "makes songs"),
-            (self.suno(suno_mode="advanced"), "simple .* or custom"),
+            (self.suno(suno_mode="studio"), "custom/advanced .* or simple"),
+            (self.suno(suno_duration=500), "10-360 seconds"),
+            (self.suno(suno_variety=7), "0-4"),
+            (self.suno(suno_max_mode="maybe"), "true or false"),
             (self.suno(suno_mode="simple", lyrics="la la"), "need suno_mode=custom"),
             (self.suno(instrumental=True, vocals=True), "cannot both"),
             (self.suno(instrumental=True, lyrics="la"), "takes no lyrics"),

@@ -34,13 +34,62 @@ SUNO_VOCAL_GENDERS = {"male", "female"}
 SUNO_DOWNLOAD_FORMATS = {"mp3", "wav"}
 SUNO_SCOPES = {"all", "generate", "download"}
 SUNO_CLIPS_PER_REQUEST = 2
-MAX_LYRICS = 20000
+MAX_LYRICS = 5000  # the v6 Create page's Lyrics limit (2026-11-21)
 MAX_STYLE = 1000
 MAX_TITLE = 120
 MAX_OPTIONS = 12
 _CLIP_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 SUNO_KEYS = ("suno_mode", "suno_style", "suno_title", "suno_model", "suno_vocal_gender", "suno_exclude_styles",
-             "suno_weirdness", "suno_style_influence", "suno_options")
+             "suno_weirdness", "suno_style_influence", "suno_options", "suno_duration", "suno_max_mode",
+             "suno_variety", "suno_personalize")
+# Variety (v6): a 0-4 slider; 1 is the page's "Normal". 0 keeps the style
+# prompt as written (Suno rewrites it less).
+SUNO_VARIETY_NAMES = {"off": 0, "low": 0, "normal": 1, "high": 3, "max": 4}
+
+
+def _duration(request):
+    """Song length: "auto" (Suno decides), or 10-360 seconds (60, "2:30")."""
+    value = request.get("suno_duration")
+    if value in (None, "", "auto", "Auto"):
+        return "auto" if value else None
+    if isinstance(value, str) and re.fullmatch(r"\s*\d{1,2}:\d{2}\s*", value):
+        minutes, seconds = value.strip().split(":")
+        value = int(minutes) * 60 + int(seconds)
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        raise ValueError('suno_duration must be "auto" or a length of 10-360 seconds (e.g. 150 or "2:30")')
+    if not 10 <= seconds <= 360:
+        raise ValueError("suno_duration must be 10-360 seconds (Suno's Duration slider)")
+    return seconds
+
+
+def _variety(request):
+    value = request.get("suno_variety")
+    if value in (None, ""):
+        return None
+    if isinstance(value, str) and value.strip().lower() in SUNO_VARIETY_NAMES:
+        return SUNO_VARIETY_NAMES[value.strip().lower()]
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("suno_variety must be 0-4 or off/normal/high/max")
+    if not 0 <= level <= 4:
+        raise ValueError("suno_variety must be 0-4 (1 is Normal; 0 keeps the style prompt as written)")
+    return level
+
+
+def _flag(request, key):
+    value = request.get(key)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if str(value).strip().lower() in ("on", "true", "yes", "1"):
+        return True
+    if str(value).strip().lower() in ("off", "false", "no", "0"):
+        return False
+    raise ValueError(f"{key} must be true or false")
 PREVIEW_FOLDER = ("Music", "Previews")
 
 
@@ -208,9 +257,11 @@ def normalize_request(root, request, media_type, project, prompt):
     lyrics = _text(request, "lyrics", MAX_LYRICS)
     style = _text(request, "suno_style", MAX_STYLE)
     title = _text(request, "suno_title", MAX_TITLE)
-    mode = str(request.get("suno_mode") or "").strip().lower() or ("custom" if (lyrics or style or title) else "simple")
+    # Advanced (custom) mode unless simple is asked for (owner, 2026-11-21).
+    mode = str(request.get("suno_mode") or "custom").strip().lower()
+    mode = {"advanced": "custom"}.get(mode, mode)
     if mode not in SUNO_MODES:
-        raise ValueError("suno_mode must be simple (song description) or custom (lyrics, style, title)")
+        raise ValueError("suno_mode must be custom/advanced (lyrics, style, title) or simple (song description)")
     instrumental = request.get("instrumental") is True or media_type in {"instrumental", "background_music"}
     if instrumental and request.get("vocals") is True:
         raise ValueError("instrumental and vocals cannot both be true")
@@ -225,6 +276,9 @@ def normalize_request(root, request, media_type, project, prompt):
             lyrics = prompt
         if instrumental and lyrics:
             raise ValueError("an instrumental takes no lyrics; drop lyrics or instrumental")
+        if instrumental and not style:
+            # Advanced mode has no Instrumental switch: empty lyrics and a style.
+            style = prompt[:MAX_STYLE]
         if not style and not lyrics:
             raise ValueError("custom mode needs suno_style (style of music) or lyrics")
     gender = str(request.get("suno_vocal_gender") or "").strip().lower() or None
@@ -258,6 +312,10 @@ def normalize_request(root, request, media_type, project, prompt):
         "suno_exclude_styles": _text(request, "suno_exclude_styles", MAX_STYLE),
         "suno_weirdness": _slider(request, "suno_weirdness"),
         "suno_style_influence": _slider(request, "suno_style_influence"),
+        "suno_duration": _duration(request),
+        "suno_max_mode": _flag(request, "suno_max_mode"),
+        "suno_variety": _variety(request),
+        "suno_personalize": _flag(request, "suno_personalize"),
         "suno_options": _options(request.get("suno_options")),
         "instrumental": instrumental,
         "vocals": not instrumental,
