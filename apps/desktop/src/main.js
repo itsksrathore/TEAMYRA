@@ -102,7 +102,7 @@ if (app.isPackaged && !process.env.TEAMYRA_CORE_EXE) {
 }
 fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
 
-const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary, builtinMediaMetaFile } = require('./provider-registry');
+const { detectProviders, providerById, profileRoot, PROFILES_ROOT, whereBinary, builtinMediaMetaFile, builtinSunoMetaFile } = require('./provider-registry');
 const { callCore } = require('./core-api');
 const { ChatGPTWebProvider } = require('./chatgpt-web-provider');
 const { MuseWebProvider } = require('./muse-web-provider');
@@ -112,6 +112,7 @@ const { GrokWebProvider } = require('./grok-web-provider');
 const { GlmWebProvider } = require('./glm-web-provider');
 const { GeminiWebProvider, geminiProfileIds, readMediaProfile } = require('./gemini-web-provider');
 const { GoogleMediaEngine } = require('./media/google-media-engine');
+const { SunoEngine } = require('./media/suno-engine');
 const {
   ensureTeamyraMcp,
   stopOwnedMcp,
@@ -126,6 +127,8 @@ const chatgptProviders = new Map();
 let activeChatgptProfileId = 'web';
 let mainWindow = null;
 let googleMediaEngine = null;
+// Suno accounts (their own sessions) and Suno song jobs; see docs/SUNO.md.
+let sunoEngine = null;
 let elevenLabsMcp = null;
 let isQuitting = false;
 let mcpBootError = null;
@@ -284,6 +287,24 @@ async function providersCached(force = false) {
             : 'Connect a Google account';
         }
       } catch {}
+      const suno = data.find(item => item.id === 'suno');
+      if (suno && sunoEngine) {
+        try {
+          const statuses = new Map(await Promise.all((suno.profiles || []).map(async profile => [profile.id,
+            await sunoEngine.profileStatus(profile.id).catch(() => ({}))])));
+          suno.profiles = (suno.profiles || []).map(profile => {
+            const status = statuses.get(profile.id) || {};
+            return { ...profile, signedIn: status.signed_in === true, workerReady: status.signed_in === true && status.enabled !== false,
+              busy: status.busy === true, credits: status.credits ?? null, detail: status.detail || '' };
+          });
+          suno.signedIn = suno.profiles.some(profile => profile.signedIn);
+          suno.workerReady = suno.profiles.some(profile => profile.workerReady);
+          suno.activeProfileId = sunoEngine.activeProfileId;
+          suno.status = suno.signedIn
+            ? suno.profiles.filter(profile => profile.signedIn).length + ' Suno account(s) signed in'
+            : 'Open an account and sign in to Suno';
+        } catch {}
+      }
       const elevenLabs = data.find(item => item.id === 'elevenlabs');
       if (elevenLabs && elevenLabsMcp) {
         await elevenLabsMcp.syncStatuses(elevenLabs.profiles.map(profile => profile.id)).catch(() => {});
@@ -611,6 +632,7 @@ function hasActiveDesktopWork() {
   if (currentJobsSafe().some(jobBlocksDesktopSleep)) return true;
   if ([...chatgptProviders.values()].some(provider => provider.busy === true || provider.hasPendingWork?.())) return true;
   if (googleMediaEngine && [...googleMediaEngine.profiles.values()].some(runtime => runtime.visualConsumers?.().some(consumer => consumer.busy === true) || runtime.vidsConsumers?.().some(consumer => consumer.busy === true) || runtime.musicConsumer?.busy === true || runtime.wakingCount > 0)) return true;
+  if (sunoEngine?.busy()) return true;
   // Google Vids work (and the developer Vids tool) keeps the desktop awake.
   if (Date.now() - (globalThis.__teamyraVidsActiveAt || 0) < DESKTOP_IDLE_SECONDS * 1000) return true;
   return false;
@@ -832,6 +854,16 @@ function createWindow(background = false) {
       destroyChatgptProviders();
     }
     try {
+      sunoEngine?.destroy();
+      sunoEngine = new SunoEngine({ window: win, root: ROOT });
+      sunoEngine.onChange = () => { PROVIDER_CACHE = { at: 0, data: null, pending: null }; };
+      sunoEngine.initialize();
+    } catch (error) {
+      startupLog('suno-start-failed', { error: String(error?.stack || error) });
+      try { sunoEngine?.destroy(); } catch {}
+      sunoEngine = null;
+    }
+    try {
       googleMediaEngine?.destroy();
       googleMediaEngine = new GoogleMediaEngine({ window: win });
       googleMediaEngine.initialize();
@@ -849,6 +881,7 @@ function createWindow(background = false) {
     event.preventDefault();
     for (const provider of chatgptProviders.values()) provider.setVisible(false);
     googleMediaEngine?.setVisible(false).catch?.(() => {});
+    try { sunoEngine?.setVisible(false); } catch {}
     win.hide();
     scheduleDesktopIdleExit();
   });
@@ -857,6 +890,8 @@ function createWindow(background = false) {
     destroyChatgptProviders();
     try { googleMediaEngine?.destroy(); } catch {}
     googleMediaEngine = null;
+    try { sunoEngine?.destroy(); } catch {}
+    sunoEngine = null;
     if (mainWindow === win) mainWindow = null;
   });
   return win;
@@ -891,7 +926,24 @@ ipcMain.handle('teamyra:browser-close', async () => {
     try { await provider.close(); } catch {}
   }
   try { googleMediaEngine?.close(); } catch {}
+  try { sunoEngine?.close(); } catch {}
   return { ok: true };
+});
+// Suno accounts in the Agents panel: Open shows the account's own session
+// (the user signs in there); the view covers the main area like Google Media.
+ipcMain.handle('teamyra:suno-open', async (_event, profileId = 'suno') => {
+  if (!sunoEngine) throw new Error('Suno is unavailable');
+  try { googleMediaEngine?.setVisible(false).catch?.(() => {}); } catch {}
+  const result = await sunoEngine.open(String(profileId || 'suno'));
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return result;
+});
+ipcMain.handle('teamyra:suno-visible', (_event, visible) => sunoEngine ? sunoEngine.setVisible(visible === true) : { visible: false });
+ipcMain.handle('teamyra:suno-bounds', (_event, bounds = {}) => sunoEngine ? sunoEngine.setBounds(bounds) : null);
+ipcMain.handle('teamyra:suno-close', () => {
+  const result = sunoEngine ? sunoEngine.close() : { visible: false };
+  PROVIDER_CACHE = { at: 0, data: null, pending: null };
+  return result;
 });
 ipcMain.handle('teamyra:media-status', (_event, profileId) => {
   if (!googleMediaEngine) return callCore('media.connection-status', {});
@@ -1447,7 +1499,8 @@ async function desktopCreateAccount(providerId, requestedName) {
   const mcpProfile = provider.kind === 'mcp' && provider.managed?.mcpProfiles === true;
   const cliProfile = provider.managed?.verified && provider.managed?.env && provider.managed?.loginArgv;
   const modelProfile = provider.managed?.modelProfiles === true;  // OpenCode: one account per model
-  if (!webProfile && !mediaProfile && !mcpProfile && !cliProfile && !modelProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
+  const sunoProfile = provider.kind === 'suno' && provider.managed?.sunoProfiles === true;
+  if (!webProfile && !mediaProfile && !mcpProfile && !cliProfile && !modelProfile && !sunoProfile) return { ok: false, reason: 'profile-isolation-not-verified' };
 
   const name = String(requestedName || '').trim().slice(0, 80) || (provider.name + ' account');
   const profileId = safeProfileSlug(name) + '-' + crypto.randomBytes(2).toString('hex');
@@ -1459,6 +1512,7 @@ async function desktopCreateAccount(providerId, requestedName) {
   PROVIDER_CACHE = { at: 0, data: null, pending: null };
   if (WEB_CHAT_PREFIX[provider.id] !== undefined) await ensureChatgptProvider(WEB_CHAT_PREFIX[provider.id] + profileId);
   if (provider.id === 'google-media' && googleMediaEngine) googleMediaEngine.ensureProfile(profileId);
+  if (sunoProfile && sunoEngine) sunoEngine.ensure(profileId);
   return { ok: true, provider: provider.id, profileId, name, loginReady: true };
 }
 
@@ -1467,6 +1521,11 @@ async function desktopCreateAccount(providerId, requestedName) {
 function profileMetaFile(providerId, profileId) {
   if (providerId === 'google-media' && profileId === 'google') {
     const file = builtinMediaMetaFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    return file;
+  }
+  if (providerId === 'suno' && profileId === 'suno') {
+    const file = builtinSunoMetaFile();
     fs.mkdirSync(path.dirname(file), { recursive: true });
     return file;
   }
@@ -1523,6 +1582,16 @@ async function dispatchDesktopControl(action, payload = {}) {
   if (action === 'provider.list') return providersCached(true);
   if (action === 'account.create') return desktopCreateAccount(payload.provider, payload.name);
   if (action === 'account.update') return desktopUpdateAccount(payload.provider, payload.profile_id, payload.patch || {});
+  if (action.startsWith('suno.') || (action === 'media.wake' && payload.surface === 'suno')) {
+    if (!sunoEngine) throw new Error('Suno is unavailable in TEAMYRA Desktop');
+    const sunoCmd = action === 'media.wake' ? 'wake' : action.slice('suno.'.length);
+    if (sunoCmd === 'wake') return sunoEngine.wake();
+    if (sunoCmd === 'status') return payload.profile_id ? sunoEngine.profileStatus(payload.profile_id) : sunoEngine.status();
+    if (sunoCmd === 'clips') return sunoEngine.clips(payload.profile_id || 'suno', payload.limit);
+    if (sunoCmd === 'open') return sunoEngine.open(payload.profile_id || 'suno');
+    if (sunoCmd === 'close') return sunoEngine.close();
+    throw new Error('Unknown Suno control action: ' + action);
+  }
   if (action === 'vids.debug') {
     if (!googleMediaEngine) throw new Error('Google Media engine is unavailable');
     // Developer tool: re-read on every call so it can change without a restart.
@@ -1926,6 +1995,8 @@ app.on('before-quit', () => {
   desktopControlPoller = null;
   try { googleMediaEngine?.destroy(); } catch {}
   googleMediaEngine = null;
+  try { sunoEngine?.destroy(); } catch {}
+  sunoEngine = null;
   stopOwnedMcp();
 });
 

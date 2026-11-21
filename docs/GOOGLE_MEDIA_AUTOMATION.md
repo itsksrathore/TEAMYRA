@@ -326,6 +326,13 @@ assets, maintenance issues) is shared with Flow.
   1080p with audio; a 6-job batch ran 4 create jobs across 3 accounts, two at
   once in two tabs of one account.
 
+## Suno (not a Google engine)
+
+Songs from Suno use the same queue and tools (`media_generate` / `media_batch`
+with `engine: "suno"`, surface `suno`) but their own Suno accounts and sessions;
+previews are saved from the page's playback stream and `suno_download` makes the
+official download. See [SUNO.md](SUNO.md).
+
 ## Google Gemini (2026-11-21)
 
 Google Gemini (https://gemini.google.com/app) is a third Google Media engine

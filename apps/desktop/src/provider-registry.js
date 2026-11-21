@@ -130,6 +130,18 @@ const PROVIDERS = [
     color: 'violet'
   },
   {
+    // Suno (suno.com) song generation: its own embedded-browser accounts
+    // (persistent sessions); the user signs each in with Open.
+    id: 'suno',
+    name: 'Suno',
+    kind: 'suno',
+    bin: null,
+    nativeHome: null,
+    status: { kind: 'suno' },
+    managed: { verified: true, env: null, sunoProfiles: true },
+    color: 'amber'
+  },
+  {
     id: 'elevenlabs', name: 'ElevenLabs MCP', kind: 'mcp', bin: null,
     nativeHome: null, managed: { verified: true, env: null, mcpProfiles: true }, color: 'blue'
   }
@@ -231,6 +243,11 @@ function builtinMediaMeta() {
   return { ...meta, priority: Number.isFinite(Number(readJsonFile(builtinMediaMetaFile())?.priority)) ? meta.priority : 250 };
 }
 
+// The built-in Suno account's settings (name, enabled), like Google Media's.
+function builtinSunoMetaFile() {
+  return path.join(PROFILES_ROOT, 'suno', 'builtin-suno.json');
+}
+
 function readJsonFile(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
@@ -326,6 +343,24 @@ async function detectProviders() {
           effort: '',
           permissionMode: ''
         }, ...managedProfiles(provider)]
+      };
+    }
+    if (provider.kind === 'suno') {
+      const builtin = profileMetadata(path.dirname(builtinSunoMetaFile()), 'Suno Account 1', builtinSunoMetaFile());
+      return {
+        id: provider.id,
+        name: provider.name,
+        color: provider.color,
+        installed: true,
+        binary: 'Embedded Chromium · isolated Suno sessions',
+        signedIn: false,
+        status: 'Open an account and sign in to Suno',
+        managedProfilesVerified: true,
+        managedProfileEnv: null,
+        profiles: [{
+          id: 'suno', name: builtin.name, kind: 'suno', path: '', signedIn: false, editable: true,
+          enabled: builtin.enabled, priority: builtin.priority, model: '', effort: '', permissionMode: ''
+        }, ...managedProfiles(provider).map(profile => ({ ...profile, kind: 'suno' }))]
       };
     }
     if (provider.managed?.googleMediaAccounts) {
@@ -437,4 +472,4 @@ function profileRoot(providerId) {
   return path.join(PROFILES_ROOT, providerId);
 }
 
-module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot, whereBinary, builtinMediaMetaFile };
+module.exports = { PROVIDERS, PROFILES_ROOT, detectProviders, providerById, profileRoot, whereBinary, builtinMediaMetaFile, builtinSunoMetaFile };

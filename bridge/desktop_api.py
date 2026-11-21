@@ -240,6 +240,23 @@ def handle(action, payload):
         return media_engine.gemini_limit_handoff(ROOT, payload["job_id"], payload.get("profile_id"),
                                                  seconds=payload.get("seconds") or 3600, reason=payload.get("reason"),
                                                  scope=payload.get("scope") or "all")
+    if action == "media.suno-limit":
+        import media_suno
+        return media_suno.limit_handoff(ROOT, payload["job_id"], payload.get("profile_id"),
+                                        seconds=payload.get("seconds") or 3600, reason=payload.get("reason"),
+                                        scope=payload.get("scope"))
+    if action == "media.suno-preview-paths":
+        import media_suno
+        return media_suno.preview_paths(ROOT, payload["job_id"], payload.get("clips") or [])
+    if action == "media.suno-register-previews":
+        import media_suno
+        return media_suno.register_previews(ROOT, payload["job_id"], payload.get("clips") or [])
+    if action == "media.suno-account-status":
+        import media_suno
+        return media_suno.write_account_status(ROOT, payload.get("profile_id"), payload.get("patch") or {})
+    if action == "media.suno-accounts":
+        import media_suno
+        return {"accounts": media_suno.suno_accounts(ROOT)}
     if action == "media.engine-cooldowns":
         return {"cooldowns": media_engine.engine_cooldowns(ROOT, payload.get("engine"))}
     if action == "media.cancel":

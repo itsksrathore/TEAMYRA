@@ -130,6 +130,16 @@ def recovery_plan(job):
     elif category == "vids_tab_lost":
         plan.update(action="requeue", can_recover=False, automatic=False,
                     instruction="Google Vids lost this unfinished clip when TEAMYRA restarted. Queue the same request again with media_generate or media_batch (engine=vids).")
+    elif state == "rate_limited" and category == "rate_limited" and (job.get("request") or {}).get("surface") == "suno":
+        until = (job.get("failure") or {}).get("cooldown_until")
+        download = (job.get("request") or {}).get("suno_action") == "download"
+        plan.update(action="wait", can_recover=False, automatic=True, cooldown_until=until,
+                    instruction=("This Suno account reached its download limit. The download waits until the limit resets "
+                                 "(the clip exists only in this account) and runs then. Poll the same job; do not resubmit."
+                                 if download else
+                                 "A Suno account ran out of credits or hit a limit before this song was made. TEAMYRA rests "
+                                 "that account and another signed-in Suno account takes the job (or this one once it has "
+                                 "rested). Poll the same job; do not resubmit."))
     elif state == "rate_limited" and category == "rate_limited" and (job.get("request") or {}).get("surface") == "gemini":
         until = (job.get("failure") or {}).get("cooldown_until")
         plan.update(action="wait", can_recover=False, automatic=True, cooldown_until=until,
@@ -137,9 +147,10 @@ def recovery_plan(job):
                                 "TEAMYRA rests that account and another signed-in account takes the job (or this one "
                                 "once it has rested). Poll the same job; do not resubmit.")
     elif category == "option_unavailable":
+        engine_name = "Suno" if (job.get("request") or {}).get("surface") == "suno" else "Gemini"
         plan.update(action="revise_request", can_recover=False, automatic=False,
-                    instruction="Gemini does not offer the requested model, mode or tool in this account (the error lists what "
-                                "it offers). Nothing was sent. Queue the request again with an option from that list.")
+                    instruction=engine_name + " does not offer the requested model or option in this account (the error lists "
+                                "what it offers). Nothing was sent. Queue the request again with an option from that list.")
     elif category == "provider_no_result":
         plan.update(action="revise_request", can_recover=submitted, automatic=False,
                     instruction="Flow accepted the generation but no result appeared and a full project search found none; this is usually a silent moderation refusal. Reword the prompt and queue a new job. teamyra.media_recover only waits for the same submission again.")
@@ -306,7 +317,7 @@ def _summarize(job):
         "possible_submission": _possible_submission(job),
         "request": {"surface": request.get("surface"), "max_parallel": request.get("max_parallel"),
                     "project_path": request.get("project_path"), "accounts": request.get("accounts"),
-                    "gemini_tool": request.get("gemini_tool")},
+                    "gemini_tool": request.get("gemini_tool"), "suno_action": request.get("suno_action")},
         "provider_submission": {key: submission.get(key) for key in (
             "submitted_at", "provider_url", "profile_id", "lane", "result_key") if submission.get(key) is not None},
         "resolved_references": [{"asset_id": item.get("asset_id"), "path": item.get("path")}
@@ -583,6 +594,17 @@ def normalize_generate_request(root, request):
     if not isinstance(request, dict):
         raise ValueError("media request must be an object")
     media_type = str(request.get("type") or "").strip().lower()
+    engine = str(request.get("engine") or "flow").strip().lower()
+    import media_suno
+    if media_type == "audio":
+        # "audio" is Suno's word for a song request; other engines name the kind.
+        if not media_suno.is_suno_engine(engine):
+            raise ValueError("type=audio is for engine=suno; use music, song or sound_effect")
+        media_type = "music"
+    if not media_suno.is_suno_engine(engine):
+        for key in media_suno.SUNO_KEYS:
+            if request.get(key) not in (None, "", {}):
+                raise ValueError(f"{key} is only for engine=suno")
     if media_type not in MEDIA_TYPES:
         raise ValueError("type must be image, video, music, background_music, instrumental, song, or sound_effect")
     project = _validate_project(root, request.get("project_path"))
@@ -591,13 +613,14 @@ def normalize_generate_request(root, request):
         raise ValueError("prompt is required")
     if len(prompt) > MAX_PROMPT:
         raise ValueError("prompt is too long")
-    engine = str(request.get("engine") or "flow").strip().lower()
+    if media_suno.is_suno_engine(engine):
+        return media_suno.normalize_request(root, request, media_type, project, prompt)
     if engine in {"vids", "google-vids", "google_vids"}:
         return _normalize_vids_request(root, request, media_type, project, prompt)
     if engine in {"gemini", "google-gemini", "google_gemini"}:
         return _normalize_gemini_request(root, request, media_type, project, prompt)
     if engine not in {"flow", "google-flow", "google_flow"}:
-        raise ValueError("engine must be flow (Google Flow), vids (Google Vids) or gemini (Google Gemini)")
+        raise ValueError("engine must be flow (Google Flow), vids (Google Vids), gemini (Google Gemini) or suno (Suno)")
     for key in ("gemini_model", "gemini_mode", "gemini_tool", "gemini_thinking"):
         if request.get(key):
             raise ValueError(f"{key} is only for engine=gemini")
@@ -903,9 +926,14 @@ def _cooling_scopes(root, engine, profile, now=None):
 def set_engine_cooldown(root, engine, profile_id, seconds, reason=None, scope="all"):
     """Rest one account's engine (or one tool of it) after a usage limit."""
     engine = str(engine or "").strip().lower()
-    if engine not in {"gemini"}:
-        raise ValueError("engine cooldowns exist for gemini only")
-    scope = _gemini_tool(scope) if scope not in (None, "", "all") else "all"
+    if engine not in {"gemini", "suno"}:
+        raise ValueError("engine cooldowns exist for gemini and suno only")
+    if engine == "suno":
+        scope = str(scope or "all").strip().lower()
+        if scope not in {"all", "generate", "download"}:
+            raise ValueError("Suno cooldown scope must be generate, download or all")
+    else:
+        scope = _gemini_tool(scope) if scope not in (None, "", "all") else "all"
     seconds = max(60.0, min(float(seconds or 3600), 7 * 24 * 3600))
     profile = _profile_id(profile_id)
     now = time.time()
@@ -930,15 +958,24 @@ def gemini_limit_handoff(root, job_id, profile_id, *, seconds=3600, reason=None,
     """The account hit a Gemini usage limit on this job: rest that account
     (for this tool, or all of Gemini) and give the job back to the queue so
     another account takes it. Gemini made nothing, so a new send is safe."""
+    return engine_limit_handoff(root, "gemini", job_id, profile_id, seconds=seconds, reason=reason, scope=scope,
+                                label="Gemini usage limit",
+                                note="; the job moves to another account (or waits until this one rests)")
+
+
+def engine_limit_handoff(root, engine, job_id, profile_id, *, seconds=3600, reason=None, scope="all",
+                         label="Usage limit", note="", wait_for_cooldown=False):
+    """Rest one account's engine after a limit and return the unfinished job to
+    the queue. wait_for_cooldown: the job may only run in this account, so it
+    is not retried before the account has rested."""
     with _state_lock(root):
-        entry = set_engine_cooldown(root, "gemini", profile_id, seconds, reason, scope)
+        entry = set_engine_cooldown(root, engine, profile_id, seconds, reason, scope)
         job = load_job(root, job_id)
         if job.get("state") in TERMINAL_STATES:
             return {"job": public_job(job), "cooldown": entry}
         previous = dict(job.get("provider_submission") or {})
         job["state"] = "rate_limited"
-        job["detail"] = ("Gemini usage limit in account " + entry["profile_id"] + ": " + entry["reason"] +
-                         "; the job moves to another account (or waits until this one rests)")[:1000]
+        job["detail"] = (label + " in account " + entry["profile_id"] + ": " + entry["reason"] + note)[:1000]
         job["error"] = job["detail"]
         job["failure"] = {"category": "rate_limited", "at": time.time(), "profile_id": entry["profile_id"],
                           "cooldown_until": entry["until"], "scope": entry["scope"]}
@@ -953,7 +990,7 @@ def gemini_limit_handoff(root, job_id, profile_id, *, seconds=3600, reason=None,
         job["submission_phase"] = "preparing"
         job["claimed_by"] = None
         job["claimed_at"] = None
-        job["retry_after"] = time.time() + 2
+        job["retry_after"] = (entry["until"] + 1) if wait_for_cooldown else time.time() + 2
         job.setdefault("history", []).append(_event("rate_limited", job["detail"]))
         _save_job(root, job)
         return {"job": public_job(job), "cooldown": entry}
@@ -1153,7 +1190,7 @@ def create_job(root, request, *, operation=None, source_asset=None, batch_id=Non
         "resolved_references": refs,
         "parent_asset_ids": parent_ids,
         "provider": None,
-        "provider_surface": {"music": "google-flow-music", "vids": "google-vids", "gemini": "google-gemini"}.get(
+        "provider_surface": {"music": "google-flow-music", "vids": "google-vids", "gemini": "google-gemini", "suno": "suno"}.get(
             normalized["surface"], "google-flow"),
         "provider_submission": {},
         "planned_output": None,
@@ -1222,6 +1259,17 @@ def batch_status(root, batch_id):
                     item["asset"] = {"asset_id": asset["asset_id"], "local_path": asset.get("local_path")}
                 except Exception:
                     pass
+            if job.get("asset_ids"):
+                item["assets"] = []
+                for asset_id in job["asset_ids"]:
+                    try:
+                        asset = get_asset(root, asset_id)
+                        meta = asset.get("metadata") or {}
+                        item["assets"].append({"asset_id": asset_id, "local_path": asset.get("local_path"),
+                                               "clip_id": asset.get("provider_asset_id"), "title": meta.get("title"),
+                                               "duration": meta.get("duration")})
+                    except Exception:
+                        pass
             rows.append(item)
     if not rows:
         raise ValueError(f"no such media batch: {batch_id}")
@@ -1313,6 +1361,7 @@ def public_job(job):
         "parent_asset_ids": list(job.get("parent_asset_ids") or []),
         "reference_note": job.get("request", {}).get("reference_note"),
         "asset_id": job.get("asset_id"),
+        "asset_ids": list(job.get("asset_ids") or []) or None,
         "assisted_by": job.get("assisted_by"),
         "fulfilled_by": job.get("fulfilled_by"),
         "error": job.get("error"),
@@ -1343,6 +1392,13 @@ def job_status(root, job_id=None, limit=30, batch_id=None, compact=False):
                 result["asset"] = get_asset(root, job["asset_id"])
             except Exception:
                 pass
+        if job.get("asset_ids"):
+            result["assets"] = []
+            for asset_id in job["asset_ids"]:
+                try:
+                    result["assets"].append(get_asset(root, asset_id))
+                except Exception:
+                    pass
         result["history"] = list(job.get("history") or [])[-30:]
         submission = dict(job.get("provider_submission") or {})
         if compact:
@@ -1698,8 +1754,8 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
     if main is None:
         main = profile == DEFAULT_PROFILE
     surface = str(surface or "").strip().lower()
-    if surface not in {"visual", "music", "vids", "gemini"}:
-        raise ValueError("surface must be visual, music, vids or gemini")
+    if surface not in {"visual", "music", "vids", "gemini", "suno"}:
+        raise ValueError("surface must be visual, music, vids, gemini or suno")
     try:
         lane = max(0, int(lane or 0))
         lanes = max(1, int(lanes or 1))
@@ -1748,6 +1804,21 @@ def claim_next_job(root, surface, worker, lane=0, lanes=1, refs_key=None, profil
             # The caller chose the accounts this job may run in.
             wanted = (job.get("request") or {}).get("accounts")
             if not submitted and wanted and profile not in wanted:
+                continue
+            if surface == "suno" and not submitted:
+                # A Suno account resting after a credit/download/rate limit takes
+                # no new work of that kind; a download only runs in its own
+                # account (accounts=[owner] above), a generation in any.
+                action = (job.get("request") or {}).get("suno_action") or "generate"
+                if cooling is None:
+                    cooling = _cooling_scopes(root, "suno", profile, now)
+                if "all" in cooling or action in cooling:
+                    continue
+                if job.get("batch_id"):
+                    limit = (job.get("request") or {}).get("max_parallel")
+                    if limit and active.get((job["batch_id"], profile), 0) >= int(limit):
+                        continue
+                candidates.append(job)
                 continue
             if surface == "gemini" and not submitted:
                 # An account resting after a Gemini usage limit takes no new
@@ -1971,6 +2042,8 @@ def register_asset(
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
         registry["assets"][asset_id] = asset
+        import media_suno
+        media_suno.link_final(registry, job, asset_id)
         _save_assets(root, registry)
         job["asset_id"] = asset_id
         job["state"] = "completed"

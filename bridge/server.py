@@ -28,6 +28,7 @@ import media_support
 import chatgpt_images
 import codex_images
 import media_guide
+import media_suno
 import desktop_runtime
 from expected_outputs import validate_expect_files
 
@@ -1447,7 +1448,7 @@ def desktop_control(action, payload=None, timeout_seconds=20):
         except Exception: pass
 
 def media_wake_surface(provider_surface):
-    return {"google-flow-music": "music", "google-vids": "vids", "google-gemini": "gemini"}.get(provider_surface, "visual")
+    return {"google-flow-music": "music", "google-vids": "vids", "google-gemini": "gemini", "suno": "suno"}.get(provider_surface, "visual")
 
 
 def wake_media_surface(surface):
@@ -1501,11 +1502,11 @@ MODEL_PROP = {"type": "string", "description": (
     "own model names. Omit to use the worker's default.")}
 W_ENUM = {"type": "string", "default": "auto",
           "description": "Use auto or any worker id returned by worker_status. Dynamic profiles and desktop-backed workers are discovered at runtime."}
-MEDIA_TYPE_ENUM = ["image", "video", "music", "background_music", "instrumental", "song", "sound_effect", "text"]
+MEDIA_TYPE_ENUM = ["image", "video", "music", "background_music", "instrumental", "song", "sound_effect", "text", "audio"]
 MEDIA_FORMAT_ENUM = ["png", "jpg", "jpeg", "webp", "mp4", "webm", "wav", "mp3", "m4a", "md", "txt"]
 MEDIA_REQUEST_PROPERTIES = {
     "type": {"type": "string", "enum": MEDIA_TYPE_ENUM,
-             "description": "text: engine=gemini only, the answer saved as a Markdown document (gemini_tool none, deep_research, canvas)."},
+             "description": "text: engine=gemini only, the answer saved as a Markdown document (gemini_tool none, deep_research, canvas). audio: engine=suno only, same as music."},
     "prompt": {"type": "string"},
     "project_path": {"type": "string"},
     "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": 1800},
@@ -1536,8 +1537,19 @@ MEDIA_REQUEST_PROPERTIES = {
                      "description": "Bulk throughput: how many Flow generations this job may share with other queued jobs at once. The desktop worker submits jobs back to back, waits on all of them together and adapts downward if Flow reports it is busy. Default 10."},
     "accounts": {"type": "array", "items": {"type": "string"},
                  "description": "Google Media accounts this job may run in (ids or unique names from media_accounts). Omitted: every enabled account (single jobs: the main account). Each must be enabled."},
-    "engine": {"type": "string", "enum": ["flow", "vids", "gemini"], "default": "flow",
-               "description": "flow: Google Flow (default). vids: Google Vids (Omni, same Google accounts, no Flow credits): type=video, 3-10 s clips, 16:9 or 9:16, 720p or native 1080p, up to 3 reference images, vids_mode create/animate/extend/edit. gemini: Google Gemini (gemini.google.com) in the same signed-in Google accounts: gemini_tool image/video saves the generated media; none/deep_research/canvas (type=text) saves the answer as a .md document; references are uploaded files (images, PDF, text)."},
+    "engine": {"type": "string", "enum": ["flow", "vids", "gemini", "suno"], "default": "flow",
+               "description": "flow: Google Flow (default). vids: Google Vids (Omni, same Google accounts, no Flow credits): type=video, 3-10 s clips, 16:9 or 9:16, 720p or native 1080p, up to 3 reference images, vids_mode create/animate/extend/edit. gemini: Google Gemini (gemini.google.com) in the same signed-in Google accounts: gemini_tool image/video saves the generated media; none/deep_research/canvas (type=text) saves the answer as a .md document; references are uploaded files (images, PDF, text). suno: Suno (suno.com) in its own Suno accounts of TEAMYRA Desktop: type music/song/instrumental/background_music/audio; 2 clips per request saved as preview assets from the page's playback audio (no download credit); download the ones you keep with suno_download."},
+    "suno_mode": {"type": "string", "enum": ["simple", "custom"],
+                  "description": "engine=suno: simple (prompt = song description) or custom (lyrics, suno_style, suno_title; without lyrics the prompt is the lyrics). Default: custom when lyrics/suno_style/suno_title is given, else simple."},
+    "suno_style": {"type": "string", "description": "engine=suno custom mode: the Style of Music text (genres, mood, instruments, vocals)."},
+    "suno_title": {"type": "string", "description": "engine=suno custom mode: song title."},
+    "suno_model": {"type": "string",
+                   "description": "engine=suno: a model the Create page lists, by name (e.g. v4.5, v5, v6). Default: the page's current model. A name the account does not offer fails with option_unavailable listing the offered models."},
+    "suno_vocal_gender": {"type": "string", "enum": ["male", "female"], "description": "engine=suno: Vocal Gender (custom mode, when the page shows it)."},
+    "suno_exclude_styles": {"type": "string", "description": "engine=suno: Exclude styles text."},
+    "suno_weirdness": {"type": "number", "minimum": 0, "maximum": 100, "description": "engine=suno: Weirdness slider, percent."},
+    "suno_style_influence": {"type": "number", "minimum": 0, "maximum": 100, "description": "engine=suno: Style Influence slider, percent."},
+    "suno_options": {"type": "object", "description": "engine=suno: any other visible Create-page option by its label, {label: value} (text, number or true/false); missing ones fail with option_unavailable."},
     "gemini_model": {"type": "string", "default": "Auto",
                      "description": "engine=gemini: an entry of Gemini's mode picker, matched case/space-insensitively by its name or description (Auto, 4 Hydrogen / Everyday help, 4 Neon / Deeper analysis, 4 Carbon / Code & complex work; signed-in accounts may offer more). A name the account does not offer fails the job with option_unavailable and the list it offers."},
     "gemini_mode": {"type": "string", "enum": ["chat", "task"], "default": "chat",
@@ -1555,12 +1567,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "agent_account_create", "description": "Create an isolated managed account/profile for a supported TEAMYRA provider. Login remains an explicit user action when the provider requires authentication.",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "gemini-web", "codex", "claude", "antigravity", "opencode"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "gemini-web", "codex", "claude", "antigravity", "opencode", "suno"]},
          "name": {"type": "string"}},
          "required": ["provider"], "additionalProperties": False}},
     {"name": "agent_account_update", "description": "Update a managed agent account/profile name, enabled state, routing priority, model, effort, or Claude permission mode. Google Media accounts: provider google-media (or use media_accounts).",
      "inputSchema": {"type": "object", "properties": {
-         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "gemini-web", "codex", "claude", "antigravity", "opencode", "google-media"]},
+         "provider": {"type": "string", "enum": ["chatgpt-web", "muse-web", "deepseek-web", "grok-web", "qwen-web", "glm-web", "gemini-web", "codex", "claude", "antigravity", "opencode", "google-media", "suno"]},
          "profile_id": {"type": "string"},
          "patch": {"type": "object"}},
          "required": ["provider", "profile_id", "patch"], "additionalProperties": False}},
@@ -1578,10 +1590,10 @@ TOOLS = [
          "confirm": {"type": "boolean", "default": False},
          "file_path": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
-    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings. For two or more generations use media_batch (one call, run in parallel); for Codex/gpt-image stills use codex_image_batch. engine=vids uses Google Vids; engine=gemini uses Google Gemini (gemini_model, gemini_mode, gemini_tool image/video/deep_research/canvas/none; text answers saved as .md assets). See media_guide.",
+    {"name": "media_generate", "description": "Queue a durable media job and auto-wake the required desktop worker. Video: 720p generation then 1080p upscaled download by default. Sound effect: 360p generation, original-size download, audio extraction. Omni image references attach directly as prompt ingredients; exact first/last Frames are unavailable. Returns job id and effective settings. For two or more generations use media_batch (one call, run in parallel); for Codex/gpt-image stills use codex_image_batch. engine=vids uses Google Vids; engine=gemini uses Google Gemini (gemini_model, gemini_mode, gemini_tool image/video/deep_research/canvas/none; text answers saved as .md assets). engine=suno makes songs in the Suno accounts (2 preview clips per request, verify them, then suno_download the keepers). See media_guide.",
      "inputSchema": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
                      "required": ["type", "prompt", "project_path"], "additionalProperties": False}},
-    {"name": "media_batch", "description": "Bulk-generate up to 50 images/videos/sound effects in parallel. Jobs share one batch_id; the desktop worker submits them back to back so Flow generates many at once (e.g. 10-30 videos in minutes rather than one by one), then downloads and verifies each result. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames. Poll media_status with batch_id. For the fastest turnaround set download_quality='source' (720p video / original image, no upscale wait); default video downloads are 1080p upscales. Requests may use engine=vids or engine=gemini (Gemini jobs spread over the signed-in Google accounts; an account at its Gemini usage limit rests and its jobs move to another).",
+    {"name": "media_batch", "description": "Bulk-generate up to 50 images/videos/sound effects in parallel. Jobs share one batch_id; the desktop worker submits them back to back so Flow generates many at once (e.g. 10-30 videos in minutes rather than one by one), then downloads and verifies each result. Same rules as media_generate: video 720p then 1080p upscale; sound effects 360p original then audio extraction; Omni images attach as prompt ingredients, without first/last Frames. Poll media_status with batch_id. For the fastest turnaround set download_quality='source' (720p video / original image, no upscale wait); default video downloads are 1080p upscales. Requests may use engine=vids or engine=gemini (Gemini jobs spread over the signed-in Google accounts; an account at its Gemini usage limit rests and its jobs move to another) or engine=suno (songs spread over the signed-in Suno accounts; accounts are Suno account ids/names then).",
      "inputSchema": {"type": "object", "properties": {
          "requests": {"type": "array", "minItems": 1, "maxItems": 50,
                       "items": {"type": "object", "properties": MEDIA_REQUEST_PROPERTIES,
@@ -1596,6 +1608,19 @@ TOOLS = [
          "action": {"type": "string", "enum": ["list", "enable", "disable"], "default": "list"},
          "accounts": {"type": "array", "items": {"type": "string"}, "description": "Account ids or unique names (for enable/disable); [\"all\"] for every account."},
          "music": {"type": "boolean", "description": "With enable/disable: also switch Flow Music for these accounts."}},
+         "additionalProperties": False}},
+    {"name": "suno_download", "description": "Official download of one Suno clip with Suno's own Download button (MP3 or WAV), in the Suno account that made it: this DOES use that account's download allowance, so call it only for clips whose preview you checked and accepted. Saves to Generated Assets/Music, verifies the audio and registers the final asset linked to its preview (metadata.final_assets on the preview). A clip already downloaded in that format, or a download already queued, is returned instead of downloading again. Returns a media job: poll media_status.",
+     "inputSchema": {"type": "object", "properties": {
+         "asset_id": {"type": "string", "description": "The TEAMYRA preview asset of the clip (from the engine=suno job's asset_ids)."},
+         "clip_id": {"type": "string", "description": "Suno song id (UUID), instead of asset_id; a clip without a TEAMYRA preview also needs project_path and account."},
+         "format": {"type": "string", "enum": ["mp3", "wav"], "default": "mp3"},
+         "project_path": {"type": "string", "description": "Only for a clip_id without a TEAMYRA preview asset."},
+         "account": {"type": "string", "description": "Suno account id or name; only for a clip_id without a preview asset (default the built-in account)."}},
+         "additionalProperties": False}},
+    {"name": "suno_clips", "description": "Recent clips of a Suno account as its Library/Create page lists them (clip id, title, status, duration, model, style), each with the TEAMYRA preview and final assets it has. Reads the page in the account's hidden tab (no generation, no download). Falls back to the clips TEAMYRA knows when the desktop is unavailable.",
+     "inputSchema": {"type": "object", "properties": {
+         "account": {"type": "string", "description": "Suno account id or name (default the built-in account 'suno')."},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
          "additionalProperties": False}},
     {"name": "media_guide", "description": "Read first before generating media or images: which TEAMYRA tool to use (Flow media_batch, Codex codex_image_batch), how to batch, poll and recover, plus live capacity (Flow tabs, Google connection, Codex image accounts).",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -2150,6 +2175,13 @@ def tool_call(name, a):
         return result
     if name == "media_guide":
         return media_guide.guide(ROOT)
+    if name == "suno_download":
+        result = media_suno.create_download_job(ROOT, a)
+        if result.get("job_id") and not result.get("already_queued"):
+            result["runtime"] = wake_media_surface("suno")
+        return result
+    if name == "suno_clips":
+        return suno_clips(a.get("account"), a.get("limit") or 20)
     if name == "media_accounts":
         return media_accounts(a.get("action") or "list", a.get("accounts") or [], a.get("music"))
     if name == "codex_image_batch":
@@ -2188,6 +2220,7 @@ def tool_call(name, a):
                                     "exact_first_frame": False, "exact_last_frame": False,
                                     "first_frame_alias": "Accepted as an image ingredient, without an exact opening-frame guarantee", "last_frame": "Rejected before generation"},
                 "gemini": media_guide.GEMINI_CAPABILITIES,
+                "suno": media_suno.CAPABILITIES,
                 "runtime": "Desktop-dependent requests cold-start the app hidden; active jobs retain the browser, idle views unload after a grace period"}
     if name == "media_status":
         media_support.sweep_tickets(ROOT, media_helper_state)
@@ -2713,6 +2746,22 @@ def heartbeat(token, done, every=60):
         n += 1
         send({"jsonrpc": "2.0", "method": "notifications/progress",
               "params": {"progressToken": token, "progress": n, "message": f"waiting ({n} min)"}})
+
+
+def suno_clips(account=None, limit=20):
+    """Recent clips of one Suno account: live from its page, merged with what TEAMYRA has."""
+    profile = media_suno.resolve_suno_accounts(ROOT, account)[0] if account else media_suno.BUILTIN_PROFILE
+    limit = max(1, min(int(limit or 20), 100))
+    known = media_suno.known_clips(ROOT, profile, limit)
+    try:
+        live = desktop_control("suno.clips", {"profile_id": profile, "limit": limit}, 60)
+    except Exception as exc:
+        return {"account": profile, "live": False, "error": str(exc)[:500], "clips": known,
+                "note": "TEAMYRA Desktop did not list the page; these are the clips TEAMYRA has assets for."}
+    clips = media_suno.merge_clips((live or {}).get("clips"), known)
+    return {"account": profile, "live": True, "signed_in": (live or {}).get("signed_in"), "clips": clips[:limit],
+            "source": (live or {}).get("source"), "known": [item for item in known
+                                                            if item["clip_id"] not in {clip["clip_id"] for clip in clips}][:limit]}
 
 
 def media_accounts(action, names, music=None):

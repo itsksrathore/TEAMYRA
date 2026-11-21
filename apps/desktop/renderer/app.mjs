@@ -132,6 +132,7 @@ function providerMeta(providerId) {
   if (providerId === 'elevenlabs') return { code: 'EL', icon: '', cls: 'chatgpt', label: 'ElevenLabs' };
   if (WEB_CHAT_SITES[providerId]) return WORKER_META[WEB_CHAT_SITES[providerId].meta];
   if (providerId === 'google-media') return WORKER_META.googleMedia;
+  if (providerId === 'suno') return { code: 'SU', icon: '', cls: 'chatgpt', label: 'Suno' };
   return workerMeta(providerId);
 }
 
@@ -180,6 +181,7 @@ function setView(view) {
   }
   if (activeView !== 'agents') {
     window.teamyra.setGoogleMediaVisible(false).catch(() => {});
+    window.teamyra.setSunoVisible(false).catch(() => {});
     setBrowserCloseVisible(false);
   }
 
@@ -484,6 +486,7 @@ function profileRows(provider) {
 function profileActionLabel(provider, profile) {
   if (provider.id === 'elevenlabs') return profile.signedIn ? 'Open' : profile.mcpState === 'connecting' ? 'Connecting…' : 'Connect';
   if (provider.id === 'gemini-web') return 'Open';  // signed in under Google Media, not here
+  if (provider.id === 'suno') return profile.signedIn ? 'Open' : 'Open · sign in';
   if (isWebChat(provider.id) || provider.id === 'google-media') return profile.signedIn ? 'Open' : 'Connect';
   return profile.signedIn ? 'Open' : 'Connect';
 }
@@ -525,7 +528,7 @@ function agentCardHtml(provider) {
         <div class="profile-row">
           <div class="profile-name">
             <strong>${escapeHtml(profile.name || profile.id)}</strong>
-            <span>${(provider.id === 'google-media' || provider.id === 'opencode' || provider.id === 'gemini-web') && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : provider.id === 'gemini-web' ? 'sign in under Google Media' : isWebChat(provider.id) ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
+            <span>${(provider.id === 'google-media' || provider.id === 'opencode' || provider.id === 'gemini-web' || provider.id === 'suno') && profile.enabled === false ? 'off · takes no new work · ' : ''}${provider.id === 'suno' ? (profile.signedIn ? 'ready' + (profile.credits !== null && profile.credits !== undefined ? ' · ' + profile.credits + ' credits' : '') : 'not signed in · Open and sign in to Suno') : provider.id === 'elevenlabs' ? profile.signedIn ? 'MCP connected' : profile.mcpState === 'connecting' ? 'Waiting for browser authorization' : 'Official MCP · OAuth' : profile.signedIn ? 'ready' : provider.id === 'gemini-web' ? 'sign in under Google Media' : isWebChat(provider.id) ? 'embedded session' : provider.id === 'google-media' ? 'Google sign-in' : 'not connected'}</span>
           </div>
           <div class="profile-actions">
             <button class="profile-action" type="button"
@@ -536,6 +539,9 @@ function agentCardHtml(provider) {
             ${provider.id === 'google-media' && profile.signedIn
               ? `<button class="profile-action" type="button" data-google-bulk="${escapeHtml(profile.id)}" title="Generate many images, videos or sound effects at once">Bulk</button>
                  <button class="profile-action" type="button" data-google-music="${escapeHtml(profile.id)}" title="${profile.musicSignedIn ? 'Open Flow Music' : 'Authorize Flow Music with Google'}">${profile.musicSignedIn ? 'Music' : 'Connect Music'}</button>`
+              : ''}
+            ${provider.id === 'suno'
+              ? `<button class="profile-action google-enable ${profile.enabled === false ? '' : 'connected'}" type="button" data-suno-enabled="${escapeHtml(profile.id)}" data-enabled="${profile.enabled === false ? '0' : '1'}" title="${profile.enabled === false ? 'Off: this Suno account takes no new songs.' : 'On: this Suno account takes queued songs when signed in.'}">${profile.enabled === false ? 'Off' : 'On'}</button>`
               : ''}
             ${provider.id === 'google-media'
               ? `<button class="profile-action google-enable ${profile.enabled === false ? '' : 'connected'}" type="button" data-google-enabled="${escapeHtml(profile.id)}" data-enabled="${profile.enabled === false ? '0' : '1'}" title="${profile.enabled === false ? 'Off: this account takes no new Flow work. Turn it on to use it for bulk generation.' : 'On: this account takes Flow work in parallel with the other enabled accounts. Turn it off to stop new work here.'}">${profile.enabled === false ? 'Off' : 'On'}</button>`
@@ -706,6 +712,20 @@ async function refreshAgents(force = false) {
       }
     });
   });
+  $('#agentGrid').querySelectorAll('[data-suno-enabled]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const enable = button.dataset.enabled !== '1';
+      button.disabled = true;
+      try {
+        await window.teamyra.updateAccount('suno', button.dataset.sunoEnabled, { enabled: enable });
+        await refreshAgents(true);
+      } catch (error) {
+        alert('Could not ' + (enable ? 'enable' : 'disable') + ' this Suno account: ' + String(error?.message || error));
+      } finally {
+        if (button.isConnected) button.disabled = false;
+      }
+    });
+  });
   $('#agentGrid').querySelectorAll('[data-google-bulk]').forEach(button => {
     button.addEventListener('click', () => openBulkMedia(button.dataset.googleBulk || 'google').catch(error => alert(String(error?.message || error))));
   });
@@ -761,6 +781,8 @@ async function refreshAgents(force = false) {
         } else if (provider.id === 'elevenlabs') {
           await openElevenLabsMcp({ id: result.profileId, name: result.name }, () => refreshAgents(true), { startLogin: true });
           refreshAgents(true).catch(() => {});
+        } else if (provider.id === 'suno') {
+          await openSunoAccount(result.profileId);
         } else if (provider.id === 'google-media') {
           await window.teamyra.setChatgptVisible(false).catch(() => {});
           prepareGoogleMediaSurface();
@@ -802,6 +824,11 @@ async function openProvider(provider, profile) {
     await openElevenLabsMcp(profile, () => refreshAgents(true), { startLogin: !profile.signedIn && profile.mcpState !== 'connecting' });
     return;
   }
+  if (provider.id === 'suno') {
+    await openSunoAccount(profile.id || 'suno');
+    return;
+  }
+  await window.teamyra.setSunoVisible(false).catch(() => {});
   if (provider.id === 'google-media') {
     await window.teamyra.setChatgptVisible(false).catch(() => {});
     prepareGoogleMediaSurface();
@@ -824,6 +851,15 @@ async function openProvider(provider, profile) {
     login: profile.signedIn !== true,
     label: provider.name + ' · ' + (profile.name || 'Default')
   });
+}
+
+// A Suno account in the main area: its own session, where the user signs in.
+async function openSunoAccount(profileId = 'suno') {
+  await window.teamyra.setChatgptVisible(false).catch(() => {});
+  await window.teamyra.setGoogleMediaVisible(false).catch(() => {});
+  prepareGoogleMediaSurface();
+  await window.teamyra.openSuno(profileId);
+  refreshAgents(true).catch(() => {});
 }
 
 function populateTaskAgents() {
@@ -957,12 +993,14 @@ function syncGoogleMediaBounds() {
   if (activeView !== 'agents') return;
   const rect = $('.main').getBoundingClientRect();
   if (rect.width < 50 || rect.height < 50) return;
-  window.teamyra.setGoogleMediaBounds({
+  const bounds = {
     x: Math.round(rect.left),
     y: Math.round(rect.top),
     width: Math.round(rect.width),
     height: Math.round(rect.height)
-  }).catch(() => {});
+  };
+  window.teamyra.setGoogleMediaBounds(bounds).catch(() => {});
+  window.teamyra.setSunoBounds(bounds).catch(() => {});
 }
 
 function prepareGoogleMediaSurface() {
@@ -994,6 +1032,7 @@ function syncChatgptBounds() {
 
 async function openChatgptDetail(profileId = 'web', { opened = false } = {}) {
   activeChatgptProfileId = profileId || 'web';
+  window.teamyra.setSunoVisible(false).catch(() => {});
   const webSite = webChatSiteForKey(activeChatgptProfileId);
   const site = webSite.name;
   $('#chatgptTitle').textContent = webSite.title;
@@ -1333,6 +1372,7 @@ async function openBulkMedia(profileId = 'google') {
   // Native browser views draw above the page; hide them so the dialog is visible.
   await window.teamyra.setGoogleMediaVisible(false).catch(() => {});
   await window.teamyra.setChatgptVisible(false).catch(() => {});
+  await window.teamyra.setSunoVisible(false).catch(() => {});
   setBrowserCloseVisible(false);
   showBulkError('');
   if (!bulkState.projectPath) {

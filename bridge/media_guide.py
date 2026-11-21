@@ -14,6 +14,7 @@ INSTRUCTIONS = """TEAMYRA media and image generation: use the fast paths.
 - Google accounts: media_accounts lists them and enables/disables them; pass accounts=[ids or names] to media_generate/media_batch to run a job only in the accounts you choose.
 - Google Vids videos (Omni, same Google accounts, no Flow credits, native 1080p): media_generate/media_batch with engine="vids" (vids_mode create/animate/extend/edit, up to 3 reference images, 3-10 s, 16:9 or 9:16).
 - Google Gemini (gemini.google.com, same signed-in Google accounts): media_generate/media_batch with engine="gemini" (gemini_model e.g. Auto/4 Neon, gemini_mode chat/task, gemini_tool image/video/deep_research/canvas/none, uploaded references); images/videos are saved as media assets, answers as .md documents (type=text).
+- Songs from Suno (suno.com, its own Suno accounts in TEAMYRA Desktop): media_generate/media_batch with engine="suno" (type music/song/instrumental; simple prompt or suno_mode custom with lyrics, suno_style, suno_title; suno_model, instrumental...). Each request makes 2 clips, saved as preview assets from the page's own playback stream (no download credit). Listen/verify the previews, then suno_download {asset_id, format mp3|wav} only the songs you keep; suno_clips lists recent clips.
 - Codex/gpt-image stills (character sheets, look frames, photoreal or illustrated images): codex_image_batch with every image of the job in one call (prompt, output file, reference files, size); poll codex_image_status. Do not start a Codex worker job (start_task/run_ai_worker) to draw images: it makes them one at a time, 2-5 min each.
 - Codex image accounts at their usage limit: chatgpt_image_batch (same requests, ChatGPT web accounts in TEAMYRA Desktop, a few minutes per image); poll chatgpt_image_status.
 - Images that build on earlier images: generate the base images first, then a second batch that lists them as references.
@@ -30,6 +31,7 @@ GUIDE = """# Generating media and images through TEAMYRA
 | Video from Google Vids (Omni): text + up to 3 images, animate an image, extend or edit a video | `media_generate` / `media_batch` with `engine: "vids"` | Same Google accounts, no Flow credits, native 1080p, 3-10 s clips, several at once in each Vids tab. |
 | Image, video, Deep Research report, Canvas or plain answer from Google Gemini | `media_generate` / `media_batch` with `engine: "gemini"` | Same signed-in Google accounts; one Gemini chat per job; text answers saved as Markdown assets (`type: "text"`). |
 | Music | `media_generate` with type music | One song at a time. |
+| Songs with vocals/lyrics from Suno | `media_generate` / `media_batch` with `engine: "suno"`, then `suno_download` | 2 clips per request saved as previews (no download credit); download only the ones you accept. |
 
 Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_ai_parallel`) whose task tells Codex to use its image tool: that runs one long agent session that makes images one by one (2-5 min each) and blocks the account for other work.
 
@@ -62,6 +64,15 @@ Never draw images by starting a worker job (`start_task`, `run_ai_worker`, `run_
 - An option the account does not offer fails the job with `option_unavailable` and lists what it offers: queue it again with one of those. Nothing was sent.
 - Usage limits: when Gemini says an account reached its limit, TEAMYRA rests that account's Gemini (for that tool) and the job goes back to the queue (`rate_limited`) for another account. `media_capabilities` and `media_guide` capacity show the resting accounts.
 - Deep Research runs for many minutes (TEAMYRA starts the research plan itself); poll every minute or two. A job submitted before a TEAMYRA restart resumes from its saved Gemini chat URL in the same account.
+
+## Suno (`engine: "suno"`)
+- Accounts: the Suno card in TEAMYRA's Agents panel (built-in account plus `+ Account`); the user signs each in with Open. Only signed-in, turned-on accounts take work; jobs spread over them. Pass `accounts: ["suno", ...]` (Suno account ids or names) to choose.
+- `type`: `music`, `song`, `instrumental`, `background_music` (or `audio`). Simple mode: `prompt` is the song description. Custom mode (`suno_mode: "custom"`, or any of these given): `lyrics`, `suno_style` (style of music), `suno_title`; without `lyrics` the prompt is the lyrics. `instrumental: true` for no vocals.
+- Options by name, as the Create page shows them: `suno_model` (e.g. `v4.5`, `v5`; default the page's current model), `suno_vocal_gender` (`male`/`female`), `suno_exclude_styles`, `suno_weirdness` and `suno_style_influence` (0-100), and `suno_options` `{label: value}` for any other visible option. A name the page does not offer fails `option_unavailable` listing what it offers; nothing was created.
+- Each request makes 2 clips. When they finish, TEAMYRA saves each from the audio the Suno page streams for playback (no Download click, no download credit) into Generated Assets/Music/Previews and registers them as preview assets (`preview: true`; job `asset_ids`). Metadata: clip id, title, duration, bitrate, lyrics, style and model Suno shows, loudness/silence check (`verification`), and a transcript when a local whisper exists.
+- Verify the previews (listen, compare lyrics/style/duration, check `verification.hints`). Then call `suno_download {asset_id, format: "mp3"|"wav"}` only for the clips you keep: it clicks Suno's own Download in the account that made the clip (uses its download allowance), saves to Generated Assets/Music and links the final asset to its preview. A clip already downloaded in that format is returned without a new download.
+- `suno_clips {account?, limit}` lists recent clips of an account (id, title, status, duration) with the TEAMYRA preview/final assets of each.
+- Limits: Suno's out-of-credits, download-limit and rate-limit messages rest that account (`rate_limited`); queued generations move to another Suno account, downloads wait for their own account. Failure categories: `login_required`, `option_unavailable`, `rate_limited`, `selector_failure`, `generation_failure`, `policy_refusal`, `download_failure`.
 
 ## Codex images (`codex_image_batch`)
 - One call per wave: `{"project_path": ..., "requests": [{"prompt": ..., "output": "folder/name.png", "references": ["refs/a.png"], "size": "1536x1024"}]}`.
@@ -123,6 +134,16 @@ def capacity(root):
         result["gemini_cooldowns"] = media_engine.engine_cooldowns(root, "gemini")
     except Exception:
         result["gemini_cooldowns"] = []
+    try:
+        import media_suno
+        suno = media_suno.suno_accounts(root)
+        result["suno_accounts"] = [{key: item.get(key) for key in ("profile_id", "name", "enabled", "signed_in", "credits", "cooldowns")}
+                                   for item in suno]
+        result["suno_accounts_working"] = len([item for item in suno if item["enabled"] and item["signed_in"]
+                                               and not item["cooldowns"]])
+    except Exception as exc:
+        result["suno_accounts"] = []
+        result["suno_error"] = str(exc)[:200]
     try:
         import codex_images
         accounts = codex_images.codex_accounts(root)
