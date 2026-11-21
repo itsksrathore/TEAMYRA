@@ -652,6 +652,10 @@ class SunoAdapter {
       const state = await this.state();
       if (state.signedOut) throw new Error('login_required: this Suno account is not signed in (open it in the Agents panel and sign in)');
       if (wantPath && !state.path.startsWith(wantPath)) return null;
+      // The Create panel draws a few seconds after the page loads: wait for
+      // its Create button (2026-11-21: a job read the form too early and
+      // found no Simple/Advanced tabs).
+      if (state.path.startsWith('/create') && !state.createButton) return null;
       return state;
     }, 'page', 45000, 500);
   }
@@ -798,6 +802,11 @@ class SunoAdapter {
   // that creates anything. Returns what was set.
   async fill(request) {
     const applied = {};
+    this.step = 'form';
+    await this.wait(async () => {
+      const form = await this.form();
+      return modeButtons(form).length || findField(form, 'lyrics') || findField(form, 'style') || findField(form, 'description') ? form : null;
+    }, 'Create form', 20000, 400);
     applied.mode = await this.chooseMode(request.suno_mode || 'custom');
     const model = await this.chooseModel(request.suno_model);
     applied.model = model.model;
