@@ -1102,10 +1102,16 @@ class SunoAdapter {
   }
 
   // The clip's playback audio as the page plays it, without any Download.
-  async captureStream(summary, { playTimeoutMs = 25000 } = {}) {
+  async captureStream(summary, { playTimeoutMs = 8000 } = {}) {
     this.step = 'preview';
     let urls = await this.probe('playbackUrl', { id: summary.clip_id });
     let source = 'page_request';
+    // The page's own player does not list its stream request where it can be
+    // read, so pressing Play cost a 25 s wait per clip before the stream was
+    // built from the clip's media URL anyway: build it at once when the page's
+    // service worker is there (2026-11-21).
+    const built = urls.serviceWorker ? manifestFor(summary) : null;
+    if (!urls.manifest && built) { urls = { ...urls, manifest: built }; source = 'media_url'; }
     if (!urls.manifest) {
       // Start playback (the view is muted) so the page requests its own stream.
       if (await this.probe('clickPlay')) {

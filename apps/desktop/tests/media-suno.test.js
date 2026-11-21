@@ -295,11 +295,14 @@ async function adapterTests() {
   const limited = await new SunoAdapter(broke, { settleMs: 1 }).newClips([OLD_CLIP], { timeoutMs: 200, everyMs: 5 });
   assert.equal(limited.limit.scope, 'generate');
 
-  // Preview: the page's own playback stream after pressing Play; no Download.
+  // Preview: the page's own playback stream, built from the clip's media URL
+  // without pressing Play (no 25 s wait); no Download.
+  page.playing = null;
   const stream = await adapter.captureStream(clipSummary(clipJson(CLIP_A)), { playTimeoutMs: 1000 });
   assert.equal(stream.via, 'stream_segments');
-  assert.equal(stream.manifest_source, 'page_request');
-  assert.match(page.requested[0], /contentId=4eed94d1/);
+  assert.equal(stream.manifest_source, 'media_url');
+  assert.equal(page.playing, null, 'Play was not pressed');
+  assert.match(page.requested.at(-1), /contentId=4eed94d1/);
   // Signed out: the page check says so.
   await assert.rejects(new SunoAdapter(new FakeSunoPage({ signedIn: false }), { settleMs: 1 }).ready(), /login_required/);
 }
