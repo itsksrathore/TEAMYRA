@@ -43,6 +43,10 @@ class SunoAccountRuntime {
         credits: this.status.credits, detail: this.status.detail } }, { timeout: 10000 }).catch(() => {});
       this.engine?.invalidate?.();
     }
+    // Signed in (also at start-up): start the worker so jobs already queued
+    // run; it used to wait for the next new job's wake (2026-11-21: jobs
+    // queued before a restart sat for minutes).
+    if (value === true) { try { this.startWorker(); } catch {} }
   }
 
   // A quick cookie check; the page itself (hidden worker tab) when unsure.
